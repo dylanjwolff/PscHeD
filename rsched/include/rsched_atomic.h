@@ -35,6 +35,7 @@
  */
 
 #include "rsched.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -57,9 +58,15 @@ typedef enum memory_order {
 
 int          rsched_atomic_load_i32 (_Atomic int *ptr);
 void         rsched_atomic_store_i32(_Atomic int *ptr, int val);
+bool         rsched_atomic_compare_exchange_i32(_Atomic int *ptr, int *expected, int desired);
+int          rsched_atomic_fetch_add_i32(_Atomic int *ptr, int val);
+int          rsched_atomic_fetch_xor_i32(_Atomic int *ptr, int val);
 
 unsigned int rsched_atomic_load_u32 (_Atomic unsigned int *ptr);
 void         rsched_atomic_store_u32(_Atomic unsigned int *ptr, unsigned int val);
+bool         rsched_atomic_compare_exchange_u32(_Atomic unsigned int *ptr, unsigned int *expected, unsigned int desired);
+unsigned int rsched_atomic_fetch_add_u32(_Atomic unsigned int *ptr, unsigned int val);
+unsigned int rsched_atomic_fetch_xor_u32(_Atomic unsigned int *ptr, unsigned int val);
 
 /* ptr/val are void * so the _Generic default: arm needs no cast in the macro. */
 void        *rsched_atomic_load_ptr (void *ptr);
@@ -100,6 +107,55 @@ void         rsched_atomic_store_ptr(void *ptr, void *val);
         default:                rsched_atomic_store_ptr((void *)(ptr),          \
                                     (void *)(uintptr_t)(val))                   \
     )
+
+/*
+ * atomic_compare_exchange_{weak,strong}_explicit
+ *
+ * Dispatches to rsched_atomic_compare_exchange_{i32,u32} based on the pointer
+ * type.  The default: arm is intentionally omitted — pointer CAS is not needed
+ * by the current examples and would require a separate ptr variant.
+ *
+ * The success/failure memory-order arguments are accepted but ignored.
+ */
+#define atomic_compare_exchange_weak_explicit(ptr, expected, desired, succ, fail) \
+    _Generic((ptr),                                                                \
+        _Atomic int *:          rsched_atomic_compare_exchange_i32(                \
+                                    (_Atomic int *)(ptr),                          \
+                                    (int *)(expected),                             \
+                                    (int)(intptr_t)(desired)),                     \
+        _Atomic unsigned int *: rsched_atomic_compare_exchange_u32(                \
+                                    (_Atomic unsigned int *)(ptr),                 \
+                                    (unsigned int *)(expected),                    \
+                                    (unsigned int)(uintptr_t)(desired))            \
+    )
+
+#define atomic_compare_exchange_strong_explicit(ptr, expected, desired, succ, fail) \
+    atomic_compare_exchange_weak_explicit(ptr, expected, desired, succ, fail)
+
+#define atomic_compare_exchange_weak(ptr, expected, desired) \
+    atomic_compare_exchange_weak_explicit(ptr, expected, desired, \
+        memory_order_seq_cst, memory_order_seq_cst)
+#define atomic_compare_exchange_strong(ptr, expected, desired) \
+    atomic_compare_exchange_weak(ptr, expected, desired)
+
+#define atomic_fetch_add_explicit(ptr, val, order)                              \
+    _Generic((ptr),                                                             \
+        _Atomic int *:          rsched_atomic_fetch_add_i32((_Atomic int *)(ptr),          \
+                                    (int)(intptr_t)(val)),                      \
+        _Atomic unsigned int *: rsched_atomic_fetch_add_u32((_Atomic unsigned int *)(ptr), \
+                                    (unsigned int)(uintptr_t)(val))             \
+    )
+
+#define atomic_fetch_xor_explicit(ptr, val, order)                              \
+    _Generic((ptr),                                                             \
+        _Atomic int *:          rsched_atomic_fetch_xor_i32((_Atomic int *)(ptr),          \
+                                    (int)(intptr_t)(val)),                      \
+        _Atomic unsigned int *: rsched_atomic_fetch_xor_u32((_Atomic unsigned int *)(ptr), \
+                                    (unsigned int)(uintptr_t)(val))             \
+    )
+
+#define atomic_fetch_add(ptr, val) atomic_fetch_add_explicit((ptr), (val), memory_order_seq_cst)
+#define atomic_fetch_xor(ptr, val) atomic_fetch_xor_explicit((ptr), (val), memory_order_seq_cst)
 
 #define atomic_load(ptr)             atomic_load_explicit((ptr), memory_order_seq_cst)
 #define atomic_store(ptr, desired)   atomic_store_explicit((ptr), (desired), memory_order_seq_cst)

@@ -641,3 +641,71 @@ pub unsafe extern "C" fn rsched_atomic_store_ptr(
     let atomic = &mut *(ptr as *mut AtomicUsize);
     atomic.store(val as usize, Ordering::SeqCst);
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_compare_exchange_i32(
+    ptr: *mut AtomicI32,
+    expected: *mut libc::c_int,
+    desired: libc::c_int,
+) -> bool {
+    rsched_sched_yield();
+    match (*ptr).compare_exchange(*expected, desired, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => true,
+        Err(current) => {
+            *expected = current;
+            false
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_compare_exchange_u32(
+    ptr: *mut AtomicU32,
+    expected: *mut libc::c_uint,
+    desired: libc::c_uint,
+) -> bool {
+    rsched_sched_yield();
+    match (*ptr).compare_exchange(*expected, desired, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => true,
+        Err(current) => {
+            *expected = current;
+            false
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_fetch_add_i32(
+    ptr: *mut AtomicI32,
+    val: libc::c_int,
+) -> libc::c_int {
+    rsched_sched_yield();
+    (*ptr).fetch_add(val, Ordering::SeqCst)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_fetch_add_u32(
+    ptr: *mut AtomicU32,
+    val: libc::c_uint,
+) -> libc::c_uint {
+    rsched_sched_yield();
+    (*ptr).fetch_add(val, Ordering::SeqCst)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_fetch_xor_i32(
+    ptr: *mut AtomicI32,
+    val: libc::c_int,
+) -> libc::c_int {
+    rsched_sched_yield();
+    (*ptr).fetch_xor(val, Ordering::SeqCst)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_fetch_xor_u32(
+    ptr: *mut AtomicU32,
+    val: libc::c_uint,
+) -> libc::c_uint {
+    rsched_sched_yield();
+    (*ptr).fetch_xor(val, Ordering::SeqCst)
+}
