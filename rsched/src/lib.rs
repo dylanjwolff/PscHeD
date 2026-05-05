@@ -158,15 +158,23 @@ impl State {
 
     unsafe fn mutex_unlock(&mut self, key: usize, caller: PthreadT) -> libc::c_int {
         let tid = self.info[&caller].tid;
-        let m = match self.mutexes.get_mut(&key) {
-            Some(m) => m,
-            None => return libc::EINVAL,
-        };
-        if m.owner_tid != tid { return libc::EPERM; }
-        m.recursive_count -= 1;
-        if m.recursive_count > 0 { return 0; }
-        if m.waiters.is_empty() { self.mutexes.remove(&key); return 0; }
-        let waiter = m.waiters.remove(0);
+        // Phase 1: validate and decrement. Produce waiter_count; borrow ends at block exit.
+        let waiter_count = {
+            let m = match self.mutexes.get_mut(&key) {
+                Some(m) => m,
+                None => return libc::EINVAL,
+            };
+            if m.owner_tid != tid { return libc::EPERM; }
+            m.recursive_count -= 1;
+            if m.recursive_count > 0 { return 0; }
+            m.waiters.len()
+        }; // borrow of self.mutexes released here
+        if waiter_count == 0 { self.mutexes.remove(&key); return 0; }
+        // Phase 2: pick a random waiter (needs self.scheduler, no mutexes borrow active).
+        let blocking = vec![false; waiter_count];
+        let idx = self.scheduler.choose(&blocking).expect("rsched: non-empty waiter list");
+        // Phase 3: transfer ownership to chosen waiter.
+        let waiter = self.mutexes.get_mut(&key).unwrap().waiters.remove(idx);
         let waiter_tid = self.info[&waiter].tid;
         self.mutexes.get_mut(&key).unwrap().owner_tid = waiter_tid;
         self.t(waiter).is_blocking = false;
@@ -395,6 +403,10 @@ pub unsafe extern "C" fn rsched_pthread_mutex_trylock(lock: *mut MutexT) -> libc
     let caller = my_pt();
     st().context_switch(caller);
     let tid = st().info[&caller].tid;
+    // Recursive trylock: same owner → EBUSY (zigsched line 1288).
+    if let Some(m) = st().mutexes.get(&key) {
+        if m.owner_tid == tid { gunlock(); return libc::EBUSY; }
+    }
     if st().will_block(key, tid) { gunlock(); return libc::EBUSY; }
     st().mutex_lock(key, caller);
     gunlock();
@@ -429,7 +441,8 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
     let caller = my_pt();
     let tid = st().info[&caller].tid;
     if !st().will_block(lkey, tid) { st().context_switch(caller); }
-    st().mutex_unlock(lkey, caller);
+    let r = st().mutex_unlock(lkey, caller);
+    if r != 0 { gunlock(); return r; }
 
     st().conds.entry(ckey)
         .or_insert(SCond { waiters: Vec::new() })
@@ -451,11 +464,14 @@ pub unsafe extern "C" fn rsched_pthread_cond_signal(cond: *mut CondT) -> libc::c
     glock();
     let caller = my_pt();
     st().context_switch(caller);
-    if let Some(c) = st().conds.get_mut(&key) {
-        if !c.waiters.is_empty() {
-            let w = c.waiters.remove(0);
-            st().t(w).is_blocking = false;
-        }
+    // Use an immutable borrow scoped to a block to get the waiter count,
+    // then release it before calling the scheduler.
+    let n = { st().conds.get(&key).map_or(0, |c| c.waiters.len()) };
+    if n > 0 {
+        let blocking = vec![false; n];
+        let idx = st().scheduler.choose(&blocking).expect("rsched: non-empty cond waiter list");
+        let w = st().conds.get_mut(&key).unwrap().waiters.remove(idx);
+        st().t(w).is_blocking = false;
     }
     gunlock();
     0
