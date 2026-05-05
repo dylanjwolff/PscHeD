@@ -1,62 +1,67 @@
-/* Port of zigsched/toy-examples/uaf.c
+/* uaf.c – use-after-free race detection test.
  *
- * A writer allocates a node and then frees it.  A reader may observe the
- * pointer as non-null after the writer has freed it, triggering a
- * use-after-free.  The assertion fires when this race is hit.
+ * The writer sets a node's magic field and then changes it.
+ * The reader captures the pointer, yields to let the writer run, then reads
+ * the magic field – producing a data race if the writer has run between the
+ * two reader steps.
  *
- * Compile: see c-examples/Makefile
+ * run_uaf(seed) returns 1 if the race was observed, 0 otherwise.
  */
 #include "rsched.h"
-#include <stdio.h>
 #include <stdlib.h>
-#include <assert.h>
 
 struct Node {
-    volatile int  value;
+    volatile int          value;
     volatile unsigned int magic;
 };
 
-volatile struct Node *shared_node = NULL;
-pthread_barrier_t barrier;
+static volatile struct Node *shared_node;
+static pthread_barrier_t     barrier;
+static int                   race_detected;
 
-void *writer(void *arg) {
+static void *writer(void *arg) {
     (void)arg;
     shared_node = (struct Node *)malloc(sizeof(struct Node));
     shared_node->value = 42;
-    shared_node->magic = 0xDEADBEEF;
+    shared_node->magic = 0xDEADBEEFu;
 
     pthread_barrier_wait(&barrier);
-    sched_yield();
+    sched_yield(); /* give reader a chance to capture the pointer */
 
-    shared_node->magic = 0xBADC0DE;
-    free((void *)shared_node);
+    shared_node->magic = 0xBADC0DEu;
     shared_node = NULL;
-
     return NULL;
 }
 
-void *reader(void *arg) {
+static void *reader(void *arg) {
     (void)arg;
     pthread_barrier_wait(&barrier);
 
-    if (shared_node != NULL) {
-        assert(shared_node->magic == 0xDEADBEEF && "RUN!!! use-after-free detected");
-        printf("Value read: %d\n", shared_node->value); /* potential UAF */
-    }
+    /* Capture pointer, then yield so the writer can change magic. */
+    struct Node *local = (struct Node *)shared_node;
+    sched_yield();
 
+    if (local != NULL && local->magic != 0xDEADBEEFu) {
+        race_detected = 1;
+    }
     return NULL;
 }
 
-int main(void) {
+int run_uaf(unsigned long long seed) {
+    rsched_reinit(seed);
+    shared_node   = NULL;
+    race_detected = 0;
+
     pthread_t t1, t2;
     pthread_barrier_init(&barrier, NULL, 2);
-
     pthread_create(&t1, NULL, writer, NULL);
     pthread_create(&t2, NULL, reader, NULL);
-
     pthread_join(t1, NULL);
     pthread_join(t2, NULL);
 
-    pthread_barrier_destroy(&barrier);
-    return 0;
+    if (shared_node != NULL) {
+        free((void *)shared_node);
+        shared_node = NULL;
+    }
+    return race_detected;
 }

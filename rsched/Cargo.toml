@@ -5,7 +5,13 @@ edition = "2024"
 
 [lib]
 name = "rsched"
-crate-type = ["staticlib", "cdylib"]
+# rlib    – used by integration tests (Rust calls into our no_mangle exports)
+# staticlib – C programs that statically link against librsched.a
+# cdylib  – LD_PRELOAD / dynamic-link use
+crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
 libc = "0.2"
+
+[build-dependencies]
+cc = "1"

@@ -247,6 +247,25 @@ fn ensure_init() {
     if !INITED.load(Ordering::SeqCst) { unsafe { rsched_init(); } }
 }
 
+// ── rsched_reinit ─────────────────────────────────────────────────────────
+
+/// Reset the scheduler with a new seed.  Must be called from the main thread
+/// only, after all previously-spawned threads have been joined.
+/// Used by integration tests to run multiple scenarios in one process.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_reinit(seed: u64) {
+    // Drop any existing state (previous test run's threads/mutexes/etc.).
+    STATE = None;
+    STATE = Some(State::new(seed));
+    INITED.store(true, Ordering::SeqCst);
+
+    let self_pt = libc::pthread_self();
+    MY_PT.with(|c| *c.borrow_mut() = self_pt);
+    glock();
+    st().add(Thread::new(self_pt));
+    gunlock();
+}
+
 // ── Thread trampoline ─────────────────────────────────────────────────────
 
 struct StartArg {

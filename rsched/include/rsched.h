@@ -10,6 +10,10 @@ extern "C" {
    call it explicitly before spawning any threads). */
 void rsched_init(void);
 
+/* Re-initialise with a new seed.  Call after all threads from a previous run
+   have been joined.  Used by tests to run multiple independent scenarios. */
+void rsched_reinit(unsigned long long seed);
+
 int  rsched_pthread_create(pthread_t *, const pthread_attr_t *,
                            void *(*)(void *), void *);
 int  rsched_pthread_join(pthread_t, void **);
