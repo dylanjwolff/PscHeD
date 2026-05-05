@@ -3,44 +3,50 @@
  *
  * run_uniform_lock(seed) returns the final value of x.
  */
-#include "rsched.h"
+#ifdef RSCHED
+#  include "rsched_atomic.h"
+#else
+#  include <stdatomic.h>
+#  include <pthread.h>
+#  include <sched.h>
+#endif
 #include <stdlib.h>
 
-static int x;
+static _Atomic int x;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_barrier_t bar;
 
 static void *thread1(void *arg) {
     (void)arg;
     pthread_barrier_wait(&bar);
-    sched_yield(); x = (x << 1);
+    atomic_store_explicit(&x, atomic_load_explicit(&x, memory_order_seq_cst) << 1, memory_order_seq_cst);
     pthread_mutex_lock(&mutex);
-    sched_yield(); x = (x << 1);
-    sched_yield(); x = (x << 1);
+    atomic_store_explicit(&x, atomic_load_explicit(&x, memory_order_seq_cst) << 1, memory_order_seq_cst);
+    atomic_store_explicit(&x, atomic_load_explicit(&x, memory_order_seq_cst) << 1, memory_order_seq_cst);
     pthread_mutex_unlock(&mutex);
-    sched_yield(); x = (x << 1);
-    sched_yield(); x = (x << 1);
-    sched_yield(); x = (x << 1);
+    atomic_store_explicit(&x, atomic_load_explicit(&x, memory_order_seq_cst) << 1, memory_order_seq_cst);
+    atomic_store_explicit(&x, atomic_load_explicit(&x, memory_order_seq_cst) << 1, memory_order_seq_cst);
+    atomic_store_explicit(&x, atomic_load_explicit(&x, memory_order_seq_cst) << 1, memory_order_seq_cst);
     return NULL;
 }
 
 static void *thread2(void *arg) {
     (void)arg;
     pthread_barrier_wait(&bar);
-    sched_yield(); x = (x << 1) + 1;
-    sched_yield(); x = (x << 1) + 1;
-    sched_yield(); x = (x << 1) + 1;
-    sched_yield(); x = (x << 1) + 1;
+    atomic_store_explicit(&x, (atomic_load_explicit(&x, memory_order_seq_cst) << 1) | 1, memory_order_seq_cst);
+    atomic_store_explicit(&x, (atomic_load_explicit(&x, memory_order_seq_cst) << 1) | 1, memory_order_seq_cst);
+    atomic_store_explicit(&x, (atomic_load_explicit(&x, memory_order_seq_cst) << 1) | 1, memory_order_seq_cst);
+    atomic_store_explicit(&x, (atomic_load_explicit(&x, memory_order_seq_cst) << 1) | 1, memory_order_seq_cst);
     pthread_mutex_lock(&mutex);
-    sched_yield(); x = (x << 1) + 1;
-    sched_yield(); x = (x << 1) + 1;
+    atomic_store_explicit(&x, (atomic_load_explicit(&x, memory_order_seq_cst) << 1) | 1, memory_order_seq_cst);
+    atomic_store_explicit(&x, (atomic_load_explicit(&x, memory_order_seq_cst) << 1) | 1, memory_order_seq_cst);
     pthread_mutex_unlock(&mutex);
     return NULL;
 }
 
 int run_uniform_lock(unsigned long long seed) {
     rsched_reinit(seed);
-    x = 0;
+    atomic_store_explicit(&x, 0, memory_order_relaxed);
     mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
 
     pthread_t threads[2];
@@ -50,5 +56,5 @@ int run_uniform_lock(unsigned long long seed) {
     pthread_join(threads[0], NULL);
     pthread_join(threads[1], NULL);
 
-    return x;
+    return atomic_load_explicit(&x, memory_order_relaxed);
 }

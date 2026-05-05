@@ -578,3 +578,66 @@ pub unsafe extern "C" fn rsched_sched_yield() -> libc::c_int {
     gunlock();
     0
 }
+
+// ── rsched atomic operations ──────────────────────────────────────────────
+//
+// Each function is a cooperative scheduling point followed by the atomic
+// operation itself.  The yield fires *before* the memory access, so the
+// scheduler may hand control to another thread between the yield and the
+// actual load/store — exactly the interleaving window we want to explore.
+//
+// These are called by the _Generic dispatch in rsched_atomic.h, which
+// overrides atomic_load_explicit / atomic_store_explicit from <stdatomic.h>.
+//
+// Layout compatibility:
+//   *mut AtomicI32  ↔  _Atomic int *            (both 4 bytes, align 4)
+//   *mut AtomicU32  ↔  _Atomic unsigned int *    (both 4 bytes, align 4)
+// The ptr variants accept void * so _Generic's default: arm can pass any
+// pointer-to-atomic-pointer without requiring a cast in the macro.
+
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize};
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_load_i32(ptr: *const AtomicI32) -> libc::c_int {
+    rsched_sched_yield();
+    (*ptr).load(Ordering::SeqCst)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_store_i32(ptr: *mut AtomicI32, val: libc::c_int) {
+    rsched_sched_yield();
+    (*ptr).store(val, Ordering::SeqCst);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_load_u32(ptr: *const AtomicU32) -> libc::c_uint {
+    rsched_sched_yield();
+    (*ptr).load(Ordering::SeqCst)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_store_u32(ptr: *mut AtomicU32, val: libc::c_uint) {
+    rsched_sched_yield();
+    (*ptr).store(val, Ordering::SeqCst);
+}
+
+/// Load from an atomic pointer variable.
+/// `ptr` is a type-erased pointer to any `T * _Atomic` variable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_load_ptr(ptr: *const libc::c_void) -> *mut libc::c_void {
+    rsched_sched_yield();
+    let atomic = &*(ptr as *const AtomicUsize);
+    atomic.load(Ordering::SeqCst) as *mut libc::c_void
+}
+
+/// Store to an atomic pointer variable.
+/// `ptr` is a type-erased pointer to any `T * _Atomic` variable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_store_ptr(
+    ptr: *mut libc::c_void,
+    val: *mut libc::c_void,
+) {
+    rsched_sched_yield();
+    let atomic = &mut *(ptr as *mut AtomicUsize);
+    atomic.store(val as usize, Ordering::SeqCst);
+}
