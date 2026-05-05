@@ -5,6 +5,8 @@
 //! pthread names so that C programs can link against this library without
 //! any LD_PRELOAD trickery.
 #![allow(unsafe_op_in_unsafe_fn)]
+#![allow(internal_features)]
+#![feature(link_llvm_intrinsics)]
 
 use std::collections::HashMap;
 use std::ptr::addr_of_mut;
@@ -13,6 +15,9 @@ use std::cell::RefCell;
 
 mod scheduler;
 use scheduler::{Scheduler, RandomWalk};
+
+mod event;
+pub use event::{AccessKind, Event, EventKind};
 
 // ── Type aliases ──────────────────────────────────────────────────────────
 
@@ -33,6 +38,9 @@ struct Thread {
     suspend_cond: CondT,
     /// Thread waiting on this one via pthread_join.
     joiner: Option<PthreadT>,
+    /// What this thread is about to do at the next scheduling point.
+    /// Set before each context switch, cleared after the operation completes.
+    pub next_event: Option<Event>,
 }
 
 impl Thread {
@@ -43,6 +51,7 @@ impl Thread {
             is_blocking: false,
             suspend_cond: libc::PTHREAD_COND_INITIALIZER,
             joiner: None,
+            next_event: None,
         }
     }
 }
@@ -134,6 +143,16 @@ impl State {
         self.wake(next, true, caller);
     }
 
+    // ── event helpers ─────────────────────────────────────────────────
+
+    fn set_event(&mut self, pt: PthreadT, ev: Event) {
+        self.t(pt).next_event = Some(ev);
+    }
+
+    fn clear_event(&mut self, pt: PthreadT) {
+        self.t(pt).next_event = None;
+    }
+
     // ── mutex helpers ─────────────────────────────────────────────────
 
     fn will_block(&self, key: usize, tid: libc::pid_t) -> bool {
@@ -193,6 +212,24 @@ thread_local! {
 }
 
 fn my_pt() -> PthreadT { MY_PT.with(|c| *c.borrow()) }
+
+// ── Return-address intrinsic ──────────────────────────────────────────────
+
+unsafe extern "C" {
+    /// LLVM intrinsic: address in the caller that the current function will
+    /// return to.  Level 0 = immediate caller; equivalent to
+    /// `__builtin_return_address(0)` in GCC/Clang or `@returnAddress()` in Zig.
+    #[link_name = "llvm.returnaddress"]
+    fn llvm_returnaddress(level: i32) -> *const u8;
+}
+
+/// Returns the address in the caller's code that triggered the current
+/// scheduling point.  Must be `#[inline(always)]` so the captured address
+/// belongs to the outermost exported function frame, not an rsched helper.
+#[inline(always)]
+fn return_address() -> u64 {
+    unsafe { llvm_returnaddress(0) as u64 }
+}
 
 unsafe fn glock()   { libc::pthread_mutex_lock(addr_of_mut!(GMTX)); }
 unsafe fn gunlock() { libc::pthread_mutex_unlock(addr_of_mut!(GMTX)); }
@@ -323,6 +360,7 @@ pub unsafe extern "C" fn rsched_pthread_create(
 
     glock();
     let caller = my_pt();
+    st().set_event(caller, Event { instr_addr: return_address(), kind: EventKind::ThreadCreate });
     st().context_switch(caller);
 
     let r = libc::pthread_create(thread, attr, trampoline, sa as *mut libc::c_void);
@@ -337,6 +375,7 @@ pub unsafe extern "C" fn rsched_pthread_create(
     st().t(caller).is_blocking = false;
     drop(Box::from_raw(sa));
 
+    st().clear_event(caller);
     gunlock();
     r
 }
@@ -386,9 +425,11 @@ pub unsafe extern "C" fn rsched_pthread_mutex_lock(lock: *mut MutexT) -> libc::c
     let key = lock as usize;
     glock();
     let caller = my_pt();
+    st().set_event(caller, Event { instr_addr: return_address(), kind: EventKind::LockAcq { lock: lock as *const _ } });
     let tid = st().info[&caller].tid;
     if !st().will_block(key, tid) { st().context_switch(caller); }
     st().mutex_lock(key, caller);
+    st().clear_event(caller);
     gunlock();
     0
 }
@@ -401,14 +442,24 @@ pub unsafe extern "C" fn rsched_pthread_mutex_trylock(lock: *mut MutexT) -> libc
     let key = lock as usize;
     glock();
     let caller = my_pt();
+    st().set_event(caller, Event { instr_addr: return_address(), kind: EventKind::LockAcq { lock: lock as *const _ } });
     st().context_switch(caller);
     let tid = st().info[&caller].tid;
     // Recursive trylock: same owner → EBUSY (zigsched line 1288).
     if let Some(m) = st().mutexes.get(&key) {
-        if m.owner_tid == tid { gunlock(); return libc::EBUSY; }
+        if m.owner_tid == tid {
+            st().clear_event(caller);
+            gunlock();
+            return libc::EBUSY;
+        }
     }
-    if st().will_block(key, tid) { gunlock(); return libc::EBUSY; }
+    if st().will_block(key, tid) {
+        st().clear_event(caller);
+        gunlock();
+        return libc::EBUSY;
+    }
     st().mutex_lock(key, caller);
+    st().clear_event(caller);
     gunlock();
     0
 }
@@ -421,8 +472,10 @@ pub unsafe extern "C" fn rsched_pthread_mutex_unlock(lock: *mut MutexT) -> libc:
     let key = lock as usize;
     glock();
     let caller = my_pt();
+    st().set_event(caller, Event { instr_addr: return_address(), kind: EventKind::LockRel { lock: lock as *const _ } });
     st().context_switch(caller);
     let r = st().mutex_unlock(key, caller);
+    st().clear_event(caller);
     gunlock();
     r
 }
@@ -558,7 +611,9 @@ pub unsafe extern "C" fn rsched_sched_yield() -> libc::c_int {
     ensure_init();
     glock();
     let caller = my_pt();
+    st().set_event(caller, Event { instr_addr: return_address(), kind: EventKind::SchedYield });
     st().context_switch(caller);
+    st().clear_event(caller);
     gunlock();
     0
 }
@@ -566,9 +621,9 @@ pub unsafe extern "C" fn rsched_sched_yield() -> libc::c_int {
 // ── rsched atomic operations ──────────────────────────────────────────────
 //
 // Each function is a cooperative scheduling point followed by the atomic
-// operation itself.  The yield fires *before* the memory access, so the
-// scheduler may hand control to another thread between the yield and the
-// actual load/store — exactly the interleaving window we want to explore.
+// operation itself.  The scheduling point fires *before* the memory access,
+// so the scheduler may hand control to another thread between the yield and
+// the actual load/store — exactly the interleaving window we want to explore.
 //
 // These are called by the _Generic dispatch in rsched_atomic.h, which
 // overrides atomic_load_explicit / atomic_store_explicit from <stdatomic.h>.
@@ -581,27 +636,40 @@ pub unsafe extern "C" fn rsched_sched_yield() -> libc::c_int {
 
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize};
 
+/// Internal scheduling point for atomic memory operations.
+/// `instr_addr` must be obtained via `return_address()` at the call site of the
+/// exported atomic function so that it points into user code, not into rsched.
+unsafe fn schedule_memop(instr_addr: u64, mem_addr: *const libc::c_void, size: usize, access: AccessKind) {
+    ensure_init();
+    glock();
+    let caller = my_pt();
+    st().set_event(caller, Event { instr_addr, kind: EventKind::MemOp { mem_addr, size, access } });
+    st().context_switch(caller);
+    st().clear_event(caller);
+    gunlock();
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_atomic_load_i32(ptr: *const AtomicI32) -> libc::c_int {
-    rsched_sched_yield();
+    schedule_memop(return_address(), ptr as *const _, 4, AccessKind::Read);
     (*ptr).load(Ordering::SeqCst)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_atomic_store_i32(ptr: *mut AtomicI32, val: libc::c_int) {
-    rsched_sched_yield();
+    schedule_memop(return_address(), ptr as *const _, 4, AccessKind::Write);
     (*ptr).store(val, Ordering::SeqCst);
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_atomic_load_u32(ptr: *const AtomicU32) -> libc::c_uint {
-    rsched_sched_yield();
+    schedule_memop(return_address(), ptr as *const _, 4, AccessKind::Read);
     (*ptr).load(Ordering::SeqCst)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_atomic_store_u32(ptr: *mut AtomicU32, val: libc::c_uint) {
-    rsched_sched_yield();
+    schedule_memop(return_address(), ptr as *const _, 4, AccessKind::Write);
     (*ptr).store(val, Ordering::SeqCst);
 }
 
@@ -609,7 +677,7 @@ pub unsafe extern "C" fn rsched_atomic_store_u32(ptr: *mut AtomicU32, val: libc:
 /// `ptr` is a type-erased pointer to any `T * _Atomic` variable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_atomic_load_ptr(ptr: *const libc::c_void) -> *mut libc::c_void {
-    rsched_sched_yield();
+    schedule_memop(return_address(), ptr, std::mem::size_of::<usize>(), AccessKind::Read);
     let atomic = &*(ptr as *const AtomicUsize);
     atomic.load(Ordering::SeqCst) as *mut libc::c_void
 }
@@ -621,7 +689,7 @@ pub unsafe extern "C" fn rsched_atomic_store_ptr(
     ptr: *mut libc::c_void,
     val: *mut libc::c_void,
 ) {
-    rsched_sched_yield();
+    schedule_memop(return_address(), ptr, std::mem::size_of::<usize>(), AccessKind::Write);
     let atomic = &mut *(ptr as *mut AtomicUsize);
     atomic.store(val as usize, Ordering::SeqCst);
 }
@@ -632,7 +700,7 @@ pub unsafe extern "C" fn rsched_atomic_compare_exchange_i32(
     expected: *mut libc::c_int,
     desired: libc::c_int,
 ) -> bool {
-    rsched_sched_yield();
+    schedule_memop(return_address(), ptr as *const _, 4, AccessKind::ReadWrite);
     match (*ptr).compare_exchange(*expected, desired, Ordering::SeqCst, Ordering::SeqCst) {
         Ok(_) => true,
         Err(current) => {
@@ -648,7 +716,7 @@ pub unsafe extern "C" fn rsched_atomic_compare_exchange_u32(
     expected: *mut libc::c_uint,
     desired: libc::c_uint,
 ) -> bool {
-    rsched_sched_yield();
+    schedule_memop(return_address(), ptr as *const _, 4, AccessKind::ReadWrite);
     match (*ptr).compare_exchange(*expected, desired, Ordering::SeqCst, Ordering::SeqCst) {
         Ok(_) => true,
         Err(current) => {
@@ -663,7 +731,7 @@ pub unsafe extern "C" fn rsched_atomic_fetch_add_i32(
     ptr: *mut AtomicI32,
     val: libc::c_int,
 ) -> libc::c_int {
-    rsched_sched_yield();
+    schedule_memop(return_address(), ptr as *const _, 4, AccessKind::ReadWrite);
     (*ptr).fetch_add(val, Ordering::SeqCst)
 }
 
@@ -672,7 +740,7 @@ pub unsafe extern "C" fn rsched_atomic_fetch_add_u32(
     ptr: *mut AtomicU32,
     val: libc::c_uint,
 ) -> libc::c_uint {
-    rsched_sched_yield();
+    schedule_memop(return_address(), ptr as *const _, 4, AccessKind::ReadWrite);
     (*ptr).fetch_add(val, Ordering::SeqCst)
 }
 
@@ -681,7 +749,7 @@ pub unsafe extern "C" fn rsched_atomic_fetch_xor_i32(
     ptr: *mut AtomicI32,
     val: libc::c_int,
 ) -> libc::c_int {
-    rsched_sched_yield();
+    schedule_memop(return_address(), ptr as *const _, 4, AccessKind::ReadWrite);
     (*ptr).fetch_xor(val, Ordering::SeqCst)
 }
 
@@ -690,6 +758,6 @@ pub unsafe extern "C" fn rsched_atomic_fetch_xor_u32(
     ptr: *mut AtomicU32,
     val: libc::c_uint,
 ) -> libc::c_uint {
-    rsched_sched_yield();
+    schedule_memop(return_address(), ptr as *const _, 4, AccessKind::ReadWrite);
     (*ptr).fetch_xor(val, Ordering::SeqCst)
 }
