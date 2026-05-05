@@ -11,3 +11,4 @@ crate-type = ["cdylib"]
 [dependencies]
 rsched = { path = ".." }
 libc = "0.2"
+scopeguard = "1"

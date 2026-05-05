@@ -15,6 +15,9 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
+use std::cell::Cell;
+use scopeguard::defer;
+
 use libc::{
     c_int, c_uint, c_void,
     pthread_attr_t, pthread_t,
@@ -54,6 +57,31 @@ unsafe extern "C" {
     fn rsched_sched_yield() -> c_int;
 }
 
+// ── Reentrancy depth tracking ─────────────────────────────────────────────────
+//
+// Each exported function increments CALL_DEPTH on entry and decrements it via
+// defer! on exit.  A depth > 1 on entry means a recursive (re-entrant) call,
+// which indicates a bug — our rsched_* implementations must never call back
+// through the LD_PRELOAD symbols.
+
+thread_local! {
+    static CALL_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+#[inline]
+fn enter() {
+    CALL_DEPTH.with(|d| {
+        let prev = d.get();
+        assert_eq!(prev, 0, "rsched preload: re-entrant pthread call detected (depth {})", prev + 1);
+        d.set(prev + 1);
+    });
+}
+
+#[inline]
+fn exit() {
+    CALL_DEPTH.with(|d| d.set(d.get() - 1));
+}
+
 // ── Thread lifecycle ──────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -63,6 +91,7 @@ pub unsafe extern "C" fn pthread_create(
     start:  unsafe extern "C" fn(*mut c_void) -> *mut c_void,
     arg:    *mut c_void,
 ) -> c_int {
+    enter(); defer!(exit());
     rsched_pthread_create(thread, attr, start, arg)
 }
 
@@ -71,11 +100,14 @@ pub unsafe extern "C" fn pthread_join(
     thread: pthread_t,
     retval: *mut *mut c_void,
 ) -> c_int {
+    enter(); defer!(exit());
     rsched_pthread_join(thread, retval)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_exit(retval: *mut c_void) -> ! {
+    enter();
+    // No defer!(exit()) — diverging function never returns.
     rsched_pthread_exit(retval)
 }
 
@@ -83,16 +115,19 @@ pub unsafe extern "C" fn pthread_exit(retval: *mut c_void) -> ! {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_lock(m: *mut pthread_mutex_t) -> c_int {
+    enter(); defer!(exit());
     rsched_pthread_mutex_lock(m)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_trylock(m: *mut pthread_mutex_t) -> c_int {
+    enter(); defer!(exit());
     rsched_pthread_mutex_trylock(m)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_unlock(m: *mut pthread_mutex_t) -> c_int {
+    enter(); defer!(exit());
     rsched_pthread_mutex_unlock(m)
 }
 
@@ -103,16 +138,19 @@ pub unsafe extern "C" fn pthread_cond_wait(
     cond:  *mut pthread_cond_t,
     mutex: *mut pthread_mutex_t,
 ) -> c_int {
+    enter(); defer!(exit());
     rsched_pthread_cond_wait(cond, mutex)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_signal(cond: *mut pthread_cond_t) -> c_int {
+    enter(); defer!(exit());
     rsched_pthread_cond_signal(cond)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_broadcast(cond: *mut pthread_cond_t) -> c_int {
+    enter(); defer!(exit());
     rsched_pthread_cond_broadcast(cond)
 }
 
@@ -124,6 +162,7 @@ pub unsafe extern "C" fn pthread_barrier_init(
     attr:    *const pthread_barrierattr_t,
     count:   c_uint,
 ) -> c_int {
+    enter(); defer!(exit());
     rsched_pthread_barrier_init(barrier, attr, count)
 }
 
@@ -131,6 +170,7 @@ pub unsafe extern "C" fn pthread_barrier_init(
 pub unsafe extern "C" fn pthread_barrier_wait(
     barrier: *mut pthread_barrier_t,
 ) -> c_int {
+    enter(); defer!(exit());
     rsched_pthread_barrier_wait(barrier)
 }
 
@@ -138,5 +178,6 @@ pub unsafe extern "C" fn pthread_barrier_wait(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sched_yield() -> c_int {
+    enter(); defer!(exit());
     rsched_sched_yield()
 }
