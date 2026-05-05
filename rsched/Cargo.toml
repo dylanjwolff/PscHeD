@@ -1,0 +1,11 @@
+[package]
+name = "rsched"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "rsched"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+libc = "0.2"
