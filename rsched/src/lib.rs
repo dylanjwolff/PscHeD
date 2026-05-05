@@ -11,40 +11,8 @@ use std::ptr::addr_of_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::cell::RefCell;
 
-// ── PRNG (xorshift64) ─────────────────────────────────────────────────────
-
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self { Self(if seed == 0 { 1 } else { seed }) }
-
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-
-    fn usize_less_than(&mut self, n: usize) -> usize {
-        (self.next() as usize) % n
-    }
-}
-
-// ── Random-walk algorithm ─────────────────────────────────────────────────
-
-/// Choose a uniformly random non-blocking thread index.
-/// Returns `None` only when every thread is blocking (deadlock).
-fn rw_choose(rng: &mut Rng, is_blocking: &[bool]) -> Option<usize> {
-    let n = is_blocking.len();
-    if n == 0 { return None; }
-    let start = rng.usize_less_than(n);
-    if !is_blocking[start] { return Some(start); }
-    for i in 1..n {
-        let idx = (start + i) % n;
-        if !is_blocking[idx] { return Some(idx); }
-    }
-    None
-}
+mod scheduler;
+use scheduler::{Scheduler, RandomWalk};
 
 // ── Type aliases ──────────────────────────────────────────────────────────
 
@@ -99,8 +67,8 @@ struct SBarrier {
 // ── Scheduler state ───────────────────────────────────────────────────────
 
 struct State {
-    rng:      Rng,
-    threads:  Vec<PthreadT>,
+    scheduler: Box<dyn Scheduler>,
+    threads:   Vec<PthreadT>,
     info:     HashMap<PthreadT, Thread>,
     mutexes:  HashMap<usize, SMutex>,
     conds:    HashMap<usize, SCond>,
@@ -110,12 +78,12 @@ struct State {
 impl State {
     fn new(seed: u64) -> Self {
         State {
-            rng:      Rng::new(seed),
-            threads:  Vec::new(),
-            info:     HashMap::new(),
-            mutexes:  HashMap::new(),
-            conds:    HashMap::new(),
-            barriers: HashMap::new(),
+            scheduler: Box::new(RandomWalk::new(seed)),
+            threads:   Vec::new(),
+            info:      HashMap::new(),
+            mutexes:   HashMap::new(),
+            conds:     HashMap::new(),
+            barriers:  HashMap::new(),
         }
     }
 
@@ -138,7 +106,7 @@ impl State {
         let blocking: Vec<bool> = self.threads.iter()
             .map(|pt| self.info[pt].is_blocking)
             .collect();
-        rw_choose(&mut self.rng, &blocking)
+        self.scheduler.choose(&blocking)
     }
 
     /// Signal `next`'s suspend_cond and, if `suspend_caller` and next≠caller,
