@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "preload"]
+
 [package]
 name = "rsched"
 version = "0.1.0"
@@ -5,10 +8,10 @@ edition = "2024"
 
 [lib]
 name = "rsched"
-# rlib    – used by integration tests (Rust calls into our no_mangle exports)
+# rlib      – used by integration tests (Rust calls into our no_mangle exports)
 # staticlib – C programs that statically link against librsched.a
-# cdylib  – LD_PRELOAD / dynamic-link use
-crate-type = ["rlib", "staticlib", "cdylib"]
+# (cdylib is in the preload/ sub-crate so pthread names stay out of this lib)
+crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 libc = "0.2"

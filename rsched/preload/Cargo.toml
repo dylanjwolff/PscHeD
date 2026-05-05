@@ -1,0 +1,13 @@
+[package]
+name = "rsched-preload"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "rsched_preload"
+# cdylib only: this is the LD_PRELOAD shim that exports the real pthread names.
+crate-type = ["cdylib"]
+
+[dependencies]
+rsched = { path = ".." }
+libc = "0.2"
