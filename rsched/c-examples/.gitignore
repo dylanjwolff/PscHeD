@@ -1,0 +1,32 @@
+# Built targets (plain)
+uniform
+uniform-lock
+uaf
+
+# TSAN targets
+tsan_race
+tsan_no_race
+tsan_no_race_plain
+
+# ASAN static targets
+asan_uaf
+asan_no_uaf
+
+# ASAN preload targets
+asan_uaf_pre
+asan_no_uaf_pre
+
+# UBSan static targets
+ubsan_ub
+ubsan_no_ub
+
+# UBSan preload targets
+ubsan_ub_pre
+ubsan_no_ub_pre
+
+# Diagnostic binary
+diag_rtld
+diag_rtld_asan
+
+# Scheduler distribution output
+dist.txt

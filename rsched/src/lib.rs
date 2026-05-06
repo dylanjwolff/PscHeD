@@ -10,11 +10,11 @@
 
 use std::collections::HashMap;
 use std::ptr::addr_of_mut;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::cell::RefCell;
 
 mod scheduler;
-use scheduler::{Scheduler, RandomWalk};
+use scheduler::{Scheduler, RandomWalk, LoggingScheduler};
 
 mod event;
 pub use event::{AccessKind, Event, EventKind};
@@ -33,6 +33,12 @@ struct Thread {
     tid: libc::pid_t,
     pthread: PthreadT,
     is_blocking: bool,
+    /// False until the parent's rsched_pthread_create returns and the sanitizer's
+    /// PostCreate (or equivalent) has been called for this thread.  While false,
+    /// context_switch never wakes this thread, preventing it from running
+    /// asan_thread_start / tsan_thread_start before the parent has finished the
+    /// thread-creation handshake.  The main thread is born with startup_done=true.
+    startup_done: bool,
     /// Condition the scheduler uses to suspend/resume this thread.
     /// All suspensions wait on this cond with GMTX held.
     suspend_cond: CondT,
@@ -49,6 +55,7 @@ impl Thread {
             tid: unsafe { libc::syscall(libc::SYS_gettid) as libc::pid_t },
             pthread: pt,
             is_blocking: false,
+            startup_done: false,
             suspend_cond: libc::PTHREAD_COND_INITIALIZER,
             joiner: None,
             next_event: None,
@@ -86,8 +93,14 @@ struct State {
 
 impl State {
     fn new(seed: u64) -> Self {
+        let logging = std::env::var("RSCHED_LOG").map_or(false, |v| v == "1");
+        let scheduler: Box<dyn Scheduler> = if logging {
+            Box::new(LoggingScheduler::new(RandomWalk::new(seed)))
+        } else {
+            Box::new(RandomWalk::new(seed))
+        };
         State {
-            scheduler: Box::new(RandomWalk::new(seed)),
+            scheduler,
             threads:   Vec::new(),
             info:      HashMap::new(),
             mutexes:   HashMap::new(),
@@ -113,7 +126,10 @@ impl State {
 
     fn choose(&mut self) -> Option<usize> {
         let blocking: Vec<bool> = self.threads.iter()
-            .map(|pt| self.info[pt].is_blocking)
+            .map(|pt| {
+                let t = &self.info[pt];
+                t.is_blocking || !t.startup_done
+            })
             .collect();
         self.scheduler.choose(&blocking)
     }
@@ -124,10 +140,10 @@ impl State {
     unsafe fn wake(&mut self, next: PthreadT, suspend_caller: bool, caller: PthreadT) {
         if next != caller {
             let cond_ptr = addr_of_mut!(self.info.get_mut(&next).unwrap().suspend_cond);
-            libc::pthread_cond_signal(cond_ptr);
+            (rpt().cond_signal)(cond_ptr);
             if suspend_caller {
                 let my_cond = addr_of_mut!(self.info.get_mut(&caller).unwrap().suspend_cond);
-                libc::pthread_cond_wait(my_cond, addr_of_mut!(GMTX));
+                (rpt().cond_wait)(my_cond, addr_of_mut!(GMTX));
             }
         }
     }
@@ -141,6 +157,8 @@ impl State {
         };
         let next = self.threads[idx];
         self.wake(next, true, caller);
+        let event = self.info.get(&caller).and_then(|t| t.next_event);
+        self.scheduler.on_event(event.as_ref());
     }
 
     // ── event helpers ─────────────────────────────────────────────────
@@ -231,8 +249,159 @@ fn return_address() -> u64 {
     unsafe { llvm_returnaddress(0) as u64 }
 }
 
-unsafe fn glock()   { libc::pthread_mutex_lock(addr_of_mut!(GMTX)); }
-unsafe fn gunlock() { libc::pthread_mutex_unlock(addr_of_mut!(GMTX)); }
+// ── Direct libpthread bindings (bypass PLT / TSAN / preload shim) ─────────
+//
+// rsched uses its own internal synchronisation primitives (GMTX, suspend_cond,
+// ready_cond) that must NOT go through the preload shim.  When the preload
+// cdylib exports `pthread_mutex_lock`, rsched's ordinary PLT calls route:
+//
+//   rsched glock() → PLT → TSAN interceptor → preload pthread_mutex_lock
+//                                              → rsched_pthread_mutex_lock
+//                                              → glock() …  (deadlock / depth-2 panic)
+//
+// Fetching the real libpthread symbols via dlopen/dlsym breaks the cycle:
+// those raw function-pointer calls bypass both the PLT and the TSAN
+// interceptors, so rsched's internal calls reach libpthread directly.
+
+#[allow(dead_code)] // `create` unused when --features asan routes through PLT
+struct RealPt {
+    mutex_lock:   unsafe extern "C" fn(*mut MutexT) -> libc::c_int,
+    mutex_unlock: unsafe extern "C" fn(*mut MutexT) -> libc::c_int,
+    cond_wait:    unsafe extern "C" fn(*mut CondT, *mut MutexT) -> libc::c_int,
+    cond_signal:  unsafe extern "C" fn(*mut CondT) -> libc::c_int,
+    create: unsafe extern "C" fn(
+        *mut PthreadT, *const AttrT,
+        unsafe extern "C" fn(*mut libc::c_void) -> *mut libc::c_void,
+        *mut libc::c_void,
+    ) -> libc::c_int,
+    join:         unsafe extern "C" fn(PthreadT, *mut *mut libc::c_void) -> libc::c_int,
+    barrier_init: unsafe extern "C" fn(
+        *mut BarrierT,
+        *const libc::pthread_barrierattr_t,
+        libc::c_uint,
+    ) -> libc::c_int,
+}
+
+static REAL_PT: std::sync::OnceLock<RealPt> = std::sync::OnceLock::new();
+
+unsafe fn rpt() -> &'static RealPt {
+    REAL_PT.get_or_init(|| {
+        // Try the traditional stub first; on glibc >= 2.34 the symbols live in
+        // libc.so.6 and libpthread.so.0 is a forwarding stub that still responds
+        // to dlsym correctly.  RTLD_NOLOAD avoids loading anything new.
+        let mut lib = libc::dlopen(
+            b"libpthread.so.0\0".as_ptr() as *const _,
+            libc::RTLD_LAZY | libc::RTLD_NOLOAD,
+        );
+        if lib.is_null() {
+            lib = libc::dlopen(
+                b"libc.so.6\0".as_ptr() as *const _,
+                libc::RTLD_LAZY | libc::RTLD_NOLOAD,
+            );
+        }
+        assert!(!lib.is_null(), "rsched: cannot resolve libpthread/libc via dlopen");
+
+        // Helper: look up one symbol and transmute to the target function-pointer
+        // type.  Function pointers and data pointers share the same width on every
+        // platform rsched targets, so the transmute is sound.
+        unsafe fn sym<T: Copy>(lib: *mut libc::c_void, name: &[u8]) -> T {
+            let p = libc::dlsym(lib, name.as_ptr() as *const _);
+            assert!(!p.is_null(), "rsched: dlsym returned null");
+            std::mem::transmute_copy::<*mut libc::c_void, T>(&p)
+        }
+
+        RealPt {
+            mutex_lock:   sym(lib, b"pthread_mutex_lock\0"),
+            mutex_unlock: sym(lib, b"pthread_mutex_unlock\0"),
+            cond_wait:    sym(lib, b"pthread_cond_wait\0"),
+            cond_signal:  sym(lib, b"pthread_cond_signal\0"),
+            create:       sym(lib, b"pthread_create\0"),
+            join:         sym(lib, b"pthread_join\0"),
+            barrier_init: sym(lib, b"pthread_barrier_init\0"),
+        }
+    })
+}
+
+unsafe fn glock()   { (rpt().mutex_lock)(addr_of_mut!(GMTX)); }
+unsafe fn gunlock() { (rpt().mutex_unlock)(addr_of_mut!(GMTX)); }
+
+// ── Reentrancy depth tracking ─────────────────────────────────────────────────
+//
+// CALL_DEPTH lives here so that both the preload interceptors and rsched's own
+// trampoline/do_thread_exit share a single counter per thread.  The preload
+// cdylib links rsched as an rlib, so all code ends up in the same DSO and
+// shares this TLS slot.
+//
+// trampoline() and do_thread_exit() run in freshly created OS threads where
+// CALL_DEPTH=0.  They call depth_enter() before any rpt() primitive so that
+// any libc-internal PLT re-entry through the preload interceptors is treated as
+// non-outermost and forwarded to RTLD_NEXT instead of looping back into rsched
+// (which would deadlock on GMTX).
+
+thread_local! {
+    static CALL_DEPTH: AtomicU32 = const { AtomicU32::new(0) };
+}
+
+/// Increment depth; return true iff this is the outermost (non-reentrant) call.
+/// Called by the preload interceptors on every entry.
+pub fn rsched_try_enter() -> bool {
+    CALL_DEPTH.with(|d| d.fetch_add(1, Ordering::Acquire) == 0)
+}
+
+/// Decrement depth. Called by the preload interceptors on every exit.
+pub fn rsched_exit() {
+    CALL_DEPTH.with(|d| { d.fetch_sub(1, Ordering::Release); });
+}
+
+/// Increment depth without checking. Used internally by trampoline/do_thread_exit.
+#[inline]
+fn depth_enter() {
+    CALL_DEPTH.with(|d| { d.fetch_add(1, Ordering::Acquire); });
+}
+
+/// Decrement depth. Paired with depth_enter().
+#[inline]
+fn depth_exit() {
+    CALL_DEPTH.with(|d| { d.fetch_sub(1, Ordering::Release); });
+}
+
+// ── TSAN happens-before annotations ──────────────────────────────────────────
+//
+// When the preload cdylib is built with `--features tsan`, these wrappers call
+// into the ThreadSanitizer runtime to record the acquire/release edges that
+// rsched's virtual mutexes create.  Without them TSAN cannot see the
+// happens-before established by rsched's scheduler and would report false
+// positives on correctly-synchronised programs.
+//
+// The symbols are resolved at load time from the TSAN runtime that the
+// -fsanitize=thread program carries; the cdylib itself does not link against
+// libtsan.  Building *without* the feature leaves no-op stubs so the rest of
+// the code is identical in both configurations.
+
+#[cfg(feature = "tsan")]
+unsafe fn tsan_acquire(addr: *mut libc::c_void) {
+    unsafe extern "C" {
+        fn __tsan_acquire(addr: *mut libc::c_void);
+    }
+    __tsan_acquire(addr);
+}
+
+#[cfg(not(feature = "tsan"))]
+#[inline(always)]
+unsafe fn tsan_acquire(_addr: *mut libc::c_void) {}
+
+#[cfg(feature = "tsan")]
+unsafe fn tsan_release(addr: *mut libc::c_void) {
+    unsafe extern "C" {
+        fn __tsan_release(addr: *mut libc::c_void);
+    }
+    __tsan_release(addr);
+}
+
+#[cfg(not(feature = "tsan"))]
+#[inline(always)]
+unsafe fn tsan_release(_addr: *mut libc::c_void) {}
+
 unsafe fn st()      -> &'static mut State {
     (*addr_of_mut!(STATE)).as_mut().expect("rsched not initialised")
 }
@@ -252,7 +421,9 @@ pub unsafe extern "C" fn rsched_init() {
     let self_pt = libc::pthread_self();
     MY_PT.with(|c| *c.borrow_mut() = self_pt);
     glock();
-    st().add(Thread::new(self_pt));
+    let mut t = Thread::new(self_pt);
+    t.startup_done = true;  // main thread needs no sanitizer handshake
+    st().add(t);
     gunlock();
 }
 
@@ -275,7 +446,9 @@ pub unsafe extern "C" fn rsched_reinit(seed: u64) {
     let self_pt = libc::pthread_self();
     MY_PT.with(|c| *c.borrow_mut() = self_pt);
     glock();
-    st().add(Thread::new(self_pt));
+    let mut t = Thread::new(self_pt);
+    t.startup_done = true;
+    st().add(t);
     gunlock();
 }
 
@@ -292,6 +465,9 @@ unsafe impl Send for StartArg {}
 
 /// Shared cleanup logic for thread exit.  Must be called with GMTX *not* held.
 unsafe fn do_thread_exit(caller: PthreadT) {
+    // Raise CALL_DEPTH before acquiring GMTX so that any libc-internal PLT
+    // re-entry through our preload interceptors is treated as non-outermost.
+    depth_enter();
     glock();
     let joiner_opt = st().info.get(&caller).and_then(|t| t.joiner);
     if let Some(joiner) = joiner_opt {
@@ -302,10 +478,11 @@ unsafe fn do_thread_exit(caller: PthreadT) {
         if let Some(idx) = st().choose() {
             let next = st().threads[idx];
             let cond_ptr = addr_of_mut!(st().t(next).suspend_cond);
-            libc::pthread_cond_signal(cond_ptr);
+            (rpt().cond_signal)(cond_ptr);
         }
     }
     gunlock();
+    depth_exit();
 }
 
 // Safe fn required because libc::pthread_create takes a safe fn pointer.
@@ -318,6 +495,13 @@ extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void {
         let self_pt = libc::pthread_self();
         MY_PT.with(|c| *c.borrow_mut() = self_pt);
 
+        // Raise CALL_DEPTH before calling any rpt() primitive so that any
+        // libc-internal PLT re-entry (e.g. cond_wait releasing GMTX via
+        // pthread_mutex_unlock through our preload's interceptor) is seen as
+        // non-outermost and forwarded to RTLD_NEXT instead of routing back
+        // into rsched (which would try to re-acquire GMTX → deadlock).
+        depth_enter();
+
         // Acquire GMTX (creator released it via pthread_cond_wait below).
         glock();
         st().add(Thread::new(self_pt));
@@ -325,13 +509,17 @@ extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void {
         // Signal creator that we are registered; it will re-acquire GMTX
         // after we release it via our own cond_wait.
         sa.ready = true;
-        libc::pthread_cond_signal(addr_of_mut!(sa.ready_cond));
+        (rpt().cond_signal)(addr_of_mut!(sa.ready_cond));
 
         // Suspend until the scheduler picks us (releases GMTX atomically).
         let cond_ptr = addr_of_mut!(st().t(self_pt).suspend_cond);
-        libc::pthread_cond_wait(cond_ptr, addr_of_mut!(GMTX));
+        (rpt().cond_wait)(cond_ptr, addr_of_mut!(GMTX));
         gunlock();
 
+        depth_exit();
+
+        // Run the user's thread function with CALL_DEPTH back to 0 so that
+        // user calls to pthread_* are correctly intercepted by the preload.
         let retval = routine(arg);
         // Scheduler cleanup then return naturally from the thread routine.
         // We intentionally do NOT call libc::pthread_exit here: doing so from
@@ -360,22 +548,51 @@ pub unsafe extern "C" fn rsched_pthread_create(
 
     glock();
     let caller = my_pt();
-    st().set_event(caller, Event { instr_addr: return_address(), kind: EventKind::ThreadCreate });
-    st().context_switch(caller);
 
+    // Create the OS thread immediately — no pre-creation context_switch.
+    //
+    // A pre-creation switch can hand execution to a thread whose sanitizer
+    // thread-start handshake (ASAN's GetArgs ↔ PostCreate, or TSAN's equivalent)
+    // has not completed yet: PostCreate is called by the *parent* only after our
+    // pthread_create returns, but a pre-creation switch freezes the parent
+    // mid-call.  The ThreadCreate scheduling point is preserved below, after the
+    // new thread has registered, so the scheduler still sees the event.
+    #[cfg(feature = "asan")]
     let r = libc::pthread_create(thread, attr, trampoline, sa as *mut libc::c_void);
+    #[cfg(not(feature = "asan"))]
+    let r = (rpt().create)(thread, attr, trampoline, sa as *mut libc::c_void);
 
-    // Mark ourselves blocking while waiting for the new thread to register.
-    // This prevents the scheduler from choosing us during that window.
+    // If thread creation failed, clean up and return immediately.
+    if r != 0 {
+        drop(Box::from_raw(sa));
+        gunlock();
+        return r;
+    }
+
+    // Wait for the new thread to register itself.  is_blocking prevents the
+    // scheduler from choosing the caller during this window.
     st().t(caller).is_blocking = true;
-    // pthread_cond_wait atomically releases GMTX so the new thread can glock().
     while !(*sa).ready {
-        libc::pthread_cond_wait(addr_of_mut!((*sa).ready_cond), addr_of_mut!(GMTX));
+        (rpt().cond_wait)(addr_of_mut!((*sa).ready_cond), addr_of_mut!(GMTX));
     }
     st().t(caller).is_blocking = false;
     drop(Box::from_raw(sa));
 
+    // ThreadCreate scheduling point: now that the new thread is registered,
+    // yield so the scheduler can explore interleavings from this point forward.
+    // The new thread is excluded from scheduling (startup_done=false) so the
+    // scheduler can only pick already-running threads whose sanitizer handshake
+    // (ASAN PostCreate / TSAN equivalent) is already complete.
+    st().set_event(caller, Event { instr_addr: return_address(), kind: EventKind::ThreadCreate });
+    st().context_switch(caller);
     st().clear_event(caller);
+
+    // Mark the new thread schedulable.  PostCreate will be called by our caller
+    // (ASAN's __interceptor_pthread_create) after we return.  Between here and
+    // that PostCreate, no glock is held so no context_switch can fire and wake
+    // the new thread before the semaphore is posted.
+    st().t(*thread).startup_done = true;
+
     gunlock();
     r
 }
@@ -400,7 +617,7 @@ pub unsafe extern "C" fn rsched_pthread_join(
     }
 
     gunlock();
-    libc::pthread_join(thread, retval)
+    (rpt().join)(thread, retval)
 }
 
 // ── rsched_pthread_exit ───────────────────────────────────────────────────
@@ -429,6 +646,10 @@ pub unsafe extern "C" fn rsched_pthread_mutex_lock(lock: *mut MutexT) -> libc::c
     let tid = st().info[&caller].tid;
     if !st().will_block(key, tid) { st().context_switch(caller); }
     st().mutex_lock(key, caller);
+    // Inform TSAN that this thread has logically acquired the user mutex.
+    // Called while GMTX is still held so the annotation is ordered relative
+    // to the paired tsan_release in rsched_pthread_mutex_unlock.
+    tsan_acquire(lock as *mut libc::c_void);
     st().clear_event(caller);
     gunlock();
     0
@@ -474,6 +695,9 @@ pub unsafe extern "C" fn rsched_pthread_mutex_unlock(lock: *mut MutexT) -> libc:
     let caller = my_pt();
     st().set_event(caller, Event { instr_addr: return_address(), kind: EventKind::LockRel { lock: lock as *const _ } });
     st().context_switch(caller);
+    // Inform TSAN that this thread is releasing the user mutex before we
+    // transfer virtual ownership to a waiter.
+    tsan_release(lock as *mut libc::c_void);
     let r = st().mutex_unlock(key, caller);
     st().clear_event(caller);
     gunlock();
@@ -559,7 +783,7 @@ pub unsafe extern "C" fn rsched_pthread_barrier_init(
     glock();
     let caller = my_pt();
     st().context_switch(caller);
-    let r = libc::pthread_barrier_init(barrier, attr, count);
+    let r = (rpt().barrier_init)(barrier, attr, count);
     if r == 0 {
         st().barriers.insert(key, SBarrier { count, waiters: Vec::new() });
     }
@@ -634,7 +858,7 @@ pub unsafe extern "C" fn rsched_sched_yield() -> libc::c_int {
 // The ptr variants accept void * so _Generic's default: arm can pass any
 // pointer-to-atomic-pointer without requiring a cast in the macro.
 
-use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize};
+use std::sync::atomic::{AtomicI32, AtomicUsize};
 
 /// Internal scheduling point for atomic memory operations.
 /// `instr_addr` must be obtained via `return_address()` at the call site of the
