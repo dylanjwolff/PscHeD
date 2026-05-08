@@ -2,6 +2,7 @@ LIB_DIR  := ../target/debug
 LIB      := $(LIB_DIR)/librsched.a
 PRELOAD  := $(LIB_DIR)/librsched_preload.so
 INC      := ../include
+SAN_TIMEOUT ?= timeout 30
 
 # uniform.c / uniform-lock.c / uaf.c have no main: they are compiled by
 # build.rs into libcexamples.a for the Rust integration tests.  They do not
@@ -75,11 +76,18 @@ $(TSAN_TARGETS): %: %.c $(PRELOAD)
 	$(TSAN_CC) $(TSAN_CFLAGS) -o $@ $< $(TSAN_LDFLAGS)
 
 # Verify: no-race program exits cleanly; racy program triggers TSAN.
+# setarch -R disables ASLR per-process: kernel 6.x places DSOs in address
+# ranges that TSAN has reserved for its shadow memory, causing "unexpected
+# memory mapping" at startup without the flag.
 check-tsan: tsan
 	@echo "=== tsan_no_race: expect clean exit ==="
-	./tsan_no_race
+	setarch x86_64 -R $(SAN_TIMEOUT) ./tsan_no_race
 	@echo "=== tsan_race: expect data race report ==="
-	! TSAN_OPTIONS="halt_on_error=1" ./tsan_race
+	@set +e; \
+	setarch x86_64 -R env TSAN_OPTIONS="halt_on_error=1" $(SAN_TIMEOUT) ./tsan_race; \
+	status=$$?; \
+	if [ $$status -eq 124 ]; then echo "tsan_race timed out"; exit 1; fi; \
+	if [ $$status -eq 0 ]; then echo "tsan_race unexpectedly exited cleanly"; exit 1; fi
 	@echo "=== TSAN checks passed ==="
 
 asan: asan-lib $(ASAN_TARGETS)
@@ -97,9 +105,13 @@ $(ASAN_TARGETS): %: %.c $(LIB)
 # dereferences; most other seeds also trigger the UAF.
 check-asan: asan
 	@echo "=== asan_no_uaf: expect clean exit ==="
-	./asan_no_uaf
+	$(SAN_TIMEOUT) ./asan_no_uaf
 	@echo "=== asan_uaf: expect heap-use-after-free report ==="
-	! ASAN_OPTIONS="halt_on_error=1" RANDOM_SEED=1 ./asan_uaf
+	@set +e; \
+	env ASAN_OPTIONS="halt_on_error=1" RANDOM_SEED=1 $(SAN_TIMEOUT) ./asan_uaf; \
+	status=$$?; \
+	if [ $$status -eq 124 ]; then echo "asan_uaf timed out"; exit 1; fi; \
+	if [ $$status -eq 0 ]; then echo "asan_uaf unexpectedly exited cleanly"; exit 1; fi
 	@echo "=== ASAN checks passed ==="
 
 asan-pre: asan-pre-lib $(ASAN_PRE_TARGETS)
@@ -113,9 +125,13 @@ $(ASAN_PRE_TARGETS): %_pre: %.c $(PRELOAD)
 
 check-asan-pre: asan-pre
 	@echo "=== asan_no_uaf_pre: expect clean exit ==="
-	./asan_no_uaf_pre
+	$(SAN_TIMEOUT) ./asan_no_uaf_pre
 	@echo "=== asan_uaf_pre: expect heap-use-after-free report ==="
-	! ASAN_OPTIONS="halt_on_error=1" RANDOM_SEED=1 ./asan_uaf_pre
+	@set +e; \
+	env ASAN_OPTIONS="halt_on_error=1" RANDOM_SEED=1 $(SAN_TIMEOUT) ./asan_uaf_pre; \
+	status=$$?; \
+	if [ $$status -eq 124 ]; then echo "asan_uaf_pre timed out"; exit 1; fi; \
+	if [ $$status -eq 0 ]; then echo "asan_uaf_pre unexpectedly exited cleanly"; exit 1; fi
 	@echo "=== ASAN preload checks passed ==="
 
 ubsan: ubsan-lib $(UBSAN_TARGETS)
@@ -128,9 +144,13 @@ $(UBSAN_TARGETS): %: %.c $(LIB)
 
 check-ubsan: ubsan
 	@echo "=== ubsan_no_ub: expect clean exit ==="
-	./ubsan_no_ub
+	$(SAN_TIMEOUT) ./ubsan_no_ub
 	@echo "=== ubsan_ub: expect signed-integer-overflow report ==="
-	! UBSAN_OPTIONS="halt_on_error=1" ./ubsan_ub
+	@set +e; \
+	env UBSAN_OPTIONS="halt_on_error=1" $(SAN_TIMEOUT) ./ubsan_ub; \
+	status=$$?; \
+	if [ $$status -eq 124 ]; then echo "ubsan_ub timed out"; exit 1; fi; \
+	if [ $$status -eq 0 ]; then echo "ubsan_ub unexpectedly exited cleanly"; exit 1; fi
 	@echo "=== UBSan checks passed ==="
 
 ubsan-pre: ubsan-pre-lib $(UBSAN_PRE_TARGETS)
@@ -145,9 +165,13 @@ $(UBSAN_PRE_TARGETS): %_pre: %.c $(PRELOAD)
 
 check-ubsan-pre: ubsan-pre
 	@echo "=== ubsan_no_ub_pre: expect clean exit ==="
-	./ubsan_no_ub_pre
+	$(SAN_TIMEOUT) ./ubsan_no_ub_pre
 	@echo "=== ubsan_ub_pre: expect signed-integer-overflow report ==="
-	! UBSAN_OPTIONS="halt_on_error=1" ./ubsan_ub_pre
+	@set +e; \
+	env UBSAN_OPTIONS="halt_on_error=1" $(SAN_TIMEOUT) ./ubsan_ub_pre; \
+	status=$$?; \
+	if [ $$status -eq 124 ]; then echo "ubsan_ub_pre timed out"; exit 1; fi; \
+	if [ $$status -eq 0 ]; then echo "ubsan_ub_pre unexpectedly exited cleanly"; exit 1; fi
 	@echo "=== UBSan preload checks passed ==="
 
 clean:
