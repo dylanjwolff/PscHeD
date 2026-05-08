@@ -7,6 +7,7 @@ edition = "2024"
 name = "rsched_preload"
 # cdylib only: this is the LD_PRELOAD shim that exports the real pthread names.
 crate-type = ["cdylib"]
+test = false
 
 [features]
 # Propagate TSAN annotation support to the rsched crate.
@@ -17,3 +18,6 @@ asan = ["rsched/asan"]
 rsched = { path = ".." }
 libc = "0.2"
 scopeguard = "1"
+
+[dev-dependencies]
+cc = "1"

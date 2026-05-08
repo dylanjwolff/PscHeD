@@ -36,6 +36,7 @@ dependencies = [
 name = "rsched-preload"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "libc",
  "rsched",
  "scopeguard",
