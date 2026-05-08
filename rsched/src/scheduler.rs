@@ -1,4 +1,4 @@
-use crate::event::{Event, EventKind, AccessKind};
+use crate::event::{AccessKind, Event, EventKind};
 
 /// Scheduling algorithm interface.
 ///
@@ -18,7 +18,9 @@ pub trait Scheduler {
 struct Rng(u64);
 
 impl Rng {
-    fn new(seed: u64) -> Self { Self(if seed == 0 { 1 } else { seed }) }
+    fn new(seed: u64) -> Self {
+        Self(if seed == 0 { 1 } else { seed })
+    }
 
     fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
@@ -45,19 +47,27 @@ pub struct RandomWalk {
 
 impl RandomWalk {
     pub fn new(seed: u64) -> Self {
-        Self { rng: Rng::new(seed) }
+        Self {
+            rng: Rng::new(seed),
+        }
     }
 }
 
 impl Scheduler for RandomWalk {
     fn choose(&mut self, is_blocking: &[bool]) -> Option<usize> {
         let n = is_blocking.len();
-        if n == 0 { return None; }
+        if n == 0 {
+            return None;
+        }
         let start = self.rng.usize_less_than(n);
-        if !is_blocking[start] { return Some(start); }
+        if !is_blocking[start] {
+            return Some(start);
+        }
         for i in 1..n {
             let idx = (start + i) % n;
-            if !is_blocking[idx] { return Some(idx); }
+            if !is_blocking[idx] {
+                return Some(idx);
+            }
         }
         None
     }
@@ -89,21 +99,34 @@ impl<S: Scheduler> Scheduler for LoggingScheduler<S> {
                     eprintln!("[rsched] ThreadCreate @ 0x{:x}", ev.instr_addr);
                 }
                 EventKind::LockAcq { lock } => {
-                    eprintln!("[rsched] LockAcq(lock=0x{:x}) @ 0x{:x}", lock as usize, ev.instr_addr);
+                    eprintln!(
+                        "[rsched] LockAcq(lock=0x{:x}) @ 0x{:x}",
+                        lock as usize, ev.instr_addr
+                    );
                 }
                 EventKind::LockRel { lock } => {
-                    eprintln!("[rsched] LockRel(lock=0x{:x}) @ 0x{:x}", lock as usize, ev.instr_addr);
+                    eprintln!(
+                        "[rsched] LockRel(lock=0x{:x}) @ 0x{:x}",
+                        lock as usize, ev.instr_addr
+                    );
                 }
                 EventKind::SchedYield => {
                     eprintln!("[rsched] SchedYield @ 0x{:x}", ev.instr_addr);
                 }
-                EventKind::MemOp { mem_addr, size, access } => {
+                EventKind::MemOp {
+                    mem_addr,
+                    size,
+                    access,
+                } => {
                     let kind = match access {
-                        AccessKind::Read      => "R",
-                        AccessKind::Write     => "W",
+                        AccessKind::Read => "R",
+                        AccessKind::Write => "W",
                         AccessKind::ReadWrite => "RW",
                     };
-                    eprintln!("[rsched] MemOp({kind}, mem=0x{:x}, size={size}) @ 0x{:x}", mem_addr as usize, ev.instr_addr);
+                    eprintln!(
+                        "[rsched] MemOp({kind}, mem=0x{:x}, size={size}) @ 0x{:x}",
+                        mem_addr as usize, ev.instr_addr
+                    );
                 }
             }
         }

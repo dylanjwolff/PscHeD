@@ -12,9 +12,13 @@ name = "rsched"
 # staticlib – C programs that statically link against librsched.a
 # (cdylib is in the preload/ sub-crate so pthread names stay out of this lib)
 crate-type = ["rlib", "staticlib"]
+bench = false
 
 [dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [features]
 tsan = []
@@ -22,3 +26,19 @@ asan = []
 
 [build-dependencies]
 cc = "1"
+
+[[bench]]
+name = "create"
+harness = false
+
+[[bench]]
+name = "lock"
+harness = false
+
+[[bench]]
+name = "counter"
+harness = false
+
+[[bench]]
+name = "buffer"
+harness = false

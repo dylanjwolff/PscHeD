@@ -50,6 +50,9 @@ struct Thread {
     suspend_cond: CondT,
     /// Thread waiting on this one via pthread_join.
     joiner: Option<PthreadT>,
+    /// The user start routine has returned.  Keep the record around until
+    /// reinit because thread/runtime teardown can still touch pthread state.
+    is_exited: bool,
     /// What this thread is about to do at the next scheduling point.
     /// Set before each context switch, cleared after the operation completes.
     pub next_event: Option<Event>,
@@ -57,14 +60,21 @@ struct Thread {
 
 impl Thread {
     fn new(pt: PthreadT) -> Self {
+        Self::new_with_tid(pt, unsafe {
+            libc::syscall(libc::SYS_gettid) as libc::pid_t
+        })
+    }
+
+    fn new_with_tid(pt: PthreadT, tid: libc::pid_t) -> Self {
         Thread {
-            tid: unsafe { libc::syscall(libc::SYS_gettid) as libc::pid_t },
+            tid,
             pthread: pt,
             is_blocking: false,
             startup_done: false,
             is_in_rsched_wait: false,
             suspend_cond: libc::PTHREAD_COND_INITIALIZER,
             joiner: None,
+            is_exited: false,
             next_event: None,
         }
     }
@@ -92,7 +102,7 @@ struct SBarrier {
 struct State {
     scheduler: Box<dyn Scheduler>,
     threads: Vec<PthreadT>,
-    info: HashMap<PthreadT, Thread>,
+    info: HashMap<PthreadT, Box<Thread>>,
     mutexes: HashMap<usize, SMutex>,
     conds: HashMap<usize, SCond>,
     barriers: HashMap<usize, SBarrier>,
@@ -127,16 +137,22 @@ impl State {
     fn add(&mut self, t: Thread) {
         let pt = t.pthread;
         self.threads.push(pt);
-        self.info.insert(pt, t);
+        self.info.insert(pt, Box::new(t));
     }
 
     fn remove(&mut self, pt: PthreadT) {
         self.threads.retain(|&x| x != pt);
-        self.info.remove(&pt);
+        if let Some(t) = self.info.get_mut(&pt) {
+            t.is_blocking = true;
+            t.is_exited = true;
+        }
     }
 
     fn t(&mut self, pt: PthreadT) -> &mut Thread {
-        self.info.get_mut(&pt).expect("rsched: unknown thread")
+        self.info
+            .get_mut(&pt)
+            .expect("rsched: unknown thread")
+            .as_mut()
     }
 
     fn choose(&mut self) -> Option<usize> {
@@ -144,7 +160,7 @@ impl State {
             .threads
             .iter()
             .map(|pt| {
-                let t = &self.info[pt];
+                let t = self.info[pt].as_ref();
                 // A thread is ineligible if it is logically blocking (waiting for a
                 // resource), not yet started (sanitizer handshake pending), or not
                 // currently suspended inside rsched's own cond_wait.  The last
@@ -198,6 +214,10 @@ impl State {
         // Drain any pending child registration.  The cond_wait releases GMTX
         // while waiting, so the child's trampoline can acquire it to register.
         self.drain_pending_child();
+
+        if !self.threads.contains(&caller) {
+            return;
+        }
 
         if self.threads.len() <= 1 {
             return;
@@ -790,7 +810,7 @@ extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void {
 
         // Acquire GMTX (creator released it via pthread_cond_wait below).
         glock();
-        st().add(Thread::new(self_pt));
+        st().t(self_pt).tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
 
         // Signal parent that we are registered (parent may or may not be waiting).
         sa.ready = true;
@@ -879,6 +899,8 @@ pub unsafe extern "C" fn rsched_pthread_create(
         return r;
     }
 
+    st().add(Thread::new_with_tid(*thread, 0));
+
     // Return immediately without waiting for the child to register.  Sanitiser
     // runtimes (TSAN, ASAN) run their own post-create hooks (e.g. TSAN's
     // p->sync.Wait / p->start.Post handshake) between REAL(pthread_create)
@@ -913,7 +935,7 @@ pub unsafe extern "C" fn rsched_pthread_join(
     let caller = my_pt();
     st().context_switch(caller);
 
-    if st().info.contains_key(&thread) {
+    if st().threads.contains(&thread) {
         st().t(thread).joiner = Some(caller);
         st().t(caller).is_blocking = true;
         st().context_switch(caller);
@@ -1066,6 +1088,11 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
         .push(caller);
     st().t(caller).is_blocking = true;
     st().context_switch(caller);
+    if st().t(caller).is_blocking {
+        st().t(caller).is_in_rsched_wait = true;
+        rsched_cond_wait(addr_of_mut!(st().t(caller).suspend_cond));
+        st().t(caller).is_in_rsched_wait = false;
+    }
 
     st().mutex_lock(lkey, caller);
     rsched_gunlock();
@@ -1092,6 +1119,8 @@ pub unsafe extern "C" fn rsched_pthread_cond_signal(cond: *mut CondT) -> libc::c
             .expect("rsched: non-empty cond waiter list");
         let w = st().conds.get_mut(&key).unwrap().waiters.remove(idx);
         st().t(w).is_blocking = false;
+        let cond_ptr = addr_of_mut!(st().t(w).suspend_cond);
+        (rpt().cond_signal)(cond_ptr);
     }
     rsched_gunlock();
     0
@@ -1109,6 +1138,8 @@ pub unsafe extern "C" fn rsched_pthread_cond_broadcast(cond: *mut CondT) -> libc
     if let Some(c) = st().conds.remove(&key) {
         for w in c.waiters {
             st().t(w).is_blocking = false;
+            let cond_ptr = addr_of_mut!(st().t(w).suspend_cond);
+            (rpt().cond_signal)(cond_ptr);
         }
     }
     rsched_gunlock();
@@ -1150,7 +1181,7 @@ pub unsafe extern "C" fn rsched_pthread_barrier_wait(barrier: *mut BarrierT) -> 
     let key = barrier as usize;
     rsched_glock();
     let caller = my_pt();
-    st().context_switch(caller);
+    st().drain_pending_child();
 
     // Register as a waiter.
     {
@@ -1161,11 +1192,16 @@ pub unsafe extern "C" fn rsched_pthread_barrier_wait(barrier: *mut BarrierT) -> 
                 return libc::EINVAL;
             }
         };
-        b.waiters.push(caller);
-        st().t(caller).is_blocking = true;
+        if !b.waiters.contains(&caller) {
+            b.waiters.push(caller);
+        }
+        if b.waiters.len() < b.count as usize {
+            st().t(caller).is_blocking = true;
+        }
     }
 
     // If we are the Nth thread, release all waiters.
+    let mut released = false;
     {
         let b = st().barriers.get_mut(&key).unwrap();
         if b.waiters.len() >= b.count as usize {
@@ -1173,15 +1209,25 @@ pub unsafe extern "C" fn rsched_pthread_barrier_wait(barrier: *mut BarrierT) -> 
             for w in ws {
                 st().t(w).is_blocking = false;
             }
+            released = true;
         }
     }
 
-    // Yield to let a released waiter (or any runnable thread) run.
-    // This also suspends us if we just released the barrier, giving others
-    // a chance to exit their first context_switch inside barrier_wait.
+    // If the barrier is not full yet, this caller must remain blocked until
+    // the releasing thread marks all waiters runnable.  If this caller released
+    // the barrier, yielding gives the waiters a chance to run.
     st().context_switch(caller);
+    if st().t(caller).is_blocking {
+        st().t(caller).is_in_rsched_wait = true;
+        rsched_cond_wait(addr_of_mut!(st().t(caller).suspend_cond));
+        st().t(caller).is_in_rsched_wait = false;
+    }
     rsched_gunlock();
-    0
+    if released {
+        libc::PTHREAD_BARRIER_SERIAL_THREAD
+    } else {
+        0
+    }
 }
 
 // ── rsched_sched_yield ────────────────────────────────────────────────────
