@@ -23,6 +23,7 @@ ASAN_TARGETS       := asan_uaf asan_no_uaf
 ASAN_PRE_TARGETS   := asan_uaf_pre asan_no_uaf_pre
 UBSAN_TARGETS      := ubsan_ub ubsan_no_ub
 UBSAN_PRE_TARGETS  := ubsan_ub_pre ubsan_no_ub_pre
+SECCOMP_TARGETS    := seccomp_ok seccomp_raw_futex
 
 # ASAN static targets: librsched.a (--features asan) + rsched.h macros.
 # rsched.h redirects pthread_* → rsched_pthread_* at compile time.
@@ -57,12 +58,31 @@ UBSAN_PRE_LDFLAGS := -L$(LIB_DIR) -lrsched_preload \
 
 .PHONY: all clean lib tsan tsan-lib check-tsan asan asan-lib check-asan \
         asan-pre asan-pre-lib check-asan-pre \
-        ubsan ubsan-lib check-ubsan ubsan-pre ubsan-pre-lib check-ubsan-pre
+        ubsan ubsan-lib check-ubsan ubsan-pre ubsan-pre-lib check-ubsan-pre \
+        seccomp check-seccomp
 
 all: lib
 
 lib:
 	cd .. && cargo build
+
+seccomp: lib $(SECCOMP_TARGETS)
+
+$(SECCOMP_TARGETS): %: %.c $(LIB)
+	clang -g -Wall -Wextra -DRSCHED -I$(INC) -o $@ $< \
+		-L$(LIB_DIR) -Wl,--start-group $(LIB) -Wl,--end-group \
+		-lpthread -ldl -lm
+
+check-seccomp: seccomp
+	@echo "=== seccomp_ok: expect clean exit ==="
+	env RSCHED_SECCOMP=1 $(SAN_TIMEOUT) ./seccomp_ok
+	@echo "=== seccomp_raw_futex: expect rsched rejection ==="
+	@set +e; \
+	env RSCHED_SECCOMP=1 $(SAN_TIMEOUT) ./seccomp_raw_futex; \
+	status=$$?; \
+	if [ $$status -eq 124 ]; then echo "seccomp_raw_futex timed out"; exit 1; fi; \
+	if [ $$status -eq 0 ]; then echo "seccomp_raw_futex unexpectedly exited cleanly"; exit 1; fi
+	@echo "=== seccomp checks passed ==="
 
 tsan: tsan-lib $(TSAN_TARGETS)
 
@@ -176,4 +196,4 @@ check-ubsan-pre: ubsan-pre
 
 clean:
 	rm -f $(TSAN_TARGETS) $(ASAN_TARGETS) $(ASAN_PRE_TARGETS) \
-	      $(UBSAN_TARGETS) $(UBSAN_PRE_TARGETS) dist.txt
+	      $(UBSAN_TARGETS) $(UBSAN_PRE_TARGETS) $(SECCOMP_TARGETS) dist.txt
