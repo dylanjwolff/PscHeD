@@ -1,3 +1,6 @@
 zigsched
 rsched/target
+rsched/binary-instrumentation/instrumented
 shuttle
+sqlite
+
