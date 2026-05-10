@@ -14,6 +14,9 @@ void rsched_init(void);
    have been joined.  Used by tests to run multiple independent scenarios. */
 void rsched_reinit(unsigned long long seed);
 
+int rsched_fuzzer_test_one_input(const unsigned char *, unsigned long,
+                                 int (*)(const unsigned char *, unsigned long));
+
 int  rsched_pthread_create(pthread_t *, const pthread_attr_t *,
                            void *(*)(void *), void *);
 int  rsched_pthread_join(pthread_t, void **);

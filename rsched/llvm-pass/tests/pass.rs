@@ -61,11 +61,14 @@ where
         .unwrap_or_else(|e| panic!("failed to spawn command through timeout: {e}"))
 }
 
-fn write_input(name: &str) -> PathBuf {
+fn write_input(name: &str, contents: &str) -> PathBuf {
     let src = temp_dir().join(name);
-    std::fs::write(
-        &src,
-        r#"
+    std::fs::write(&src, contents).expect("write llvm pass C input");
+    src
+}
+
+fn atomic_pthread_input() -> &'static str {
+    r#"
 #include <pthread.h>
 #include <stdatomic.h>
 
@@ -82,27 +85,48 @@ int main(void) {
     pthread_join(thread, 0);
     return atomic_load_explicit(&global, memory_order_seq_cst);
 }
-"#,
-    )
-    .expect("write llvm pass C input");
-    src
+"#
+}
+
+fn fuzzer_input() -> &'static str {
+    r#"
+#include <stdint.h>
+#include <stddef.h>
+#include <stdatomic.h>
+
+static _Atomic uint32_t observations;
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+    atomic_fetch_add_explicit(&observations, 1, memory_order_relaxed);
+    if (size >= 4 && data[0] == 'r' && data[1] == 's' &&
+        data[2] == 'c' && data[3] == 'h') {
+        __builtin_trap();
+    }
+    return 0;
+}
+"#
 }
 
 fn compile_to_ir(name: &str) -> PathBuf {
-    let src = write_input(&format!("{name}.c"));
+    compile_source_to_ir(name, atomic_pthread_input(), &[])
+}
+
+fn compile_source_to_ir(name: &str, source: &str, extra_args: &[&str]) -> PathBuf {
+    let src = write_input(&format!("{name}.c"), source);
     let ll = temp_dir().join(format!("{name}.ll"));
-    let output = run_timeout(
-        "clang-17",
-        [
-            OsString::from("-S"),
-            OsString::from("-emit-llvm"),
-            OsString::from("-O0"),
-            OsString::from("-g0"),
-            OsString::from("-o"),
-            ll.as_os_str().to_owned(),
-            src.as_os_str().to_owned(),
-        ],
-    );
+    let mut args = vec![
+        OsString::from("-S"),
+        OsString::from("-emit-llvm"),
+        OsString::from("-O0"),
+        OsString::from("-g0"),
+    ];
+    args.extend(extra_args.iter().map(OsString::from));
+    args.extend([
+        OsString::from("-o"),
+        ll.as_os_str().to_owned(),
+        src.as_os_str().to_owned(),
+    ]);
+    let output = run_timeout("clang-17", args);
     assert!(
         output.status.success(),
         "clang-17 failed\nstdout:\n{}\nstderr:\n{}",
@@ -166,5 +190,37 @@ fn direct_pthread_mode_rewrites_libc_pthread_calls() {
     assert!(
         ir.contains("@rsched_pthread_join"),
         "direct mode did not rewrite pthread_join:\n{ir}"
+    );
+}
+
+#[test]
+fn fuzzer_sanitizer_ir_is_supported() {
+    let input = compile_source_to_ir("fuzzer", fuzzer_input(), &["-fsanitize=fuzzer-no-link"]);
+    let ir = run_pass("rsched-atomics", &input, "fuzzer.out.ll");
+
+    assert!(
+        ir.contains("define dso_local i32 @__rsched_original_LLVMFuzzerTestOneInput"),
+        "original fuzzer entry point was not renamed:\n{ir}"
+    );
+    assert!(
+        ir.contains("define i32 @LLVMFuzzerTestOneInput")
+            || ir.contains("define dso_local i32 @LLVMFuzzerTestOneInput"),
+        "fuzzer entry point was not preserved:\n{ir}"
+    );
+    assert!(
+        ir.contains("call i32 @rsched_fuzzer_test_one_input"),
+        "fuzzer wrapper does not delegate to rsched schedule loop:\n{ir}"
+    );
+    assert!(
+        ir.contains("__sancov") || ir.contains("__sanitizer_cov"),
+        "clang did not emit sanitizer coverage for fuzzer input:\n{ir}"
+    );
+    assert!(
+        ir.contains("call void @rsched_atomic_instrument"),
+        "pass did not instrument atomic operation in fuzzer harness:\n{ir}"
+    );
+    assert!(
+        ir.contains("atomicrmw"),
+        "pass should leave original atomicrmw in place:\n{ir}"
     );
 }

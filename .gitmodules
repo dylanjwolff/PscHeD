@@ -1,0 +1,3 @@
+[submodule "rsched/binary-instrumentation/e9patch"]
+	path = rsched/binary-instrumentation/e9patch
+	url = https://github.com/GJDuck/e9patch.git

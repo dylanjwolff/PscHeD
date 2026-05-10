@@ -1,4 +1,4 @@
-use llvm_plugin::inkwell::llvm_sys::core::LLVMSetOperand;
+use llvm_plugin::inkwell::llvm_sys::core::{LLVMSetOperand, LLVMSetValueName2};
 use llvm_plugin::inkwell::module::Module;
 use llvm_plugin::inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicTypeEnum};
 use llvm_plugin::inkwell::values::{
@@ -49,6 +49,7 @@ impl LlvmModulePass for RschedAtomicsPass {
         _manager: &ModuleAnalysisManager,
     ) -> PreservedAnalyses {
         let mut changed = false;
+        changed |= wrap_fuzzer_entrypoint(module);
         changed |= instrument_atomics(module);
         if self.direct_pthread {
             changed |= rewrite_pthread_calls(module);
@@ -60,6 +61,80 @@ impl LlvmModulePass for RschedAtomicsPass {
             PreservedAnalyses::All
         }
     }
+}
+
+fn wrap_fuzzer_entrypoint(module: &mut Module<'_>) -> bool {
+    let Some(original) = module.get_function("LLVMFuzzerTestOneInput") else {
+        return false;
+    };
+    let wrapper_name = "__rsched_original_LLVMFuzzerTestOneInput";
+    if module.get_function(wrapper_name).is_some() {
+        return false;
+    }
+
+    unsafe {
+        LLVMSetValueName2(
+            original.as_value_ref(),
+            wrapper_name.as_ptr().cast(),
+            wrapper_name.len(),
+        );
+    }
+
+    let context = module.get_context();
+    let ptr_ty = context.ptr_type(AddressSpace::default());
+    let usize_ty = context.i64_type();
+    let i32_ty = context.i32_type();
+    let fuzzer_ty = i32_ty.fn_type(
+        &[
+            BasicMetadataTypeEnum::PointerType(ptr_ty),
+            BasicMetadataTypeEnum::IntType(usize_ty),
+        ],
+        false,
+    );
+    let helper_ty = i32_ty.fn_type(
+        &[
+            BasicMetadataTypeEnum::PointerType(ptr_ty),
+            BasicMetadataTypeEnum::IntType(usize_ty),
+            BasicMetadataTypeEnum::PointerType(ptr_ty),
+        ],
+        false,
+    );
+    let helper = module
+        .get_function("rsched_fuzzer_test_one_input")
+        .unwrap_or_else(|| module.add_function("rsched_fuzzer_test_one_input", helper_ty, None));
+    let wrapper = module.add_function("LLVMFuzzerTestOneInput", fuzzer_ty, None);
+    wrapper.set_linkage(original.get_linkage());
+
+    let block = context.append_basic_block(wrapper, "entry");
+    let builder = context.create_builder();
+    builder.position_at_end(block);
+    let data = wrapper
+        .get_nth_param(0)
+        .expect("fuzzer wrapper data parameter");
+    let size = wrapper
+        .get_nth_param(1)
+        .expect("fuzzer wrapper size parameter");
+    let original_ptr = original.as_global_value().as_pointer_value();
+    let result = builder
+        .build_call(
+            helper,
+            &[
+                BasicMetadataValueEnum::from(data),
+                BasicMetadataValueEnum::from(size),
+                BasicMetadataValueEnum::PointerValue(original_ptr),
+            ],
+            "rsched.fuzzer.result",
+        )
+        .expect("build rsched fuzzer helper call")
+        .try_as_basic_value()
+        .left()
+        .expect("rsched fuzzer helper returns int")
+        .into_int_value();
+    builder
+        .build_return(Some(&result))
+        .expect("build fuzzer wrapper return");
+
+    true
 }
 
 fn instrument_atomics(module: &mut Module<'_>) -> bool {

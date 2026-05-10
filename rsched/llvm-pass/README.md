@@ -33,3 +33,10 @@ Pass names:
 The pass instruments LLVM `load atomic`, `store atomic`, `atomicrmw`, and
 `cmpxchg` instructions. It does not replace the atomic instruction; it inserts a
 cooperative scheduling point immediately before it.
+
+For libFuzzer-style targets, the pass wraps `LLVMFuzzerTestOneInput` so each
+input is executed under multiple rsched schedules. The original fuzzer entry
+point is renamed, and the exported entry point calls the rsched runtime helper.
+The input bytes are hashed into the base scheduler seed, then the seed is
+incremented for each schedule. Set `RSCHED_FUZZ_SCHEDULES` to choose the number
+of schedules per input; the default is `5`.
