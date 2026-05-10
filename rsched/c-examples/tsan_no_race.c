@@ -7,8 +7,7 @@
  * by --features tsan) so TSAN sees the correct happens-before edge through
  * each lock/unlock pair even though the underlying mutex is virtual.
  *
- * Build:  make tsan        (from c-examples/)
- * Run:    ./tsan_no_race   → exits 0, no TSAN warnings
+ * Covered by: cargo test -p rsched-preload --features tsan --test sanitizers
  */
 #include <pthread.h>
 #include <stdio.h>

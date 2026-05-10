@@ -16,8 +16,7 @@
  * while consumer dereferences its (now-freed) local copy.  rsched's scheduler
  * picks one to run first; either way the consumer eventually reads freed memory.
  *
- * Build:  make asan           (from c-examples/)
- * Run:    ./asan_uaf  → ASAN prints "heap-use-after-free"
+ * Covered by: cargo test -p rsched --test sanitizers_static
  */
 #ifdef RSCHED
 #  include "rsched.h"

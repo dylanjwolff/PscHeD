@@ -1564,6 +1564,22 @@ unsafe fn schedule_memop(
     rsched_gunlock();
 }
 
+/// Generic hook used by the LLVM pass. It creates a scheduling point for an
+/// atomic operation while leaving the original LLVM atomic instruction in place.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_atomic_instrument(
+    ptr: *const libc::c_void,
+    size: usize,
+    access: libc::c_uint,
+) {
+    let access = match access {
+        0 => AccessKind::Read,
+        1 => AccessKind::Write,
+        _ => AccessKind::ReadWrite,
+    };
+    schedule_memop(return_address(), ptr, size, access);
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_atomic_load_i32(ptr: *const AtomicI32) -> libc::c_int {
     schedule_memop(return_address(), ptr as *const _, 4, AccessKind::Read);

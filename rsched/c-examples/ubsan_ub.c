@@ -2,8 +2,7 @@
  * ubsan_ub.c – deliberate signed-integer overflow in a worker thread.
  * UBSan must report "signed integer overflow".
  *
- * Build:  make ubsan-pre       (from c-examples/)
- * Run:    ./ubsan_ub_pre → UBSan prints "signed integer overflow"
+ * Covered by: cargo test -p rsched --test sanitizers_static
  */
 #ifdef RSCHED
 #  include "rsched.h"

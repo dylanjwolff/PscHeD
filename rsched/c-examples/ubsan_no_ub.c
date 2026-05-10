@@ -3,8 +3,7 @@
  *
  * Same structure as ubsan_ub.c but uses long to avoid overflow.
  *
- * Build:  make ubsan-pre       (from c-examples/)
- * Run:    ./ubsan_no_ub_pre → exits 0, no UBSan warnings
+ * Covered by: cargo test -p rsched --test sanitizers_static
  */
 #ifdef RSCHED
 #  include "rsched.h"

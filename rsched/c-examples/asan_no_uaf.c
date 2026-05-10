@@ -4,8 +4,7 @@
  * Same producer/consumer structure as asan_uaf.c, but a mutex ensures the
  * consumer finishes reading the allocation before the producer frees it.
  *
- * Build:  make asan           (from c-examples/)
- * Run:    ./asan_no_uaf  → exits 0, no ASAN warnings
+ * Covered by: cargo test -p rsched --test sanitizers_static
  */
 #ifdef RSCHED
 #  include "rsched.h"

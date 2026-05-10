@@ -6,8 +6,7 @@
  * so that pthread_create/join resolve to rsched's scheduler.  The race is in
  * unsynchronised counter++ accesses, which TSAN detects directly.
  *
- * Build:  make tsan    (from c-examples/)
- * Run:    ./tsan_race  → TSAN prints "WARNING: ThreadSanitizer: data race"
+ * Covered by: cargo test -p rsched-preload --features tsan --test sanitizers
  */
 #include <pthread.h>
 #include <stdio.h>

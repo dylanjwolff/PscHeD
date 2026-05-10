@@ -1,0 +1,11 @@
+[package]
+name = "rsched-llvm-pass"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "rsched_llvm_pass"
+crate-type = ["cdylib"]
+
+[dependencies]
+llvm-plugin = { version = "0.6", features = ["llvm17-0"] }
