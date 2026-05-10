@@ -9,7 +9,7 @@
 #![feature(link_llvm_intrinsics)]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ptr::addr_of_mut;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -29,6 +29,7 @@ type MutexT = libc::pthread_mutex_t;
 type CondT = libc::pthread_cond_t;
 type BarrierT = libc::pthread_barrier_t;
 type AttrT = libc::pthread_attr_t;
+type MutexAttrT = libc::pthread_mutexattr_t;
 type StartRoutine = unsafe extern "C" fn(*mut libc::c_void) -> *mut libc::c_void;
 
 // ── Thread descriptor ─────────────────────────────────────────────────────
@@ -107,6 +108,8 @@ struct State {
     threads: Vec<PthreadT>,
     info: HashMap<PthreadT, Box<Thread>>,
     mutexes: HashMap<usize, SMutex>,
+    recursive_mutexes: HashSet<usize>,
+    recursive_mutex_attrs: HashSet<usize>,
     conds: HashMap<usize, SCond>,
     barriers: HashMap<usize, SBarrier>,
     /// A child thread created but not yet processed at a scheduling point.
@@ -131,6 +134,8 @@ impl State {
             threads: Vec::new(),
             info: HashMap::new(),
             mutexes: HashMap::new(),
+            recursive_mutexes: HashSet::new(),
+            recursive_mutex_attrs: HashSet::new(),
             conds: HashMap::new(),
             barriers: HashMap::new(),
             pending_child: None,
@@ -277,6 +282,10 @@ impl State {
         }
     }
 
+    fn is_recursive_mutex(&self, key: usize) -> bool {
+        self.recursive_mutexes.contains(&key)
+    }
+
     unsafe fn mutex_lock(&mut self, key: usize, caller: PthreadT) {
         let tid = self.info[&caller].tid;
         loop {
@@ -341,15 +350,68 @@ impl State {
         let waiter_tid = self.info[&waiter].tid;
         self.mutexes.get_mut(&key).unwrap().owner_tid = waiter_tid;
         self.t(waiter).is_blocking = false;
-        // Signal the waiter directly so it can return from its cond_wait in
-        // mutex_lock.  This is required when the waiter entered the cond_wait
-        // path (is_in_rsched_wait branch) rather than being suspended via
-        // context_switch, i.e. when no other cooperative thread was eligible to
-        // pick up — common in TSAN mode where threads run concurrently.
-        let cond_ptr = addr_of_mut!(self.t(waiter).suspend_cond);
-        with_internal_depth(|| (rpt().cond_signal)(cond_ptr));
         0
     }
+}
+
+// ── pthread mutex metadata ─────────────────────────────────────────────────
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_note_pthread_mutexattr_init(attr: *mut MutexAttrT) {
+    ensure_init();
+    rsched_glock();
+    st().recursive_mutex_attrs.remove(&(attr as usize));
+    rsched_gunlock();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_note_pthread_mutexattr_settype(
+    attr: *mut MutexAttrT,
+    kind: libc::c_int,
+) {
+    ensure_init();
+    rsched_glock();
+    let key = attr as usize;
+    if kind == libc::PTHREAD_MUTEX_RECURSIVE {
+        st().recursive_mutex_attrs.insert(key);
+    } else {
+        st().recursive_mutex_attrs.remove(&key);
+    }
+    rsched_gunlock();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_note_pthread_mutexattr_destroy(attr: *mut MutexAttrT) {
+    ensure_init();
+    rsched_glock();
+    st().recursive_mutex_attrs.remove(&(attr as usize));
+    rsched_gunlock();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_note_pthread_mutex_init(
+    lock: *mut MutexT,
+    attr: *const MutexAttrT,
+) {
+    ensure_init();
+    rsched_glock();
+    let key = lock as usize;
+    if !attr.is_null() && st().recursive_mutex_attrs.contains(&(attr as usize)) {
+        st().recursive_mutexes.insert(key);
+    } else {
+        st().recursive_mutexes.remove(&key);
+    }
+    rsched_gunlock();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_note_pthread_mutex_destroy(lock: *mut MutexT) {
+    ensure_init();
+    rsched_glock();
+    let key = lock as usize;
+    st().recursive_mutexes.remove(&key);
+    st().mutexes.remove(&key);
+    rsched_gunlock();
 }
 
 // ── Globals ───────────────────────────────────────────────────────────────
@@ -1290,6 +1352,12 @@ pub unsafe extern "C" fn rsched_pthread_mutex_lock(lock: *mut MutexT) -> libc::c
         st().context_switch(caller);
     }
     st().mutex_lock(key, caller);
+    let r = with_internal_depth(|| (rpt().mutex_lock)(lock));
+    if r != 0 {
+        st().clear_event(caller);
+        rsched_gunlock();
+        return r;
+    }
     // Inform TSAN that this thread has logically acquired the user mutex.
     // Called while GMTX is still held so the annotation is ordered relative
     // to the paired tsan_release in rsched_pthread_mutex_unlock.
@@ -1318,9 +1386,21 @@ pub unsafe extern "C" fn rsched_pthread_mutex_trylock(lock: *mut MutexT) -> libc
     );
     st().context_switch(caller);
     let tid = st().info[&caller].tid;
-    // Recursive trylock: same owner → EBUSY (zigsched line 1288).
     if let Some(m) = st().mutexes.get(&key) {
         if m.owner_tid == tid {
+            if st().is_recursive_mutex(key) {
+                st().mutex_lock(key, caller);
+                let r = with_internal_depth(|| (rpt().mutex_lock)(lock));
+                if r != 0 {
+                    st().clear_event(caller);
+                    rsched_gunlock();
+                    return r;
+                }
+                tsan_user_acquire(lock as *mut libc::c_void);
+                st().clear_event(caller);
+                rsched_gunlock();
+                return 0;
+            }
             st().clear_event(caller);
             rsched_gunlock();
             return libc::EBUSY;
@@ -1332,6 +1412,13 @@ pub unsafe extern "C" fn rsched_pthread_mutex_trylock(lock: *mut MutexT) -> libc
         return libc::EBUSY;
     }
     st().mutex_lock(key, caller);
+    let r = with_internal_depth(|| (rpt().mutex_lock)(lock));
+    if r != 0 {
+        st().clear_event(caller);
+        rsched_gunlock();
+        return r;
+    }
+    tsan_user_acquire(lock as *mut libc::c_void);
     st().clear_event(caller);
     rsched_gunlock();
     0
@@ -1360,6 +1447,14 @@ pub unsafe extern "C" fn rsched_pthread_mutex_unlock(lock: *mut MutexT) -> libc:
     // any subsequent tsan_acquire in the new owner.
     tsan_user_release(lock as *mut libc::c_void);
     let r = st().mutex_unlock(key, caller);
+    if r == 0 {
+        let real_r = with_internal_depth(|| (rpt().mutex_unlock)(lock));
+        if real_r != 0 {
+            st().clear_event(caller);
+            rsched_gunlock();
+            return real_r;
+        }
+    }
     st().context_switch(caller);
     st().clear_event(caller);
     rsched_gunlock();
@@ -1387,6 +1482,11 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
         rsched_gunlock();
         return r;
     }
+    let real_unlock = with_internal_depth(|| (rpt().mutex_unlock)(lock));
+    if real_unlock != 0 {
+        rsched_gunlock();
+        return real_unlock;
+    }
 
     st().conds
         .entry(ckey)
@@ -1404,6 +1504,11 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
     }
 
     st().mutex_lock(lkey, caller);
+    let real_lock = with_internal_depth(|| (rpt().mutex_lock)(lock));
+    if real_lock != 0 {
+        rsched_gunlock();
+        return real_lock;
+    }
     rsched_gunlock();
     0
 }
@@ -1416,7 +1521,6 @@ pub unsafe extern "C" fn rsched_pthread_cond_signal(cond: *mut CondT) -> libc::c
     let key = cond as usize;
     rsched_glock();
     let caller = my_pt();
-    st().context_switch(caller);
     // Use an immutable borrow scoped to a block to get the waiter count,
     // then release it before calling the scheduler.
     let n = { st().conds.get(&key).map_or(0, |c| c.waiters.len()) };
@@ -1428,9 +1532,8 @@ pub unsafe extern "C" fn rsched_pthread_cond_signal(cond: *mut CondT) -> libc::c
             .expect("rsched: non-empty cond waiter list");
         let w = st().conds.get_mut(&key).unwrap().waiters.remove(idx);
         st().t(w).is_blocking = false;
-        let cond_ptr = addr_of_mut!(st().t(w).suspend_cond);
-        with_internal_depth(|| (rpt().cond_signal)(cond_ptr));
     }
+    st().context_switch(caller);
     rsched_gunlock();
     0
 }
@@ -1443,14 +1546,12 @@ pub unsafe extern "C" fn rsched_pthread_cond_broadcast(cond: *mut CondT) -> libc
     let key = cond as usize;
     rsched_glock();
     let caller = my_pt();
-    st().context_switch(caller);
     if let Some(c) = st().conds.remove(&key) {
         for w in c.waiters {
             st().t(w).is_blocking = false;
-            let cond_ptr = addr_of_mut!(st().t(w).suspend_cond);
-            with_internal_depth(|| (rpt().cond_signal)(cond_ptr));
         }
     }
+    st().context_switch(caller);
     rsched_gunlock();
     0
 }

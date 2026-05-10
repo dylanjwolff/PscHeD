@@ -25,16 +25,18 @@ use scopeguard::defer;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use libc::{
-    RTLD_NEXT, c_int, c_uint, c_void, pthread_attr_t, pthread_barrier_t, pthread_barrierattr_t,
-    pthread_cond_t, pthread_mutex_t, pthread_t,
+    c_int, c_uint, c_void, pthread_attr_t, pthread_barrier_t, pthread_barrierattr_t,
+    pthread_cond_t, pthread_mutex_t, pthread_mutexattr_t, pthread_t, timespec, RTLD_NEXT,
 };
 
 use rsched::{
-    rsched_exit, rsched_pthread_barrier_init, rsched_pthread_barrier_wait,
-    rsched_pthread_cond_broadcast, rsched_pthread_cond_signal, rsched_pthread_cond_wait,
-    rsched_pthread_create, rsched_pthread_exit, rsched_pthread_join, rsched_pthread_mutex_lock,
-    rsched_pthread_mutex_trylock, rsched_pthread_mutex_unlock, rsched_sched_yield,
-    rsched_try_enter,
+    rsched_exit, rsched_note_pthread_mutex_destroy, rsched_note_pthread_mutex_init,
+    rsched_note_pthread_mutexattr_destroy, rsched_note_pthread_mutexattr_init,
+    rsched_note_pthread_mutexattr_settype, rsched_pthread_barrier_init,
+    rsched_pthread_barrier_wait, rsched_pthread_cond_broadcast, rsched_pthread_cond_signal,
+    rsched_pthread_cond_wait, rsched_pthread_create, rsched_pthread_exit, rsched_pthread_join,
+    rsched_pthread_mutex_lock, rsched_pthread_mutex_trylock, rsched_pthread_mutex_unlock,
+    rsched_sched_yield, rsched_try_enter,
 };
 
 #[cfg(feature = "tsan")]
@@ -99,12 +101,21 @@ static NEXT_PTHREAD_JOIN: AtomicUsize = AtomicUsize::new(0);
 static NEXT_PTHREAD_MUTEX_LOCK: AtomicUsize = AtomicUsize::new(0);
 static NEXT_PTHREAD_MUTEX_TRYLOCK: AtomicUsize = AtomicUsize::new(0);
 static NEXT_PTHREAD_MUTEX_UNLOCK: AtomicUsize = AtomicUsize::new(0);
+static NEXT_PTHREAD_MUTEX_INIT: AtomicUsize = AtomicUsize::new(0);
+static NEXT_PTHREAD_MUTEX_DESTROY: AtomicUsize = AtomicUsize::new(0);
+static NEXT_PTHREAD_MUTEXATTR_INIT: AtomicUsize = AtomicUsize::new(0);
+static NEXT_PTHREAD_MUTEXATTR_SETTYPE: AtomicUsize = AtomicUsize::new(0);
+static NEXT_PTHREAD_MUTEXATTR_DESTROY: AtomicUsize = AtomicUsize::new(0);
 static NEXT_PTHREAD_COND_WAIT: AtomicUsize = AtomicUsize::new(0);
 static NEXT_PTHREAD_COND_SIGNAL: AtomicUsize = AtomicUsize::new(0);
 static NEXT_PTHREAD_COND_BROADCAST: AtomicUsize = AtomicUsize::new(0);
 static NEXT_PTHREAD_BARRIER_INIT: AtomicUsize = AtomicUsize::new(0);
 static NEXT_PTHREAD_BARRIER_WAIT: AtomicUsize = AtomicUsize::new(0);
 static NEXT_SCHED_YIELD: AtomicUsize = AtomicUsize::new(0);
+static NEXT_NANOSLEEP: AtomicUsize = AtomicUsize::new(0);
+static NEXT_USLEEP: AtomicUsize = AtomicUsize::new(0);
+static NEXT_SLEEP: AtomicUsize = AtomicUsize::new(0);
+static NEXT_CLOCK_NANOSLEEP: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "tsan")]
 static TSAN_PTHREAD_CREATE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -185,7 +196,11 @@ fn parse_tsan_background_mode(raw: &str) -> usize {
         }
     }
 
-    if mode == 0 { TSAN_BG_FIRST } else { mode }
+    if mode == 0 {
+        TSAN_BG_FIRST
+    } else {
+        mode
+    }
 }
 
 #[cfg(feature = "tsan")]
@@ -462,6 +477,81 @@ pub unsafe extern "C" fn pthread_exit(retval: *mut c_void) -> ! {
 // ── Mutex ─────────────────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutexattr_init(attr: *mut pthread_mutexattr_t) -> c_int {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    let f: unsafe extern "C" fn(*mut pthread_mutexattr_t) -> c_int =
+        load_next(&NEXT_PTHREAD_MUTEXATTR_INIT, b"pthread_mutexattr_init\0");
+    let r = f(attr);
+    if outermost && r == 0 {
+        rsched_note_pthread_mutexattr_init(attr);
+    }
+    r
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutexattr_settype(
+    attr: *mut pthread_mutexattr_t,
+    kind: c_int,
+) -> c_int {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    let f: unsafe extern "C" fn(*mut pthread_mutexattr_t, c_int) -> c_int = load_next(
+        &NEXT_PTHREAD_MUTEXATTR_SETTYPE,
+        b"pthread_mutexattr_settype\0",
+    );
+    let r = f(attr, kind);
+    if outermost && r == 0 {
+        rsched_note_pthread_mutexattr_settype(attr, kind);
+    }
+    r
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutexattr_destroy(attr: *mut pthread_mutexattr_t) -> c_int {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    let f: unsafe extern "C" fn(*mut pthread_mutexattr_t) -> c_int = load_next(
+        &NEXT_PTHREAD_MUTEXATTR_DESTROY,
+        b"pthread_mutexattr_destroy\0",
+    );
+    let r = f(attr);
+    if outermost && r == 0 {
+        rsched_note_pthread_mutexattr_destroy(attr);
+    }
+    r
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_init(
+    m: *mut pthread_mutex_t,
+    attr: *const pthread_mutexattr_t,
+) -> c_int {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    let f: unsafe extern "C" fn(*mut pthread_mutex_t, *const pthread_mutexattr_t) -> c_int =
+        load_next(&NEXT_PTHREAD_MUTEX_INIT, b"pthread_mutex_init\0");
+    let r = f(m, attr);
+    if outermost && r == 0 {
+        rsched_note_pthread_mutex_init(m, attr);
+    }
+    r
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_destroy(m: *mut pthread_mutex_t) -> c_int {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    let f: unsafe extern "C" fn(*mut pthread_mutex_t) -> c_int =
+        load_next(&NEXT_PTHREAD_MUTEX_DESTROY, b"pthread_mutex_destroy\0");
+    let r = f(m);
+    if outermost && r == 0 {
+        rsched_note_pthread_mutex_destroy(m);
+    }
+    r
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_lock(m: *mut pthread_mutex_t) -> c_int {
     let outermost = rsched_try_enter();
     defer!(rsched_exit());
@@ -582,4 +672,85 @@ pub unsafe extern "C" fn sched_yield() -> c_int {
         return f();
     }
     rsched_sched_yield()
+}
+
+// ── Blocking sleeps ───────────────────────────────────────────────────────────
+
+unsafe fn virtual_sleep_yields(mut n: u64) {
+    n = n.saturating_mul(10).clamp(1, 10_000);
+    for _ in 0..n {
+        rsched_sched_yield();
+    }
+}
+
+fn timespec_yields(req: *const timespec) -> u64 {
+    if req.is_null() {
+        return 1;
+    }
+    unsafe {
+        let sec = (*req).tv_sec.max(0) as u64;
+        let nsec = (*req).tv_nsec.max(0) as u64;
+        sec.saturating_mul(1000)
+            .saturating_add(nsec.saturating_add(999_999) / 1_000_000)
+            .max(1)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nanosleep(req: *const timespec, rem: *mut timespec) -> c_int {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    if outermost {
+        let _ = rem;
+        virtual_sleep_yields(timespec_yields(req));
+        return 0;
+    }
+    let f: unsafe extern "C" fn(*const timespec, *mut timespec) -> c_int =
+        load_next(&NEXT_NANOSLEEP, b"nanosleep\0");
+    f(req, rem)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clock_nanosleep(
+    clockid: libc::clockid_t,
+    flags: c_int,
+    req: *const timespec,
+    rem: *mut timespec,
+) -> c_int {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    if outermost {
+        let _ = clockid;
+        let _ = flags;
+        let _ = rem;
+        virtual_sleep_yields(timespec_yields(req));
+        return 0;
+    }
+    let f: unsafe extern "C" fn(libc::clockid_t, c_int, *const timespec, *mut timespec) -> c_int =
+        load_next(&NEXT_CLOCK_NANOSLEEP, b"clock_nanosleep\0");
+    f(clockid, flags, req, rem)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn usleep(usec: libc::useconds_t) -> c_int {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    if outermost {
+        virtual_sleep_yields((usec as u64).saturating_add(999) / 1000);
+        return 0;
+    }
+    let f: unsafe extern "C" fn(libc::useconds_t) -> c_int = load_next(&NEXT_USLEEP, b"usleep\0");
+    f(usec)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sleep(secs: c_uint) -> c_uint {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    if outermost {
+        virtual_sleep_yields((secs as u64).saturating_mul(1000));
+        return 0;
+    }
+    let f: unsafe extern "C" fn(c_uint) -> c_uint = load_next(&NEXT_SLEEP, b"sleep\0");
+    f(secs)
 }
