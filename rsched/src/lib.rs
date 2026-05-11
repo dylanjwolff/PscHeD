@@ -6,6 +6,7 @@
 //! any LD_PRELOAD trickery.
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(internal_features)]
+#![feature(linkage)]
 #![feature(link_llvm_intrinsics)]
 
 use std::cell::RefCell;
@@ -889,9 +890,12 @@ unsafe fn install_seccomp_filter() {
 #[cfg(feature = "tsan")]
 unsafe fn tsan_acquire(addr: *mut libc::c_void) {
     unsafe extern "C" {
-        fn __tsan_acquire(addr: *mut libc::c_void);
+        #[linkage = "extern_weak"]
+        static __tsan_acquire: Option<unsafe extern "C" fn(*mut libc::c_void)>;
     }
-    __tsan_acquire(addr);
+    if let Some(f) = __tsan_acquire {
+        f(addr);
+    }
 }
 
 #[cfg(not(feature = "tsan"))]
@@ -901,9 +905,12 @@ unsafe fn tsan_acquire(_addr: *mut libc::c_void) {}
 #[cfg(feature = "tsan")]
 unsafe fn tsan_release(addr: *mut libc::c_void) {
     unsafe extern "C" {
-        fn __tsan_release(addr: *mut libc::c_void);
+        #[linkage = "extern_weak"]
+        static __tsan_release: Option<unsafe extern "C" fn(*mut libc::c_void)>;
     }
-    __tsan_release(addr);
+    if let Some(f) = __tsan_release {
+        f(addr);
+    }
 }
 
 #[cfg(not(feature = "tsan"))]
@@ -913,9 +920,12 @@ unsafe fn tsan_release(_addr: *mut libc::c_void) {}
 #[cfg(feature = "tsan")]
 unsafe fn tsan_ignore_begin() {
     unsafe extern "C" {
-        fn __tsan_ignore_thread_begin();
+        #[linkage = "extern_weak"]
+        static __tsan_ignore_thread_begin: Option<unsafe extern "C" fn()>;
     }
-    __tsan_ignore_thread_begin();
+    if let Some(f) = __tsan_ignore_thread_begin {
+        f();
+    }
 }
 
 #[cfg(not(feature = "tsan"))]
@@ -925,9 +935,12 @@ unsafe fn tsan_ignore_begin() {}
 #[cfg(feature = "tsan")]
 unsafe fn tsan_ignore_end() {
     unsafe extern "C" {
-        fn __tsan_ignore_thread_end();
+        #[linkage = "extern_weak"]
+        static __tsan_ignore_thread_end: Option<unsafe extern "C" fn()>;
     }
-    __tsan_ignore_thread_end();
+    if let Some(f) = __tsan_ignore_thread_end {
+        f();
+    }
 }
 
 #[cfg(not(feature = "tsan"))]

@@ -677,7 +677,7 @@ pub unsafe extern "C" fn sched_yield() -> c_int {
 // ── Blocking sleeps ───────────────────────────────────────────────────────────
 
 unsafe fn virtual_sleep_yields(mut n: u64) {
-    n = n.saturating_mul(10).clamp(1, 10_000);
+    n = n.saturating_mul(100).clamp(1, 100_000);
     for _ in 0..n {
         rsched_sched_yield();
     }
