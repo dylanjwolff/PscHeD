@@ -1,0 +1,23 @@
+name: rsched tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+    types: ["labeled", "opened", "synchronize", "reopened"]
+
+jobs:
+
+  test:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+    - name: Build the Docker image
+      run: docker buildx build --progress=plain --cache-to type=gha --cache-from type=gha -t rsched .
+    - name: Run tests
+      run: docker run rsched
