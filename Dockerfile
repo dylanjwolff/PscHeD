@@ -26,7 +26,7 @@ ENV LLVM_SYS_170_PREFIX=/usr/lib/llvm-17
 
 # Install Rust (stable; edition 2024 requires ≥ 1.85).
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --no-modify-path
+    | sh -s -- -y --default-toolchain nightly --no-modify-path
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /workspace
