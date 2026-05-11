@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     clang-17 \
     curl \
     llvm-17-dev \
+    musl-tools \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -28,6 +29,8 @@ ENV LLVM_SYS_170_PREFIX=/usr/lib/llvm-17
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --default-toolchain nightly --no-modify-path
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /workspace
 COPY rsched/ .

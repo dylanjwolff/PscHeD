@@ -417,7 +417,7 @@ static mut STATE: Option<State> = None;
 static INITED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
-    static MY_PT: RefCell<PthreadT> = const { RefCell::new(0) };
+    static MY_PT: RefCell<PthreadT> = const { RefCell::new(unsafe { std::mem::zeroed() }) };
 }
 
 fn my_pt() -> PthreadT {
