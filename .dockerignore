@@ -1,0 +1,12 @@
+# Unrelated workspace members – not needed to build/test rsched
+shuttle/
+sqlite/
+zigsched/
+
+# Cargo build artifacts (large)
+rsched/target/
+
+# Pre-built binary-instrumentation tooling and generated output.
+# The binary_instrumentation tests skip gracefully when e9tool is absent.
+rsched/binary-instrumentation/e9patch/
+rsched/binary-instrumentation/instrumented/

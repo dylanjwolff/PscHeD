@@ -205,6 +205,10 @@ fn preload_value(sanitizer: &str, preload: &Path) -> OsString {
     }
 }
 
+// Instruments `original` into a fresh `out_dir_name` subdirectory of temp_dir().
+// Each caller should supply a unique `out_dir_name` so concurrent test threads
+// don't share a working directory; instrument.sh compiles schedule_memops into
+// the output directory rather than the shared e9patch/ tree.
 fn instrument_binary(original: &Path, out_dir_name: &str) -> Option<(PathBuf, PathBuf, String)> {
     let root = repo_root();
     let bininst_dir = root.join("binary-instrumentation");
@@ -232,8 +236,8 @@ fn instrument_binary(original: &Path, out_dir_name: &str) -> Option<(PathBuf, Pa
         .arg("bash")
         .arg(&script)
         .arg(original)
+        .arg(&instrumented_dir)
         .current_dir(&bininst_dir)
-        .env("OUT_DIR", &instrumented_dir)
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn {}: {e}", script.display()));
     let log = format!(
@@ -337,47 +341,13 @@ fn run_instrumented_sanitizer(
 
 #[test]
 fn e9patch_binary_atomic_instrumentation_schedules_memops() {
-    let root = repo_root();
-    let bininst_dir = root.join("binary-instrumentation");
-    let e9tool = bininst_dir.join("e9patch").join("e9tool");
-    if !e9tool.exists() {
-        eprintln!(
-            "skipping binary instrumentation smoke test; {} is missing",
-            e9tool.display()
-        );
-        return;
-    }
-
     let original = build_atomic_example();
-    let instrumented_dir = temp_dir().join("instrumented");
-    let instrumented = instrumented_dir.join("binary_atomic.inst");
-    let script = bininst_dir.join("instrument.sh");
-    let output = Command::new("timeout")
-        .arg("--kill-after=5s")
-        .arg(format!("{}s", TIMEOUT.as_secs()))
-        .arg("bash")
-        .arg(&script)
-        .arg(&original)
-        .current_dir(&bininst_dir)
-        .env("OUT_DIR", &instrumented_dir)
-        .output()
-        .unwrap_or_else(|e| panic!("failed to spawn {}: {e}", script.display()));
-    assert!(
-        output.status.success(),
-        "binary instrumentation failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        instrumented.exists(),
-        "expected instrumented binary at {}",
-        instrumented.display()
-    );
-    let instrument_log = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let Some((instrumented, instrumented_dir, instrument_log)) =
+        instrument_binary(&original, "instrumented")
+    else {
+        return;
+    };
+
     assert!(
         instrument_log.contains("num_patched           = 2 / 2"),
         "expected both lock-prefixed atomics to be patched\n{instrument_log}"

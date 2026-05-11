@@ -7,11 +7,9 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 E9_DIR="${SCRIPT_DIR}/e9patch"
 
 if [ $# -lt 1 ]; then
-    echo "usage: $0 <binary> [e9tool options...]" >&2
+    echo "usage: $0 <binary> [out_dir] [e9tool options...]" >&2
     exit 2
 fi
-
-cp "${SCRIPT_DIR}/hooks/schedule_memops.c" "${E9_DIR}/examples"
 
 BINARY=$(command -v "$1" || true)
 if [ -z "${BINARY}" ]; then
@@ -20,7 +18,19 @@ fi
 BINARY=$(readlink -f "${BINARY}")
 BASENAME=$(basename "$BINARY")
 
-OUT_DIR=${OUT_DIR:-"${SCRIPT_DIR}/instrumented"}
+shift
+
+# Optional second positional argument: destination directory for instrumented
+# output AND the per-invocation schedule_memops compilation.  Supplying a
+# unique directory per caller allows concurrent invocations to run in parallel
+# without racing on the compiled schedule_memops binary.  Falls back to the
+# OUT_DIR environment variable, then to the default instrumented/ directory.
+if [ $# -ge 1 ] && [[ "$1" != -* ]]; then
+    OUT_DIR=$(readlink -m "$1")
+    shift
+else
+    OUT_DIR=${OUT_DIR:-"${SCRIPT_DIR}/instrumented"}
+fi
 mkdir -p "${OUT_DIR}"
 OUTPUT=${OUT:-"${OUT_DIR}/${BASENAME}.inst"}
 INSTRUMENT_LIBS=${INSTRUMENT_LIBS:-1}
@@ -28,17 +38,24 @@ INSTRUMENT_LIBS=${INSTRUMENT_LIBS:-1}
 CSV="${SEL_INSTR:=0}"
 if [ "${SEL_INSTR}" != "0" ]; then
     CSV=$(readlink -f "$CSV")
-    cp "$CSV" "${E9_DIR}"
+    cp "$CSV" "${OUT_DIR}"
     CSV=$(basename "$CSV" .csv)
 fi
 echo "CSV is ${CSV}"
 echo "SEL_INSTR is ${SEL_INSTR}"
 
-shift
 EXTRA_ARGS=("$@")
 
-pushd "${E9_DIR}" >/dev/null
-CC=gcc CXX=g++ ./e9compile.sh examples/schedule_memops.c
+# Compile schedule_memops into OUT_DIR (not the shared E9_DIR) so that
+# concurrent invocations with different OUT_DIRs don't race on the binary.
+# Expose E9_DIR/examples via a symlink so e9compile.sh's -I examples/ flag
+# and schedule_memops.c's #include "stdlib.c" both resolve correctly.
+cp "${SCRIPT_DIR}/hooks/schedule_memops.c" "${E9_DIR}/examples/"
+if [ "${OUT_DIR}" != "${E9_DIR}" ]; then
+    ln -sfn "${E9_DIR}/examples" "${OUT_DIR}/examples"
+fi
+pushd "${OUT_DIR}" >/dev/null
+CC=gcc CXX=g++ "${E9_DIR}/e9compile.sh" examples/schedule_memops.c
 popd >/dev/null
 
 is_shared_object() {
@@ -65,9 +82,9 @@ instrument_one() {
     done < <(extra_for_binary "$input")
 
     echo "Instrumenting ${input} -> ${output}"
-    pushd "${E9_DIR}" >/dev/null
+    pushd "${OUT_DIR}" >/dev/null
     if [ "$SEL_INSTR" -eq 0 ]; then
-        "./e9tool" \
+        "${E9_DIR}/e9tool" \
             -o "$output" \
             -E '".plt"' -E '".plt.got"' -O2 --option --mem-granularity=4096 \
             -M 'bytes[0] == 0xF0 && mem[0].access == rw && mem[0].base != %rsp && mem[0].seg == nil' \
@@ -84,7 +101,7 @@ instrument_one() {
             -P 'mem_wi((static)addr, &mem[1], mem[1].size)@schedule_memops' \
             --option --log=false "${extra[@]}" "${EXTRA_ARGS[@]}" -- "$input"
     else
-        "./e9tool" \
+        "${E9_DIR}/e9tool" \
             -o "$output" \
             -E '".plt"' -E '".plt.got"' -O2 --option --mem-granularity=4096 \
             --use-disasm "${CSV}.csv" \

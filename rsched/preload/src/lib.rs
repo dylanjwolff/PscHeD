@@ -20,6 +20,7 @@
 //! directly to the next implementation via dlsym(RTLD_NEXT, …).
 
 #![allow(unsafe_op_in_unsafe_fn)]
+#![allow(clippy::missing_safety_doc)]
 
 use scopeguard::defer;
 use std::sync::atomic::{AtomicUsize, Ordering};

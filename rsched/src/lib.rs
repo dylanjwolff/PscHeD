@@ -6,6 +6,7 @@
 //! any LD_PRELOAD trickery.
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(internal_features)]
+#![allow(clippy::missing_safety_doc)]
 #![feature(linkage)]
 #![feature(link_llvm_intrinsics)]
 
@@ -124,7 +125,7 @@ struct State {
 
 impl State {
     fn new(seed: u64) -> Self {
-        let logging = std::env::var("RSCHED_LOG").map_or(false, |v| v == "1");
+        let logging = std::env::var("RSCHED_LOG").is_ok_and(|v| v == "1");
         let scheduler: Box<dyn Scheduler> = if logging {
             Box::new(LoggingScheduler::new(RandomWalk::new(seed)))
         } else {
@@ -236,28 +237,22 @@ impl State {
             self.t(caller).startup_done = true;
         }
 
-        loop {
-            match self.choose() {
-                Some(idx) => {
-                    let next = self.threads[idx];
-                    self.wake(next, true, caller);
-                    break;
-                }
-                None => {
-                    // No thread eligible to schedule.  This can happen when:
-                    //  • the only other threads are external (e.g. TSAN's background
-                    //    timer), registered in st().threads but not inside rsched's
-                    //    cond_wait — signalling them would be a lost wakeup;
-                    //  • a freshly-created thread is already in rsched's initial
-                    //    cond_wait but still has startup_done=false — the caller
-                    //    will set startup_done and signal it after we return;
-                    //  • all other threads are logically blocking (is_blocking=true).
-                    // In every case the right action is to return and let the
-                    // caller continue; it will take the appropriate next step
-                    // (signal child, block in rpt().join, etc.).
-                    return;
-                }
-            }
+        if let Some(idx) = self.choose() {
+            let next = self.threads[idx];
+            self.wake(next, true, caller);
+        } else {
+            // No thread eligible to schedule.  This can happen when:
+            //  • the only other threads are external (e.g. TSAN's background
+            //    timer), registered in st().threads but not inside rsched's
+            //    cond_wait — signalling them would be a lost wakeup;
+            //  • a freshly-created thread is already in rsched's initial
+            //    cond_wait but still has startup_done=false — the caller
+            //    will set startup_done and signal it after we return;
+            //  • all other threads are logically blocking (is_blocking=true).
+            // In every case the right action is to return and let the
+            // caller continue; it will take the appropriate next step
+            // (signal child, block in rpt().join, etc.).
+            return;
         }
 
         let event = self.info.get(&caller).and_then(|t| t.next_event);
@@ -489,12 +484,12 @@ unsafe fn rpt() -> &'static RealPt {
         // libc.so.6 and libpthread.so.0 is a forwarding stub that still responds
         // to dlsym correctly.  RTLD_NOLOAD avoids loading anything new.
         let mut lib = libc::dlopen(
-            b"libpthread.so.0\0".as_ptr() as *const _,
+            c"libpthread.so.0".as_ptr(),
             libc::RTLD_LAZY | libc::RTLD_NOLOAD,
         );
         if lib.is_null() {
             lib = libc::dlopen(
-                b"libc.so.6\0".as_ptr() as *const _,
+                c"libc.so.6".as_ptr(),
                 libc::RTLD_LAZY | libc::RTLD_NOLOAD,
             );
         }
@@ -786,7 +781,7 @@ unsafe fn install_seccomp_filter() {
     let syscall_ip = &rsched_internal_syscall6_insn as *const u8 as usize as u64 + 2;
     let syscall_ip_lo = syscall_ip as u32;
     let syscall_ip_hi = (syscall_ip >> 32) as u32;
-    let trap_clone = std::env::var("RSCHED_SECCOMP_TRAP_CLONE").map_or(false, |v| v == "1");
+    let trap_clone = std::env::var("RSCHED_SECCOMP_TRAP_CLONE").is_ok_and(|v| v == "1");
     let clone_syscall = if trap_clone {
         libc::SYS_clone as u32
     } else {
@@ -1161,12 +1156,12 @@ unsafe fn do_thread_exit(caller: PthreadT) {
         st().t(joiner).is_blocking = false;
     }
     st().remove(caller);
-    if !st().threads.is_empty() {
-        if let Some(idx) = st().choose() {
-            let next = st().threads[idx];
-            let cond_ptr = addr_of_mut!(st().t(next).suspend_cond);
-            with_internal_depth(|| (rpt().cond_signal)(cond_ptr));
-        }
+    if !st().threads.is_empty()
+        && let Some(idx) = st().choose()
+    {
+        let next = st().threads[idx];
+        let cond_ptr = addr_of_mut!(st().t(next).suspend_cond);
+        with_internal_depth(|| (rpt().cond_signal)(cond_ptr));
     }
     rsched_gunlock();
     depth_exit();
@@ -1399,25 +1394,25 @@ pub unsafe extern "C" fn rsched_pthread_mutex_trylock(lock: *mut MutexT) -> libc
     );
     st().context_switch(caller);
     let tid = st().info[&caller].tid;
-    if let Some(m) = st().mutexes.get(&key) {
-        if m.owner_tid == tid {
-            if st().is_recursive_mutex(key) {
-                st().mutex_lock(key, caller);
-                let r = with_internal_depth(|| (rpt().mutex_lock)(lock));
-                if r != 0 {
-                    st().clear_event(caller);
-                    rsched_gunlock();
-                    return r;
-                }
-                tsan_user_acquire(lock as *mut libc::c_void);
+    if let Some(m) = st().mutexes.get(&key)
+        && m.owner_tid == tid
+    {
+        if st().is_recursive_mutex(key) {
+            st().mutex_lock(key, caller);
+            let r = with_internal_depth(|| (rpt().mutex_lock)(lock));
+            if r != 0 {
                 st().clear_event(caller);
                 rsched_gunlock();
-                return 0;
+                return r;
             }
+            tsan_user_acquire(lock as *mut libc::c_void);
             st().clear_event(caller);
             rsched_gunlock();
-            return libc::EBUSY;
+            return 0;
         }
+        st().clear_event(caller);
+        rsched_gunlock();
+        return libc::EBUSY;
     }
     if st().will_block(key, tid) {
         st().clear_event(caller);
