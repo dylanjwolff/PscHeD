@@ -20,4 +20,4 @@ jobs:
     - name: Build the Docker image
       run: docker buildx build --progress=plain --cache-to type=gha --cache-from type=gha -t rsched .
     - name: Run tests
-      run: docker run rsched
+      run: docker run --security-opt seccomp=unconfined rsched
