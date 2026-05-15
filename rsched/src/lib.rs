@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ptr::addr_of_mut;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, Ordering};
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::arch::global_asm;
@@ -34,9 +34,14 @@ type AttrT = libc::pthread_attr_t;
 type MutexAttrT = libc::pthread_mutexattr_t;
 type StartRoutine = unsafe extern "C" fn(*mut libc::c_void) -> *mut libc::c_void;
 
+const MAX_PROCESSES: usize = 32;
+const MAX_TASKS_PER_PROCESS: usize = 64;
+const MAX_TASKS: usize = MAX_PROCESSES * MAX_TASKS_PER_PROCESS;
+
 // ── Thread descriptor ─────────────────────────────────────────────────────
 
 struct Thread {
+    task_id: usize,
     tid: libc::pid_t,
     pthread: PthreadT,
     is_blocking: bool,
@@ -73,6 +78,7 @@ impl Thread {
 
     fn new_with_tid(pt: PthreadT, tid: libc::pid_t) -> Self {
         Thread {
+            task_id: usize::MAX,
             tid,
             pthread: pt,
             is_blocking: false,
@@ -101,6 +107,13 @@ struct SCond {
 struct SBarrier {
     count: u32,
     waiters: Vec<PthreadT>,
+}
+
+#[derive(Clone, Copy)]
+struct TaskChoice {
+    task_id: usize,
+    process_slot: i32,
+    pthread: PthreadT,
 }
 
 // ── Scheduler state ───────────────────────────────────────────────────────
@@ -144,8 +157,9 @@ impl State {
         }
     }
 
-    fn add(&mut self, t: Thread) {
+    unsafe fn add(&mut self, mut t: Thread) {
         let pt = t.pthread;
+        t.task_id = register_task(pt);
         self.threads.push(pt);
         self.info.insert(pt, Box::new(t));
     }
@@ -155,6 +169,14 @@ impl State {
         if let Some(t) = self.info.get_mut(&pt) {
             t.is_blocking = true;
             t.is_exited = true;
+            unsafe {
+                update_task_status(
+                    t.task_id,
+                    t.is_blocking,
+                    t.startup_done,
+                    t.is_in_rsched_wait,
+                );
+            }
         }
     }
 
@@ -165,23 +187,33 @@ impl State {
             .as_mut()
     }
 
-    fn choose(&mut self) -> Option<usize> {
-        let blocking: Vec<bool> = self
-            .threads
-            .iter()
-            .map(|pt| {
-                let t = self.info[pt].as_ref();
-                // A thread is ineligible if it is logically blocking (waiting for a
-                // resource), not yet started (sanitizer handshake pending), or not
-                // currently suspended inside rsched's own cond_wait.  The last
-                // condition filters out external threads (e.g. TSAN's background
-                // timer) that are registered in `st().threads` but are running their
-                // own code (nanosleep) without any rsched scheduling point, so
-                // signalling their suspend_cond would be a lost wakeup.
-                t.is_blocking || !t.startup_done || !t.is_in_rsched_wait
-            })
-            .collect();
-        self.scheduler.choose(&blocking)
+    unsafe fn refresh_task(&mut self, pt: PthreadT) {
+        if let Some(t) = self.info.get(&pt) {
+            update_task_status(
+                t.task_id,
+                t.is_blocking,
+                t.startup_done,
+                t.is_in_rsched_wait,
+            );
+        }
+    }
+
+    fn choose_index(&mut self, blocking: &[bool]) -> Option<usize> {
+        self.scheduler.choose(blocking)
+    }
+
+    unsafe fn publish_local_tasks(&mut self, caller: PthreadT) {
+        let ps = PROCESS_SHARED.load(Ordering::Acquire);
+        if ps.is_null() {
+            return;
+        }
+        process_lock(ps);
+        for pt in self.threads.iter().copied() {
+            let t = self.info[&pt].as_ref();
+            let is_waiting = pt == caller || t.is_in_rsched_wait;
+            set_task_status_locked(ps, t.task_id, t.is_blocking, t.startup_done, is_waiting);
+        }
+        process_unlock(ps);
     }
 
     /// Complete a deferred child startup handshake.
@@ -198,6 +230,7 @@ impl State {
             drop(Box::from_raw(sa));
             if self.info.contains_key(&child_pt) {
                 self.t(child_pt).startup_done = true;
+                self.refresh_task(child_pt);
             }
         }
     }
@@ -213,8 +246,10 @@ impl State {
                 let my_cond = addr_of_mut!(self.info.get_mut(&caller).unwrap().suspend_cond);
                 // Mark caller as waiting before releasing GMTX so choose() can see it.
                 self.info.get_mut(&caller).unwrap().is_in_rsched_wait = true;
+                self.refresh_task(caller);
                 rsched_cond_wait(my_cond);
                 self.info.get_mut(&caller).unwrap().is_in_rsched_wait = false;
+                self.refresh_task(caller);
             }
         }
     }
@@ -229,34 +264,141 @@ impl State {
             return;
         }
 
-        if self.threads.len() <= 1 {
-            return;
-        }
-
         if !self.info[&caller].startup_done {
             self.t(caller).startup_done = true;
+            self.refresh_task(caller);
         }
 
-        if let Some(idx) = self.choose() {
-            let next = self.threads[idx];
-            self.wake(next, true, caller);
-        } else {
-            // No thread eligible to schedule.  This can happen when:
-            //  • the only other threads are external (e.g. TSAN's background
-            //    timer), registered in st().threads but not inside rsched's
-            //    cond_wait — signalling them would be a lost wakeup;
-            //  • a freshly-created thread is already in rsched's initial
-            //    cond_wait but still has startup_done=false — the caller
-            //    will set startup_done and signal it after we return;
-            //  • all other threads are logically blocking (is_blocking=true).
-            // In every case the right action is to return and let the
-            // caller continue; it will take the appropriate next step
-            // (signal child, block in rpt().join, etc.).
-            return;
+        if let Some(choice) = self.choose_task(caller) {
+            if choice.pthread != caller
+                || choice.process_slot != PROCESS_SLOT.load(Ordering::Acquire)
+            {
+                self.run_task(choice, caller);
+            }
         }
 
         let event = self.info.get(&caller).and_then(|t| t.next_event);
         self.scheduler.on_event(event.as_ref());
+    }
+
+    unsafe fn choose_task(&mut self, caller: PthreadT) -> Option<TaskChoice> {
+        let current = PROCESS_SLOT.load(Ordering::Acquire);
+        let ps = PROCESS_SHARED.load(Ordering::Acquire);
+        if ps.is_null() {
+            let mut tasks = Vec::new();
+            for pt in self.threads.iter().copied() {
+                let t = self.info[&pt].as_ref();
+                if !t.is_blocking && t.startup_done && (pt == caller || t.is_in_rsched_wait) {
+                    tasks.push(TaskChoice {
+                        task_id: t.task_id,
+                        process_slot: current,
+                        pthread: pt,
+                    });
+                }
+            }
+            let blocking = vec![false; tasks.len()];
+            return self.choose_index(&blocking).map(|idx| tasks[idx]);
+        }
+
+        self.publish_local_tasks(caller);
+
+        let mut tasks = [TaskChoice {
+            task_id: usize::MAX,
+            process_slot: -1,
+            pthread: 0 as PthreadT,
+        }; MAX_TASKS];
+        let mut n = 0usize;
+        process_lock(ps);
+        for id in 0..(*ps).task_count.min(MAX_TASKS) {
+            let task = (*ps).tasks[id];
+            if task.active != 0
+                && task.process_slot >= 0
+                && (*ps).slots[task.process_slot as usize].active != 0
+                && task.is_blocking == 0
+                && task.startup_done != 0
+                && task.is_waiting != 0
+            {
+                tasks[n] = TaskChoice {
+                    task_id: id,
+                    process_slot: task.process_slot,
+                    pthread: task.pthread as PthreadT,
+                };
+                n += 1;
+            }
+        }
+        let blocking = vec![false; n];
+        let choice = self.choose_index(&blocking).map(|idx| tasks[idx]);
+        process_unlock(ps);
+        choice
+    }
+
+    unsafe fn run_task(&mut self, choice: TaskChoice, caller: PthreadT) {
+        let current = PROCESS_SLOT.load(Ordering::Acquire);
+        if choice.process_slot == current {
+            self.wake(choice.pthread, true, caller);
+            return;
+        }
+
+        let ps = PROCESS_SHARED.load(Ordering::Acquire);
+        if ps.is_null() {
+            return;
+        }
+
+        process_lock(ps);
+        if choice.process_slot < 0 || (*ps).slots[choice.process_slot as usize].active == 0 {
+            process_unlock(ps);
+            return;
+        }
+        (*ps).slots[choice.process_slot as usize].selected_task = choice.task_id;
+        process_log(format_args!(
+            "pid {} switch slot {} -> {} thread {:#x}",
+            libc::getpid(),
+            current,
+            choice.process_slot,
+            choice.pthread as usize
+        ));
+        let r = with_internal_depth(|| {
+            libc::sem_post(addr_of_mut!((*ps).slots[choice.process_slot as usize].gate))
+        });
+        assert_eq!(r, 0, "rsched: sem_post failed");
+        process_unlock(ps);
+
+        self.info.get_mut(&caller).unwrap().is_in_rsched_wait = true;
+        self.refresh_task(caller);
+        process_wait_on_slot(ps, current);
+        self.resume_selected_thread(caller);
+    }
+
+    unsafe fn resume_selected_thread(&mut self, caller: PthreadT) {
+        let current = PROCESS_SLOT.load(Ordering::Acquire);
+        let ps = PROCESS_SHARED.load(Ordering::Acquire);
+        if current < 0 || ps.is_null() {
+            return;
+        }
+        process_lock(ps);
+        let selected_task = (*ps).slots[current as usize].selected_task;
+        (*ps).slots[current as usize].selected_task = usize::MAX;
+        let selected = if selected_task < (*ps).task_count {
+            (*ps).tasks[selected_task].pthread as PthreadT
+        } else {
+            0 as PthreadT
+        };
+        process_unlock(ps);
+        process_log(format_args!(
+            "pid {} woke slot {} selected task {} thread {:#x} caller {:#x}",
+            libc::getpid(),
+            current,
+            selected_task,
+            selected as usize,
+            caller as usize
+        ));
+
+        if selected != 0 as PthreadT && self.info.contains_key(&selected) && selected != caller {
+            self.wake(selected, true, caller);
+        } else if self.info.contains_key(&caller) {
+            self.t(caller).is_in_rsched_wait = false;
+            self.refresh_task(caller);
+        }
     }
 
     // ── event helpers ─────────────────────────────────────────────────
@@ -338,8 +480,7 @@ impl State {
         // Phase 2: pick a random waiter (needs self.scheduler, no mutexes borrow active).
         let blocking = vec![false; waiter_count];
         let idx = self
-            .scheduler
-            .choose(&blocking)
+            .choose_index(&blocking)
             .expect("rsched: non-empty waiter list");
         // Phase 3: transfer ownership to chosen waiter.
         let waiter = self.mutexes.get_mut(&key).unwrap().waiters.remove(idx);
@@ -415,6 +556,9 @@ pub unsafe extern "C" fn rsched_note_pthread_mutex_destroy(lock: *mut MutexT) {
 static mut GMTX: MutexT = libc::PTHREAD_MUTEX_INITIALIZER;
 static mut STATE: Option<State> = None;
 static INITED: AtomicBool = AtomicBool::new(false);
+static PROCESS_SHARED: AtomicPtr<ProcessShared> = AtomicPtr::new(core::ptr::null_mut());
+static PROCESS_SLOT: AtomicI32 = AtomicI32::new(-1);
+static FORK_SLOT: AtomicI32 = AtomicI32::new(-1);
 
 thread_local! {
     static MY_PT: RefCell<PthreadT> = const { RefCell::new(unsafe { std::mem::zeroed() }) };
@@ -422,6 +566,34 @@ thread_local! {
 
 fn my_pt() -> PthreadT {
     MY_PT.with(|c| *c.borrow())
+}
+
+#[repr(C)]
+struct ProcessSlot {
+    pid: libc::pid_t,
+    active: u8,
+    _pad: [u8; 3],
+    selected_task: usize,
+    gate: libc::sem_t,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SharedTask {
+    active: u8,
+    is_blocking: u8,
+    startup_done: u8,
+    is_waiting: u8,
+    process_slot: i32,
+    pthread: usize,
+}
+
+#[repr(C)]
+struct ProcessShared {
+    lock: MutexT,
+    task_count: usize,
+    tasks: [SharedTask; MAX_TASKS],
+    slots: [ProcessSlot; MAX_PROCESSES],
 }
 
 // ── Return-address intrinsic ──────────────────────────────────────────────
@@ -488,10 +660,7 @@ unsafe fn rpt() -> &'static RealPt {
             libc::RTLD_LAZY | libc::RTLD_NOLOAD,
         );
         if lib.is_null() {
-            lib = libc::dlopen(
-                c"libc.so.6".as_ptr(),
-                libc::RTLD_LAZY | libc::RTLD_NOLOAD,
-            );
+            lib = libc::dlopen(c"libc.so.6".as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
         }
         assert!(
             !lib.is_null(),
@@ -548,6 +717,370 @@ unsafe fn rsched_cond_wait(cond: *mut CondT) {
     sync_release();
     with_internal_depth(|| (rpt().cond_wait)(cond, addr_of_mut!(GMTX)));
     sync_acquire();
+}
+
+unsafe fn process_shared_ptr() -> *mut ProcessShared {
+    let mut p = PROCESS_SHARED.load(Ordering::Acquire);
+    if !p.is_null() {
+        return p;
+    }
+
+    let size = core::mem::size_of::<ProcessShared>();
+    let raw = libc::mmap(
+        core::ptr::null_mut(),
+        size,
+        libc::PROT_READ | libc::PROT_WRITE,
+        libc::MAP_ANONYMOUS | libc::MAP_SHARED,
+        -1,
+        0,
+    );
+    assert_ne!(
+        raw,
+        libc::MAP_FAILED,
+        "rsched: mmap shared process state failed"
+    );
+    core::ptr::write_bytes(raw, 0, size);
+    p = raw.cast::<ProcessShared>();
+
+    let mut attr: libc::pthread_mutexattr_t = core::mem::zeroed();
+    let r = with_internal_depth(|| libc::pthread_mutexattr_init(&mut attr));
+    assert_eq!(r, 0, "rsched: pthread_mutexattr_init failed");
+    let r = with_internal_depth(|| {
+        libc::pthread_mutexattr_setpshared(&mut attr, libc::PTHREAD_PROCESS_SHARED)
+    });
+    assert_eq!(r, 0, "rsched: pthread_mutexattr_setpshared failed");
+    let r = with_internal_depth(|| libc::pthread_mutex_init(addr_of_mut!((*p).lock), &attr));
+    assert_eq!(r, 0, "rsched: process-shared mutex init failed");
+    with_internal_depth(|| libc::pthread_mutexattr_destroy(&mut attr));
+
+    match PROCESS_SHARED.compare_exchange(
+        core::ptr::null_mut(),
+        p,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => p,
+        Err(existing) => {
+            libc::munmap(raw, size);
+            existing
+        }
+    }
+}
+
+fn process_log(args: core::fmt::Arguments<'_>) {
+    if std::env::var("RSCHED_PROCESS_LOG").is_ok_and(|v| v == "1") {
+        eprintln!("[rsched-process] {args}");
+    }
+}
+
+unsafe fn process_lock(ps: *mut ProcessShared) {
+    let r = with_internal_depth(|| (rpt().mutex_lock)(addr_of_mut!((*ps).lock)));
+    assert_eq!(r, 0, "rsched: process shared lock failed");
+}
+
+unsafe fn process_unlock(ps: *mut ProcessShared) {
+    let r = with_internal_depth(|| (rpt().mutex_unlock)(addr_of_mut!((*ps).lock)));
+    assert_eq!(r, 0, "rsched: process shared unlock failed");
+}
+
+unsafe fn set_task_status_locked(
+    ps: *mut ProcessShared,
+    task_id: usize,
+    is_blocking: bool,
+    startup_done: bool,
+    is_waiting: bool,
+) {
+    if task_id >= (*ps).task_count || task_id >= MAX_TASKS {
+        return;
+    }
+    let task = &mut (*ps).tasks[task_id];
+    task.is_blocking = u8::from(is_blocking);
+    task.startup_done = u8::from(startup_done);
+    task.is_waiting = u8::from(is_waiting);
+}
+
+unsafe fn update_task_status(
+    task_id: usize,
+    is_blocking: bool,
+    startup_done: bool,
+    is_waiting: bool,
+) {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if ps.is_null() || task_id == usize::MAX {
+        return;
+    }
+    process_lock(ps);
+    set_task_status_locked(ps, task_id, is_blocking, startup_done, is_waiting);
+    process_unlock(ps);
+}
+
+unsafe fn register_task(pt: PthreadT) -> usize {
+    let slot = PROCESS_SLOT.load(Ordering::Acquire);
+    let ps = process_shared_ptr();
+    process_lock(ps);
+    if (*ps).task_count >= MAX_TASKS {
+        process_unlock(ps);
+        panic!("rsched: too many tasks; increase MAX_TASKS");
+    }
+    let task_id = (*ps).task_count;
+    (*ps).task_count += 1;
+    (*ps).tasks[task_id] = SharedTask {
+        active: 1,
+        is_blocking: 0,
+        startup_done: 0,
+        is_waiting: 0,
+        process_slot: slot,
+        pthread: pt as usize,
+    };
+    process_unlock(ps);
+    task_id
+}
+
+unsafe fn deactivate_process_tasks_locked(ps: *mut ProcessShared, process_slot: i32) {
+    for id in 0..(*ps).task_count.min(MAX_TASKS) {
+        if (*ps).tasks[id].process_slot == process_slot {
+            (*ps).tasks[id].active = 0;
+            (*ps).tasks[id].is_blocking = 1;
+            (*ps).tasks[id].is_waiting = 0;
+        }
+    }
+}
+
+unsafe fn process_register_current(initially_runnable: bool) -> i32 {
+    let ps = process_shared_ptr();
+    process_lock(ps);
+    let pid = libc::getpid();
+
+    for i in 0..MAX_PROCESSES {
+        if (*ps).slots[i].active != 0 && (*ps).slots[i].pid == pid {
+            process_unlock(ps);
+            PROCESS_SLOT.store(i as i32, Ordering::Release);
+            return i as i32;
+        }
+    }
+
+    for i in 0..MAX_PROCESSES {
+        if (*ps).slots[i].active == 0 {
+            let r = with_internal_depth(|| {
+                libc::sem_init(
+                    addr_of_mut!((*ps).slots[i].gate),
+                    1,
+                    u32::from(initially_runnable),
+                )
+            });
+            assert_eq!(r, 0, "rsched: sem_init failed");
+            (*ps).slots[i].pid = pid;
+            (*ps).slots[i].active = 1;
+            (*ps).slots[i].selected_task = usize::MAX;
+            process_unlock(ps);
+            PROCESS_SLOT.store(i as i32, Ordering::Release);
+            if initially_runnable {
+                let mut discard = 0;
+                while with_internal_depth(|| libc::sem_trywait(addr_of_mut!((*ps).slots[i].gate)))
+                    == 0
+                {
+                    discard += 1;
+                    if discard > 1 {
+                        break;
+                    }
+                }
+            }
+            return i as i32;
+        }
+    }
+
+    process_unlock(ps);
+    panic!("rsched: too many forked processes; increase MAX_PROCESSES");
+}
+
+unsafe fn process_wait_on_slot(ps: *mut ProcessShared, slot: i32) {
+    loop {
+        let r =
+            with_internal_depth(|| libc::sem_wait(addr_of_mut!((*ps).slots[slot as usize].gate)));
+        if r == 0 {
+            return;
+        }
+        let errno = *libc::__errno_location();
+        assert_eq!(errno, libc::EINTR, "rsched: sem_wait failed");
+    }
+}
+
+unsafe fn process_wait_until_published(ps: *mut ProcessShared, slot: i32) {
+    loop {
+        process_lock(ps);
+        let mut ready = false;
+        if slot >= 0 && (*ps).slots[slot as usize].active != 0 {
+            for id in 0..(*ps).task_count.min(MAX_TASKS) {
+                let task = (*ps).tasks[id];
+                if task.active != 0 && task.process_slot == slot {
+                    ready = true;
+                    break;
+                }
+            }
+        }
+        process_unlock(ps);
+        if ready {
+            return;
+        }
+        with_internal_depth(|| libc::sched_yield());
+    }
+}
+
+extern "C" fn process_atexit() {
+    unsafe {
+        rsched_process_exit();
+    }
+}
+
+unsafe fn reset_local_state_after_fork() {
+    STATE = None;
+    INITED.store(false, Ordering::SeqCst);
+    rsched_init();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_before_fork() {
+    ensure_init();
+    let ps = process_shared_ptr();
+    process_lock(ps);
+    for i in 0..MAX_PROCESSES {
+        if (*ps).slots[i].active == 0 {
+            let r = with_internal_depth(|| libc::sem_init(addr_of_mut!((*ps).slots[i].gate), 1, 0));
+            assert_eq!(r, 0, "rsched: fork sem_init failed");
+            (*ps).slots[i].pid = 0;
+            (*ps).slots[i].active = 1;
+            (*ps).slots[i].selected_task = usize::MAX;
+            FORK_SLOT.store(i as i32, Ordering::Release);
+            process_log(format_args!(
+                "pid {} reserved fork slot {}",
+                libc::getpid(),
+                i
+            ));
+            process_unlock(ps);
+            return;
+        }
+    }
+    process_unlock(ps);
+    panic!("rsched: too many forked processes; increase MAX_PROCESSES");
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_after_fork_parent(child: libc::pid_t) {
+    let slot = FORK_SLOT.swap(-1, Ordering::AcqRel);
+    if slot < 0 {
+        return;
+    }
+    let ps = process_shared_ptr();
+    process_lock(ps);
+    if child <= 0 {
+        (*ps).slots[slot as usize].active = 0;
+        process_unlock(ps);
+        return;
+    }
+    (*ps).slots[slot as usize].pid = child;
+    process_log(format_args!(
+        "pid {} parent registered child {} in slot {}",
+        libc::getpid(),
+        child,
+        slot
+    ));
+    process_unlock(ps);
+    process_wait_until_published(ps, slot);
+    rsched_glock();
+    let caller = my_pt();
+    st().context_switch(caller);
+    rsched_gunlock();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_after_fork_child() {
+    let slot = FORK_SLOT.swap(-1, Ordering::AcqRel);
+    let ps = process_shared_ptr();
+    if slot >= 0 {
+        process_lock(ps);
+        (*ps).slots[slot as usize].pid = libc::getpid();
+        process_log(format_args!(
+            "pid {} child using fork slot {}",
+            libc::getpid(),
+            slot
+        ));
+        process_unlock(ps);
+        PROCESS_SLOT.store(slot, Ordering::Release);
+    } else {
+        process_register_current(false);
+    }
+    reset_local_state_after_fork();
+    rsched_glock();
+    st().publish_local_tasks(my_pt());
+    rsched_gunlock();
+    process_log(format_args!(
+        "pid {} child waiting on slot {}",
+        libc::getpid(),
+        PROCESS_SLOT.load(Ordering::Acquire)
+    ));
+    process_wait_on_slot(ps, PROCESS_SLOT.load(Ordering::Acquire));
+    process_lock(ps);
+    (*ps).slots[PROCESS_SLOT.load(Ordering::Acquire) as usize].selected_task = usize::MAX;
+    process_unlock(ps);
+    process_log(format_args!("pid {} child resumed", libc::getpid()));
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_process_exit() {
+    let current = PROCESS_SLOT.swap(-1, Ordering::AcqRel);
+    if current < 0 {
+        return;
+    }
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if ps.is_null() {
+        return;
+    }
+    if INITED.load(Ordering::Acquire) {
+        rsched_glock();
+    }
+    process_lock(ps);
+    (*ps).slots[current as usize].active = 0;
+    deactivate_process_tasks_locked(ps, current);
+    process_unlock(ps);
+    let next = if INITED.load(Ordering::Acquire) {
+        st().choose_task(0 as PthreadT)
+    } else {
+        None
+    };
+    process_log(format_args!(
+        "pid {} exit slot {}, next slot {} thread {:#x}",
+        libc::getpid(),
+        current,
+        next.map_or(-1, |choice| choice.process_slot),
+        next.map_or(0, |choice| choice.pthread as usize)
+    ));
+    if let Some(choice) = next
+        && choice.process_slot != current
+        && choice.process_slot >= 0
+    {
+        process_lock(ps);
+        (*ps).slots[choice.process_slot as usize].selected_task = choice.task_id;
+        let _ = with_internal_depth(|| {
+            libc::sem_post(addr_of_mut!((*ps).slots[choice.process_slot as usize].gate))
+        });
+        process_unlock(ps);
+    }
+    if INITED.load(Ordering::Acquire) {
+        rsched_gunlock();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_fork() -> libc::pid_t {
+    ensure_init();
+    rsched_before_fork();
+    let pid = with_internal_depth(|| libc::fork());
+    if pid == 0 {
+        rsched_after_fork_child();
+    } else {
+        rsched_after_fork_parent(pid);
+    }
+    pid
 }
 
 unsafe fn tsan_user_acquire(addr: *mut libc::c_void) {
@@ -963,6 +1496,11 @@ pub unsafe extern "C" fn rsched_init() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0x12345678abcdu64);
     STATE = Some(State::new(seed));
+    let first_process = PROCESS_SLOT.load(Ordering::Acquire) < 0;
+    process_register_current(first_process);
+    if first_process {
+        with_internal_depth(|| libc::atexit(process_atexit));
+    }
 
     let self_pt = libc::pthread_self();
     MY_PT.with(|c| *c.borrow_mut() = self_pt);
@@ -970,6 +1508,7 @@ pub unsafe extern "C" fn rsched_init() {
     let mut t = Thread::new(self_pt);
     t.startup_done = true; // main thread needs no sanitizer handshake
     st().add(t);
+    st().refresh_task(self_pt);
     rsched_gunlock();
     install_seccomp_tripwire_if_requested();
 }
@@ -989,10 +1528,21 @@ fn ensure_init() {
 /// Used by integration tests to run multiple scenarios in one process.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_reinit(seed: u64) {
+    let current_slot = PROCESS_SLOT.load(Ordering::Acquire);
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if current_slot >= 0 && !ps.is_null() {
+        process_lock(ps);
+        deactivate_process_tasks_locked(ps, current_slot);
+        process_unlock(ps);
+    }
+
     // Drop any existing state (previous test run's threads/mutexes/etc.).
     STATE = None;
     STATE = Some(State::new(seed));
     INITED.store(true, Ordering::SeqCst);
+    if PROCESS_SLOT.load(Ordering::Acquire) < 0 {
+        process_register_current(true);
+    }
 
     let self_pt = libc::pthread_self();
     MY_PT.with(|c| *c.borrow_mut() = self_pt);
@@ -1000,6 +1550,7 @@ pub unsafe extern "C" fn rsched_reinit(seed: u64) {
     let mut t = Thread::new(self_pt);
     t.startup_done = true;
     st().add(t);
+    st().refresh_task(self_pt);
     rsched_gunlock();
 }
 
@@ -1154,14 +1705,40 @@ unsafe fn do_thread_exit(caller: PthreadT) {
     let joiner_opt = st().info.get(&caller).and_then(|t| t.joiner);
     if let Some(joiner) = joiner_opt {
         st().t(joiner).is_blocking = false;
+        st().refresh_task(joiner);
     }
     st().remove(caller);
-    if !st().threads.is_empty()
-        && let Some(idx) = st().choose()
-    {
-        let next = st().threads[idx];
+    let mut local_tasks = Vec::new();
+    for pt in st().threads.iter().copied() {
+        let t = st().info[&pt].as_ref();
+        if !t.is_blocking && t.startup_done && t.is_in_rsched_wait {
+            local_tasks.push(pt);
+        }
+    }
+    if !local_tasks.is_empty() {
+        let blocking = vec![false; local_tasks.len()];
+        let idx = st()
+            .choose_index(&blocking)
+            .expect("rsched: non-empty local exit task list");
+        let next = local_tasks[idx];
         let cond_ptr = addr_of_mut!(st().t(next).suspend_cond);
         with_internal_depth(|| (rpt().cond_signal)(cond_ptr));
+    } else if let Some(choice) = st().choose_task(0 as PthreadT) {
+        let current_slot = PROCESS_SLOT.load(Ordering::Acquire);
+        if choice.process_slot == current_slot && st().info.contains_key(&choice.pthread) {
+            let cond_ptr = addr_of_mut!(st().t(choice.pthread).suspend_cond);
+            with_internal_depth(|| (rpt().cond_signal)(cond_ptr));
+        } else if choice.process_slot >= 0 {
+            let ps = PROCESS_SHARED.load(Ordering::Acquire);
+            if !ps.is_null() {
+                process_lock(ps);
+                (*ps).slots[choice.process_slot as usize].selected_task = choice.task_id;
+                let _ = with_internal_depth(|| {
+                    libc::sem_post(addr_of_mut!((*ps).slots[choice.process_slot as usize].gate))
+                });
+                process_unlock(ps);
+            }
+        }
     }
     rsched_gunlock();
     depth_exit();
@@ -1535,8 +2112,7 @@ pub unsafe extern "C" fn rsched_pthread_cond_signal(cond: *mut CondT) -> libc::c
     if n > 0 {
         let blocking = vec![false; n];
         let idx = st()
-            .scheduler
-            .choose(&blocking)
+            .choose_index(&blocking)
             .expect("rsched: non-empty cond waiter list");
         let w = st().conds.get_mut(&key).unwrap().waiters.remove(idx);
         st().t(w).is_blocking = false;
@@ -1684,7 +2260,7 @@ pub unsafe extern "C" fn rsched_sched_yield() -> libc::c_int {
 // The ptr variants accept void * so _Generic's default: arm can pass any
 // pointer-to-atomic-pointer without requiring a cast in the macro.
 
-use std::sync::atomic::{AtomicI32, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 
 /// Internal scheduling point for atomic memory operations.
 /// `instr_addr` must be obtained via `return_address()` at the call site of the

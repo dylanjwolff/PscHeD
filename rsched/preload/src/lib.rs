@@ -26,12 +26,13 @@ use scopeguard::defer;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use libc::{
-    c_int, c_uint, c_void, pthread_attr_t, pthread_barrier_t, pthread_barrierattr_t,
-    pthread_cond_t, pthread_mutex_t, pthread_mutexattr_t, pthread_t, timespec, RTLD_NEXT,
+    RTLD_NEXT, c_int, c_uint, c_void, pthread_attr_t, pthread_barrier_t, pthread_barrierattr_t,
+    pthread_cond_t, pthread_mutex_t, pthread_mutexattr_t, pthread_t, timespec,
 };
 
 use rsched::{
-    rsched_exit, rsched_note_pthread_mutex_destroy, rsched_note_pthread_mutex_init,
+    rsched_after_fork_child, rsched_after_fork_parent, rsched_before_fork, rsched_exit,
+    rsched_note_pthread_mutex_destroy, rsched_note_pthread_mutex_init,
     rsched_note_pthread_mutexattr_destroy, rsched_note_pthread_mutexattr_init,
     rsched_note_pthread_mutexattr_settype, rsched_pthread_barrier_init,
     rsched_pthread_barrier_wait, rsched_pthread_cond_broadcast, rsched_pthread_cond_signal,
@@ -117,6 +118,7 @@ static NEXT_NANOSLEEP: AtomicUsize = AtomicUsize::new(0);
 static NEXT_USLEEP: AtomicUsize = AtomicUsize::new(0);
 static NEXT_SLEEP: AtomicUsize = AtomicUsize::new(0);
 static NEXT_CLOCK_NANOSLEEP: AtomicUsize = AtomicUsize::new(0);
+static NEXT_FORK: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "tsan")]
 static TSAN_PTHREAD_CREATE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -197,11 +199,7 @@ fn parse_tsan_background_mode(raw: &str) -> usize {
         }
     }
 
-    if mode == 0 {
-        TSAN_BG_FIRST
-    } else {
-        mode
-    }
+    if mode == 0 { TSAN_BG_FIRST } else { mode }
 }
 
 #[cfg(feature = "tsan")]
@@ -673,6 +671,27 @@ pub unsafe extern "C" fn sched_yield() -> c_int {
         return f();
     }
     rsched_sched_yield()
+}
+
+// ── Processes ────────────────────────────────────────────────────────────────
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fork() -> libc::pid_t {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    let f: unsafe extern "C" fn() -> libc::pid_t = load_next(&NEXT_FORK, b"fork\0");
+    if !outermost {
+        return f();
+    }
+
+    rsched_before_fork();
+    let pid = f();
+    if pid == 0 {
+        rsched_after_fork_child();
+    } else {
+        rsched_after_fork_parent(pid);
+    }
+    pid
 }
 
 // ── Blocking sleeps ───────────────────────────────────────────────────────────
