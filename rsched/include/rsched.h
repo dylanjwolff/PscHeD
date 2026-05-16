@@ -38,6 +38,7 @@ int  rsched_pthread_barrier_wait(pthread_barrier_t *);
 
 int  rsched_sched_yield(void);
 pid_t rsched_fork(void);
+int rsched_execv(const char *, char *const []);
 
 /* Redirect standard pthread / sched calls to the scheduler wrappers so that
    existing C programs need only add `#include "rsched.h"`. */
@@ -54,6 +55,7 @@ pid_t rsched_fork(void);
 #define pthread_barrier_wait    rsched_pthread_barrier_wait
 #define sched_yield             rsched_sched_yield
 #define fork                    rsched_fork
+#define execv                   rsched_execv
 
 #ifdef __cplusplus
 }

@@ -31,8 +31,8 @@ use libc::{
 };
 
 use rsched::{
-    rsched_after_fork_child, rsched_after_fork_parent, rsched_before_fork, rsched_exit,
-    rsched_note_pthread_mutex_destroy, rsched_note_pthread_mutex_init,
+    rsched_after_fork_child, rsched_after_fork_parent, rsched_before_fork, rsched_execv,
+    rsched_exit, rsched_note_pthread_mutex_destroy, rsched_note_pthread_mutex_init,
     rsched_note_pthread_mutexattr_destroy, rsched_note_pthread_mutexattr_init,
     rsched_note_pthread_mutexattr_settype, rsched_pthread_barrier_init,
     rsched_pthread_barrier_wait, rsched_pthread_cond_broadcast, rsched_pthread_cond_signal,
@@ -119,6 +119,7 @@ static NEXT_USLEEP: AtomicUsize = AtomicUsize::new(0);
 static NEXT_SLEEP: AtomicUsize = AtomicUsize::new(0);
 static NEXT_CLOCK_NANOSLEEP: AtomicUsize = AtomicUsize::new(0);
 static NEXT_FORK: AtomicUsize = AtomicUsize::new(0);
+static NEXT_EXECV: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "tsan")]
 static TSAN_PTHREAD_CREATE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -692,6 +693,21 @@ pub unsafe extern "C" fn fork() -> libc::pid_t {
         rsched_after_fork_parent(pid);
     }
     pid
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn execv(
+    path: *const libc::c_char,
+    argv: *const *const libc::c_char,
+) -> c_int {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    if !outermost {
+        let f: unsafe extern "C" fn(*const libc::c_char, *const *const libc::c_char) -> c_int =
+            load_next(&NEXT_EXECV, b"execv\0");
+        return f(path, argv);
+    }
+    rsched_execv(path, argv)
 }
 
 // ── Blocking sleeps ───────────────────────────────────────────────────────────

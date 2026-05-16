@@ -12,6 +12,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::ffi::CString;
 use std::ptr::addr_of_mut;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, Ordering};
 
@@ -559,6 +560,7 @@ static INITED: AtomicBool = AtomicBool::new(false);
 static PROCESS_SHARED: AtomicPtr<ProcessShared> = AtomicPtr::new(core::ptr::null_mut());
 static PROCESS_SLOT: AtomicI32 = AtomicI32::new(-1);
 static FORK_SLOT: AtomicI32 = AtomicI32::new(-1);
+static PROCESS_SHARED_FD: AtomicI32 = AtomicI32::new(-1);
 
 thread_local! {
     static MY_PT: RefCell<PthreadT> = const { RefCell::new(unsafe { std::mem::zeroed() }) };
@@ -726,12 +728,40 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
     }
 
     let size = core::mem::size_of::<ProcessShared>();
+    if let Ok(raw_fd) = std::env::var("RSCHED_SHM_FD")
+        && let Ok(fd) = raw_fd.parse::<libc::c_int>()
+    {
+        let raw = libc::mmap(
+            core::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        );
+        assert_ne!(
+            raw,
+            libc::MAP_FAILED,
+            "rsched: mmap inherited shared process state failed"
+        );
+        p = raw.cast::<ProcessShared>();
+        PROCESS_SHARED_FD.store(fd, Ordering::Release);
+        PROCESS_SHARED.store(p, Ordering::Release);
+        return p;
+    }
+
+    let fd =
+        libc::syscall(libc::SYS_memfd_create, c"rsched-process-shared".as_ptr(), 0) as libc::c_int;
+    assert!(fd >= 0, "rsched: memfd_create failed");
+    let r = libc::ftruncate(fd, size as libc::off_t);
+    assert_eq!(r, 0, "rsched: ftruncate shared process state failed");
+
     let raw = libc::mmap(
         core::ptr::null_mut(),
         size,
         libc::PROT_READ | libc::PROT_WRITE,
-        libc::MAP_ANONYMOUS | libc::MAP_SHARED,
-        -1,
+        libc::MAP_SHARED,
+        fd,
         0,
     );
     assert_ne!(
@@ -741,6 +771,8 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
     );
     core::ptr::write_bytes(raw, 0, size);
     p = raw.cast::<ProcessShared>();
+    PROCESS_SHARED_FD.store(fd, Ordering::Release);
+    set_env_usize("RSCHED_SHM_FD", fd as usize);
 
     let mut attr: libc::pthread_mutexattr_t = core::mem::zeroed();
     let r = with_internal_depth(|| libc::pthread_mutexattr_init(&mut attr));
@@ -764,6 +796,15 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
             libc::munmap(raw, size);
             existing
         }
+    }
+}
+
+fn set_env_usize(key: &str, value: usize) {
+    let key = CString::new(key).expect("rsched env key contains nul");
+    let value = CString::new(value.to_string()).expect("rsched env value contains nul");
+    unsafe {
+        let r = libc::setenv(key.as_ptr(), value.as_ptr(), 1);
+        assert_eq!(r, 0, "rsched: setenv failed");
     }
 }
 
@@ -851,10 +892,22 @@ unsafe fn process_register_current(initially_runnable: bool) -> i32 {
     process_lock(ps);
     let pid = libc::getpid();
 
+    if let Ok(raw_slot) = std::env::var("RSCHED_PROCESS_SLOT")
+        && let Ok(slot) = raw_slot.parse::<usize>()
+        && slot < MAX_PROCESSES
+        && (*ps).slots[slot].active != 0
+    {
+        (*ps).slots[slot].pid = pid;
+        process_unlock(ps);
+        PROCESS_SLOT.store(slot as i32, Ordering::Release);
+        return slot as i32;
+    }
+
     for i in 0..MAX_PROCESSES {
         if (*ps).slots[i].active != 0 && (*ps).slots[i].pid == pid {
             process_unlock(ps);
             PROCESS_SLOT.store(i as i32, Ordering::Release);
+            set_env_usize("RSCHED_PROCESS_SLOT", i);
             return i as i32;
         }
     }
@@ -874,6 +927,7 @@ unsafe fn process_register_current(initially_runnable: bool) -> i32 {
             (*ps).slots[i].selected_task = usize::MAX;
             process_unlock(ps);
             PROCESS_SLOT.store(i as i32, Ordering::Release);
+            set_env_usize("RSCHED_PROCESS_SLOT", i);
             if initially_runnable {
                 let mut discard = 0;
                 while with_internal_depth(|| libc::sem_trywait(addr_of_mut!((*ps).slots[i].gate)))
@@ -951,6 +1005,7 @@ pub unsafe extern "C" fn rsched_before_fork() {
             (*ps).slots[i].active = 1;
             (*ps).slots[i].selected_task = usize::MAX;
             FORK_SLOT.store(i as i32, Ordering::Release);
+            set_env_usize("RSCHED_FORK_SLOT", i);
             process_log(format_args!(
                 "pid {} reserved fork slot {}",
                 libc::getpid(),
@@ -999,6 +1054,7 @@ pub unsafe extern "C" fn rsched_after_fork_child() {
     if slot >= 0 {
         process_lock(ps);
         (*ps).slots[slot as usize].pid = libc::getpid();
+        set_env_usize("RSCHED_PROCESS_SLOT", slot as usize);
         process_log(format_args!(
             "pid {} child using fork slot {}",
             libc::getpid(),
@@ -1081,6 +1137,26 @@ pub unsafe extern "C" fn rsched_fork() -> libc::pid_t {
         rsched_after_fork_parent(pid);
     }
     pid
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_execv(
+    path: *const libc::c_char,
+    argv: *const *const libc::c_char,
+) -> libc::c_int {
+    ensure_init();
+    let current = PROCESS_SLOT.load(Ordering::Acquire);
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if current >= 0 && !ps.is_null() {
+        rsched_glock();
+        process_lock(ps);
+        deactivate_process_tasks_locked(ps, current);
+        (*ps).slots[current as usize].selected_task = usize::MAX;
+        process_unlock(ps);
+        rsched_gunlock();
+        set_env_usize("RSCHED_PROCESS_SLOT", current as usize);
+    }
+    with_internal_depth(|| libc::execv(path, argv))
 }
 
 unsafe fn tsan_user_acquire(addr: *mut libc::c_void) {

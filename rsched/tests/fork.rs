@@ -207,3 +207,60 @@ fn fork_threads_explores_each_final_writer() {
         "expected every task id to be final writer across seeds, got {final_writers:?}"
     );
 }
+
+fn exec_last_from_output(seed: u64, output: RunOutput) -> i32 {
+    assert!(
+        !output.timed_out,
+        "fork_execv seed {seed} timed out\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert!(
+        output.status.success(),
+        "fork_execv seed {seed} failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        output.stdout,
+        output.stderr
+    );
+    let last = output
+        .stdout
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("last="))
+        .unwrap_or_else(|| {
+            panic!(
+                "fork_execv seed {seed} did not print last\nstdout:\n{}\nstderr:\n{}",
+                output.stdout, output.stderr
+            )
+        });
+    let last = last
+        .parse::<i32>()
+        .unwrap_or_else(|e| panic!("fork_execv seed {seed} bad last={last:?}: {e}"));
+    assert!(
+        last == 1 || last == 2,
+        "fork_execv seed {seed} produced invalid last={last}"
+    );
+    last
+}
+
+#[test]
+fn fork_execv_is_deterministic_per_seed() {
+    let program = build_example("fork_execv");
+    for seed in 0..10 {
+        let a = exec_last_from_output(seed, run_with_seed(&program, seed));
+        let b = exec_last_from_output(seed, run_with_seed(&program, seed));
+        assert_eq!(a, b, "seed {seed}: first last={a} second last={b}");
+    }
+}
+
+#[test]
+fn fork_execv_explores_both_final_writers() {
+    let program = build_example("fork_execv");
+    let mut final_writers = HashSet::new();
+    for seed in 0..60 {
+        final_writers.insert(exec_last_from_output(seed, run_with_seed(&program, seed)));
+    }
+    let expected = HashSet::from([1, 2]);
+    assert_eq!(
+        final_writers, expected,
+        "expected both parent and execed child as final writer across seeds, got {final_writers:?}"
+    );
+}
