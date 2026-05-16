@@ -32,13 +32,13 @@ use libc::{
 
 use rsched::{
     rsched_after_fork_child, rsched_after_fork_parent, rsched_before_fork, rsched_execv,
-    rsched_exit, rsched_note_pthread_mutex_destroy, rsched_note_pthread_mutex_init,
+    rsched_execve, rsched_exit, rsched_note_pthread_mutex_destroy, rsched_note_pthread_mutex_init,
     rsched_note_pthread_mutexattr_destroy, rsched_note_pthread_mutexattr_init,
     rsched_note_pthread_mutexattr_settype, rsched_pthread_barrier_init,
     rsched_pthread_barrier_wait, rsched_pthread_cond_broadcast, rsched_pthread_cond_signal,
     rsched_pthread_cond_wait, rsched_pthread_create, rsched_pthread_exit, rsched_pthread_join,
     rsched_pthread_mutex_lock, rsched_pthread_mutex_trylock, rsched_pthread_mutex_unlock,
-    rsched_sched_yield, rsched_try_enter,
+    rsched_sched_yield, rsched_try_enter, rsched_waitpid,
 };
 
 #[cfg(feature = "tsan")]
@@ -120,6 +120,8 @@ static NEXT_SLEEP: AtomicUsize = AtomicUsize::new(0);
 static NEXT_CLOCK_NANOSLEEP: AtomicUsize = AtomicUsize::new(0);
 static NEXT_FORK: AtomicUsize = AtomicUsize::new(0);
 static NEXT_EXECV: AtomicUsize = AtomicUsize::new(0);
+static NEXT_EXECVE: AtomicUsize = AtomicUsize::new(0);
+static NEXT_WAITPID: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "tsan")]
 static TSAN_PTHREAD_CREATE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -708,6 +710,41 @@ pub unsafe extern "C" fn execv(
         return f(path, argv);
     }
     rsched_execv(path, argv)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn execve(
+    path: *const libc::c_char,
+    argv: *const *const libc::c_char,
+    envp: *const *const libc::c_char,
+) -> c_int {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    if !outermost {
+        let f: unsafe extern "C" fn(
+            *const libc::c_char,
+            *const *const libc::c_char,
+            *const *const libc::c_char,
+        ) -> c_int = load_next(&NEXT_EXECVE, b"execve\0");
+        return f(path, argv, envp);
+    }
+    rsched_execve(path, argv, envp)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn waitpid(
+    pid: libc::pid_t,
+    status: *mut libc::c_int,
+    options: c_int,
+) -> libc::pid_t {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    if !outermost {
+        let f: unsafe extern "C" fn(libc::pid_t, *mut libc::c_int, c_int) -> libc::pid_t =
+            load_next(&NEXT_WAITPID, b"waitpid\0");
+        return f(pid, status, options);
+    }
+    rsched_waitpid(pid, status, options)
 }
 
 // ── Blocking sleeps ───────────────────────────────────────────────────────────

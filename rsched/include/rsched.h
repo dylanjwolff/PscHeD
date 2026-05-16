@@ -1,6 +1,7 @@
 #pragma once
 #include <pthread.h>
 #include <sched.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #ifdef __cplusplus
@@ -39,6 +40,8 @@ int  rsched_pthread_barrier_wait(pthread_barrier_t *);
 int  rsched_sched_yield(void);
 pid_t rsched_fork(void);
 int rsched_execv(const char *, char *const []);
+int rsched_execve(const char *, char *const [], char *const []);
+pid_t rsched_waitpid(pid_t, int *, int);
 
 /* Redirect standard pthread / sched calls to the scheduler wrappers so that
    existing C programs need only add `#include "rsched.h"`. */
@@ -56,6 +59,8 @@ int rsched_execv(const char *, char *const []);
 #define sched_yield             rsched_sched_yield
 #define fork                    rsched_fork
 #define execv                   rsched_execv
+#define execve                  rsched_execve
+#define waitpid                 rsched_waitpid
 
 #ifdef __cplusplus
 }

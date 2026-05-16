@@ -12,7 +12,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::ptr::addr_of_mut;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, Ordering};
 
@@ -808,6 +808,47 @@ fn set_env_usize(key: &str, value: usize) {
     }
 }
 
+unsafe fn envp_with_rsched_vars(
+    envp: *const *const libc::c_char,
+) -> (Vec<CString>, Vec<*const libc::c_char>) {
+    let mut owned = Vec::new();
+    let mut ptrs = Vec::new();
+    let rsched_prefixes: [&[u8]; 3] = [
+        b"RSCHED_SHM_FD=",
+        b"RSCHED_PROCESS_SLOT=",
+        b"RSCHED_FORK_SLOT=",
+    ];
+
+    if !envp.is_null() {
+        let mut i = 0;
+        loop {
+            let p = *envp.add(i);
+            if p.is_null() {
+                break;
+            }
+            let bytes = CStr::from_ptr(p).to_bytes();
+            if !rsched_prefixes
+                .iter()
+                .any(|prefix| bytes.starts_with(prefix))
+            {
+                ptrs.push(p);
+            }
+            i += 1;
+        }
+    }
+
+    for key in ["RSCHED_SHM_FD", "RSCHED_PROCESS_SLOT"] {
+        if let Ok(value) = std::env::var(key) {
+            owned.push(
+                CString::new(format!("{key}={value}")).expect("rsched env value contains nul"),
+            );
+        }
+    }
+    ptrs.extend(owned.iter().map(|s| s.as_ptr()));
+    ptrs.push(core::ptr::null());
+    (owned, ptrs)
+}
+
 fn process_log(args: core::fmt::Arguments<'_>) {
     if std::env::var("RSCHED_PROCESS_LOG").is_ok_and(|v| v == "1") {
         eprintln!("[rsched-process] {args}");
@@ -1139,24 +1180,62 @@ pub unsafe extern "C" fn rsched_fork() -> libc::pid_t {
     pid
 }
 
+unsafe fn prepare_current_process_for_exec() {
+    ensure_init();
+    let current = PROCESS_SLOT.load(Ordering::Acquire);
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if current >= 0 && !ps.is_null() {
+        process_log(format_args!(
+            "pid {} preparing exec in slot {}",
+            libc::getpid(),
+            current
+        ));
+        process_lock(ps);
+        deactivate_process_tasks_locked(ps, current);
+        (*ps).slots[current as usize].selected_task = usize::MAX;
+        process_unlock(ps);
+        set_env_usize("RSCHED_PROCESS_SLOT", current as usize);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_execv(
     path: *const libc::c_char,
     argv: *const *const libc::c_char,
 ) -> libc::c_int {
-    ensure_init();
-    let current = PROCESS_SLOT.load(Ordering::Acquire);
-    let ps = PROCESS_SHARED.load(Ordering::Acquire);
-    if current >= 0 && !ps.is_null() {
-        rsched_glock();
-        process_lock(ps);
-        deactivate_process_tasks_locked(ps, current);
-        (*ps).slots[current as usize].selected_task = usize::MAX;
-        process_unlock(ps);
-        rsched_gunlock();
-        set_env_usize("RSCHED_PROCESS_SLOT", current as usize);
-    }
+    prepare_current_process_for_exec();
     with_internal_depth(|| libc::execv(path, argv))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_execve(
+    path: *const libc::c_char,
+    argv: *const *const libc::c_char,
+    envp: *const *const libc::c_char,
+) -> libc::c_int {
+    prepare_current_process_for_exec();
+    let (_owned_env, merged_envp) = envp_with_rsched_vars(envp);
+    with_internal_depth(|| libc::execve(path, argv, merged_envp.as_ptr()))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_waitpid(
+    pid: libc::pid_t,
+    status: *mut libc::c_int,
+    options: libc::c_int,
+) -> libc::pid_t {
+    ensure_init();
+    if options & libc::WNOHANG != 0 {
+        return with_internal_depth(|| libc::waitpid(pid, status, options));
+    }
+
+    loop {
+        let r = with_internal_depth(|| libc::waitpid(pid, status, options | libc::WNOHANG));
+        if r != 0 {
+            return r;
+        }
+        rsched_sched_yield();
+    }
 }
 
 unsafe fn tsan_user_acquire(addr: *mut libc::c_void) {
