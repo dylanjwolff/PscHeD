@@ -7,10 +7,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 static PRELOAD_LIB: OnceLock<PathBuf> = OnceLock::new();
+static ARTIFACT_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug)]
 struct RunOutput {
@@ -75,15 +77,22 @@ fn host_target() -> &'static str {
     }
 }
 
-fn write_source(name: &str, source: &str) -> PathBuf {
-    let src = temp_dir().join(format!("{name}.c"));
+fn next_artifact_id() -> usize {
+    ARTIFACT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn write_source(name: &str, artifact_id: usize, source: &str) -> PathBuf {
+    let src = temp_dir().join(format!("{name}-{artifact_id}.c"));
     fs::write(&src, source).unwrap_or_else(|e| panic!("write {}: {e}", src.display()));
     src
 }
 
-fn build_c_program(name: &str, source: &str) -> PathBuf {
-    let src = write_source(name, source);
-    let out = temp_dir().join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+fn build_c_program(name: &str, artifact_id: usize, source: &str) -> PathBuf {
+    let src = write_source(name, artifact_id, source);
+    let out = temp_dir().join(format!(
+        "{name}-{artifact_id}{}",
+        std::env::consts::EXE_SUFFIX
+    ));
     let mut compiler = cc::Build::new()
         .compiler("clang")
         .host(host_target())
@@ -103,8 +112,8 @@ fn build_c_program(name: &str, source: &str) -> PathBuf {
     out
 }
 
-fn write_script() -> PathBuf {
-    let script = temp_dir().join("run_client_server.sh");
+fn write_script(artifact_id: usize) -> PathBuf {
+    let script = temp_dir().join(format!("run_client_server-{artifact_id}.sh"));
     fs::write(
         &script,
         r#"#!/usr/bin/env bash
@@ -245,8 +254,9 @@ int main(int argc, char **argv) {
 }
 
 fn run_script(script: &Path, server: &Path, client: &Path, seed: u64) -> RunOutput {
-    let out_file = temp_dir().join(format!("client-server-{seed}.out"));
-    let ipc_path = temp_dir().join(format!("client-server-{seed}.fifo"));
+    let run_id = next_artifact_id();
+    let out_file = temp_dir().join(format!("client-server-{seed}-{run_id}.out"));
+    let ipc_path = temp_dir().join(format!("client-server-{seed}-{run_id}.fifo"));
     let _ = fs::remove_file(&ipc_path);
     let preload = preload_lib();
 
@@ -305,9 +315,10 @@ fn seen_from_output(seed: u64, output: RunOutput) -> String {
 
 fn build_subjects() -> (PathBuf, PathBuf, PathBuf) {
     let _ = preload_lib();
-    let server = build_c_program("preload_fifo_server", server_source());
-    let client = build_c_program("preload_fifo_client", client_source());
-    let script = write_script();
+    let artifact_id = next_artifact_id();
+    let server = build_c_program("preload_fifo_server", artifact_id, server_source());
+    let client = build_c_program("preload_fifo_client", artifact_id, client_source());
+    let script = write_script(artifact_id);
     (script, server, client)
 }
 

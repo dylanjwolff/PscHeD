@@ -5,10 +5,12 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 static STATIC_LIB: OnceLock<PathBuf> = OnceLock::new();
+static BUILD_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug)]
 struct RunOutput {
@@ -54,7 +56,8 @@ fn build_static_lib() -> PathBuf {
 
 fn build_example(name: &str) -> PathBuf {
     let root = repo_root();
-    let out = temp_dir().join(name);
+    let build_id = BUILD_ID.fetch_add(1, Ordering::Relaxed);
+    let out = temp_dir().join(format!("{name}-{build_id}"));
     let src = root.join("c-examples").join(format!("{name}.c"));
     let lib = static_lib();
 
