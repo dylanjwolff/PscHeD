@@ -81,14 +81,8 @@ fn next_artifact_id() -> usize {
     ARTIFACT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-fn write_source(name: &str, artifact_id: usize, source: &str) -> PathBuf {
-    let src = temp_dir().join(format!("{name}-{artifact_id}.c"));
-    fs::write(&src, source).unwrap_or_else(|e| panic!("write {}: {e}", src.display()));
-    src
-}
-
-fn build_c_program(name: &str, artifact_id: usize, source: &str) -> PathBuf {
-    let src = write_source(name, artifact_id, source);
+fn build_c_program(name: &str, artifact_id: usize) -> PathBuf {
+    let src = repo_root().join("c-examples").join(format!("{name}.c"));
     let out = temp_dir().join(format!(
         "{name}-{artifact_id}{}",
         std::env::consts::EXE_SUFFIX
@@ -144,113 +138,6 @@ exit $((client_status != 0 ? client_status : server_status))
     fs::set_permissions(&script, perms)
         .unwrap_or_else(|e| panic!("chmod {}: {e}", script.display()));
     script
-}
-
-fn server_source() -> &'static str {
-    r#"
-#include <errno.h>
-#include <fcntl.h>
-#include <sched.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-int main(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s FIFO\n", argv[0]);
-        return 2;
-    }
-
-    unlink(argv[1]);
-    if (mkfifo(argv[1], 0600) != 0) {
-        perror("mkfifo");
-        return 2;
-    }
-
-    int fd = open(argv[1], O_RDONLY | O_NONBLOCK);
-    if (fd < 0) {
-        perror("open fifo");
-        return 2;
-    }
-    sched_yield();
-
-    for (int i = 0; i < 8; i++)
-        sched_yield();
-
-    char c = 0;
-    ssize_t n = read(fd, &c, 1);
-    if (n == 1 && (c == 'A' || c == 'B')) {
-        printf("seen=%c\n", c);
-    } else if (n == 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
-        printf("seen=NONE\n");
-    } else {
-        perror("read");
-        return 2;
-    }
-    close(fd);
-    unlink(argv[1]);
-    return 0;
-}
-"#
-}
-
-fn client_source() -> &'static str {
-    r#"
-#include <pthread.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <sched.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-
-struct thread_arg {
-    const char *path;
-    char msg;
-};
-
-static void *send_msg(void *raw) {
-    struct thread_arg *arg = (struct thread_arg *)raw;
-    for (int attempt = 0; attempt < 16; attempt++) {
-        sched_yield();
-        int fd = open(arg->path, O_WRONLY | O_NONBLOCK);
-        if (fd >= 0) {
-            if (write(fd, &arg->msg, 1) == 1) {
-                close(fd);
-                return 0;
-            }
-            close(fd);
-        } else if (errno != ENOENT && errno != ENXIO) {
-            return 0;
-        }
-    }
-    return 0;
-}
-
-int main(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s FIFO\n", argv[0]);
-        return 2;
-    }
-
-    signal(SIGPIPE, SIG_IGN);
-    pthread_t a;
-    pthread_t b;
-    struct thread_arg arg_a = { argv[1], 'A' };
-    struct thread_arg arg_b = { argv[1], 'B' };
-    if (pthread_create(&a, 0, send_msg, &arg_a) != 0)
-        return 2;
-    if (pthread_create(&b, 0, send_msg, &arg_b) != 0)
-        return 2;
-    if (pthread_join(a, 0) != 0)
-        return 2;
-    if (pthread_join(b, 0) != 0)
-        return 2;
-    return 0;
-}
-"#
 }
 
 fn run_script(script: &Path, server: &Path, client: &Path, seed: u64) -> RunOutput {
@@ -316,8 +203,8 @@ fn seen_from_output(seed: u64, output: RunOutput) -> String {
 fn build_subjects() -> (PathBuf, PathBuf, PathBuf) {
     let _ = preload_lib();
     let artifact_id = next_artifact_id();
-    let server = build_c_program("preload_fifo_server", artifact_id, server_source());
-    let client = build_c_program("preload_fifo_client", artifact_id, client_source());
+    let server = build_c_program("preload_fifo_server", artifact_id);
+    let client = build_c_program("preload_fifo_client", artifact_id);
     let script = write_script(artifact_id);
     (script, server, client)
 }
