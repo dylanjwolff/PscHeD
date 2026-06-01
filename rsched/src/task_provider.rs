@@ -1,4 +1,13 @@
-use crate::{AttrT, BarrierT, CondT, MutexT, PthreadT, StartArg};
+use crate::{AttrT, CondT, PthreadT, StartArg};
+
+#[derive(Clone, Copy)]
+pub(crate) struct ParkingHandle(*mut CondT);
+
+impl ParkingHandle {
+    pub(crate) fn new(cond: *mut CondT) -> Self {
+        Self(cond)
+    }
+}
 
 pub(crate) trait TaskProvider {
     unsafe fn create(
@@ -10,31 +19,16 @@ pub(crate) trait TaskProvider {
 
     unsafe fn join(&mut self, thread: PthreadT, retval: *mut *mut libc::c_void) -> libc::c_int;
 
-    unsafe fn signal(&mut self, cond: *mut CondT) -> libc::c_int;
+    unsafe fn wake(&mut self, handle: ParkingHandle) -> libc::c_int;
 
-    unsafe fn wait(&mut self, cond: *mut CondT);
+    unsafe fn park(&mut self, handle: ParkingHandle);
 
     unsafe fn global_lock(&mut self);
 
     unsafe fn global_unlock(&mut self);
 
-    unsafe fn mutex_lock(&mut self, lock: *mut MutexT) -> libc::c_int;
-
-    unsafe fn mutex_unlock(&mut self, lock: *mut MutexT) -> libc::c_int;
-
-    unsafe fn barrier_init(
-        &mut self,
-        barrier: *mut BarrierT,
-        attr: *const libc::pthread_barrierattr_t,
-        count: libc::c_uint,
-    ) -> libc::c_int;
-
     fn task_tid(&self, _thread: PthreadT) -> libc::pid_t {
         0
-    }
-
-    fn drive_join_with_scheduler(&self) -> bool {
-        false
     }
 
     unsafe fn resume(&mut self, _thread: PthreadT) -> bool {
@@ -83,12 +77,12 @@ impl TaskProvider for ThreadTaskProvider {
         crate::with_internal_depth(|| (crate::rpt().join)(thread, retval))
     }
 
-    unsafe fn signal(&mut self, cond: *mut CondT) -> libc::c_int {
-        crate::with_internal_depth(|| (crate::rpt().cond_signal)(cond))
+    unsafe fn wake(&mut self, handle: ParkingHandle) -> libc::c_int {
+        crate::with_internal_depth(|| (crate::rpt().cond_signal)(handle.0))
     }
 
-    unsafe fn wait(&mut self, cond: *mut CondT) {
-        crate::thread_cond_wait(cond);
+    unsafe fn park(&mut self, handle: ParkingHandle) {
+        crate::thread_cond_wait(handle.0);
     }
 
     unsafe fn global_lock(&mut self) {
@@ -98,28 +92,11 @@ impl TaskProvider for ThreadTaskProvider {
     unsafe fn global_unlock(&mut self) {
         crate::thread_gunlock();
     }
-
-    unsafe fn mutex_lock(&mut self, lock: *mut MutexT) -> libc::c_int {
-        crate::with_internal_depth(|| (crate::rpt().mutex_lock)(lock))
-    }
-
-    unsafe fn mutex_unlock(&mut self, lock: *mut MutexT) -> libc::c_int {
-        crate::with_internal_depth(|| (crate::rpt().mutex_unlock)(lock))
-    }
-
-    unsafe fn barrier_init(
-        &mut self,
-        barrier: *mut BarrierT,
-        attr: *const libc::pthread_barrierattr_t,
-        count: libc::c_uint,
-    ) -> libc::c_int {
-        crate::with_internal_depth(|| (crate::rpt().barrier_init)(barrier, attr, count))
-    }
 }
 
 mod coro {
-    use super::TaskProvider;
-    use crate::{AttrT, BarrierT, CondT, MutexT, PthreadT, StartArg};
+    use super::{ParkingHandle, TaskProvider};
+    use crate::{AttrT, PthreadT, StartArg};
     use corosensei::{Coroutine, CoroutineResult, stack::DefaultStack};
     use std::cell::Cell;
     use std::collections::HashMap;
@@ -246,19 +223,6 @@ mod coro {
         }
 
         unsafe fn join(&mut self, thread: PthreadT, retval: *mut *mut libc::c_void) -> libc::c_int {
-            while self
-                .tasks
-                .get(&thread)
-                .is_some_and(|task| task.retval.is_none())
-            {
-                let selected = self.requested_next.take().unwrap_or(thread);
-                if self.tasks.contains_key(&selected) {
-                    self.resume_task(selected);
-                } else {
-                    break;
-                }
-            }
-
             let Some(task) = self.tasks.remove(&thread) else {
                 return 0;
             };
@@ -269,34 +233,17 @@ mod coro {
             0
         }
 
-        unsafe fn signal(&mut self, _cond: *mut CondT) -> libc::c_int {
+        unsafe fn wake(&mut self, _handle: ParkingHandle) -> libc::c_int {
             0
         }
 
-        unsafe fn wait(&mut self, _cond: *mut CondT) {
+        unsafe fn park(&mut self, _handle: ParkingHandle) {
             Self::suspend_current();
         }
 
         unsafe fn global_lock(&mut self) {}
 
         unsafe fn global_unlock(&mut self) {}
-
-        unsafe fn mutex_lock(&mut self, _lock: *mut MutexT) -> libc::c_int {
-            0
-        }
-
-        unsafe fn mutex_unlock(&mut self, _lock: *mut MutexT) -> libc::c_int {
-            0
-        }
-
-        unsafe fn barrier_init(
-            &mut self,
-            _barrier: *mut BarrierT,
-            _attr: *const libc::pthread_barrierattr_t,
-            _count: libc::c_uint,
-        ) -> libc::c_int {
-            0
-        }
 
         unsafe fn resume(&mut self, thread: PthreadT) -> bool {
             if !self.tasks.contains_key(&thread) {
@@ -337,10 +284,6 @@ mod coro {
 
         fn task_tid(&self, thread: PthreadT) -> libc::pid_t {
             self.tasks.get(&thread).map_or(0, |task| task.tid)
-        }
-
-        fn drive_join_with_scheduler(&self) -> bool {
-            true
         }
     }
 }
