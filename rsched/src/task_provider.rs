@@ -9,6 +9,21 @@ impl ParkingHandle {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct TaskChoice {
+    pub(crate) task_id: usize,
+    pub(crate) process_slot: i32,
+    pub(crate) pthread: PthreadT,
+}
+
+pub(crate) struct TaskStatus {
+    pub(crate) task_id: usize,
+    pub(crate) pthread: PthreadT,
+    pub(crate) is_blocking: bool,
+    pub(crate) startup_done: bool,
+    pub(crate) is_waiting: bool,
+}
+
 pub(crate) trait TaskProvider {
     unsafe fn create(
         &mut self,
@@ -42,6 +57,52 @@ pub(crate) trait TaskProvider {
     fn starts_waiting(&self) -> bool {
         false
     }
+
+    fn current_process_slot(&self) -> i32 {
+        -1
+    }
+
+    unsafe fn register_current_process(&mut self, _initially_runnable: bool) {}
+
+    unsafe fn register_task(&mut self, _thread: PthreadT) -> usize {
+        usize::MAX
+    }
+
+    unsafe fn update_task_status(
+        &mut self,
+        _task_id: usize,
+        _is_blocking: bool,
+        _startup_done: bool,
+        _is_waiting: bool,
+    ) {
+    }
+
+    unsafe fn publish_tasks(&mut self, _tasks: &[TaskStatus]) {}
+
+    unsafe fn choose_process_task(
+        &mut self,
+        _choose_index: &mut dyn FnMut(usize) -> Option<usize>,
+    ) -> Option<TaskChoice> {
+        None
+    }
+
+    unsafe fn switch_to_process(&mut self, _choice: TaskChoice) -> bool {
+        false
+    }
+
+    unsafe fn park_current_process(&mut self) {}
+
+    unsafe fn selected_process_task(&mut self) -> Option<PthreadT> {
+        None
+    }
+
+    unsafe fn fork(&mut self) -> libc::pid_t {
+        crate::with_internal_depth(|| libc::fork())
+    }
+
+    unsafe fn after_fork_child(&mut self) {}
+
+    unsafe fn prepare_exec(&mut self) {}
 }
 
 pub(crate) struct ThreadTaskProvider;
@@ -290,10 +351,125 @@ mod coro {
 
 pub(crate) use coro::CoroTaskProvider;
 
+pub(crate) struct ProcessTaskProvider {
+    inner: Box<dyn TaskProvider>,
+}
+
+impl ProcessTaskProvider {
+    pub(crate) fn new(inner: Box<dyn TaskProvider>) -> Self {
+        Self { inner }
+    }
+}
+
+impl TaskProvider for ProcessTaskProvider {
+    unsafe fn create(
+        &mut self,
+        thread: *mut PthreadT,
+        attr: *const AttrT,
+        start_arg: *mut StartArg,
+    ) -> libc::c_int {
+        self.inner.create(thread, attr, start_arg)
+    }
+
+    unsafe fn join(&mut self, thread: PthreadT, retval: *mut *mut libc::c_void) -> libc::c_int {
+        self.inner.join(thread, retval)
+    }
+
+    unsafe fn wake(&mut self, handle: ParkingHandle) -> libc::c_int {
+        self.inner.wake(handle)
+    }
+
+    unsafe fn park(&mut self, handle: ParkingHandle) {
+        self.inner.park(handle);
+    }
+
+    unsafe fn global_lock(&mut self) {
+        self.inner.global_lock();
+    }
+
+    unsafe fn global_unlock(&mut self) {
+        self.inner.global_unlock();
+    }
+
+    fn task_tid(&self, thread: PthreadT) -> libc::pid_t {
+        self.inner.task_tid(thread)
+    }
+
+    unsafe fn resume(&mut self, thread: PthreadT) -> bool {
+        self.inner.resume(thread)
+    }
+
+    unsafe fn switch_to(&mut self, next: PthreadT, caller: PthreadT) -> bool {
+        self.inner.switch_to(next, caller)
+    }
+
+    fn starts_waiting(&self) -> bool {
+        self.inner.starts_waiting()
+    }
+
+    fn current_process_slot(&self) -> i32 {
+        crate::process_current_slot()
+    }
+
+    unsafe fn register_current_process(&mut self, initially_runnable: bool) {
+        crate::process_register_current(initially_runnable);
+    }
+
+    unsafe fn register_task(&mut self, thread: PthreadT) -> usize {
+        crate::register_process_task(thread)
+    }
+
+    unsafe fn update_task_status(
+        &mut self,
+        task_id: usize,
+        is_blocking: bool,
+        startup_done: bool,
+        is_waiting: bool,
+    ) {
+        crate::update_process_task_status(task_id, is_blocking, startup_done, is_waiting);
+    }
+
+    unsafe fn publish_tasks(&mut self, tasks: &[TaskStatus]) {
+        crate::publish_process_tasks(tasks);
+    }
+
+    unsafe fn choose_process_task(
+        &mut self,
+        choose_index: &mut dyn FnMut(usize) -> Option<usize>,
+    ) -> Option<TaskChoice> {
+        crate::choose_process_task(choose_index)
+    }
+
+    unsafe fn switch_to_process(&mut self, choice: TaskChoice) -> bool {
+        crate::switch_to_process(choice)
+    }
+
+    unsafe fn park_current_process(&mut self) {
+        crate::park_current_process();
+    }
+
+    unsafe fn selected_process_task(&mut self) -> Option<PthreadT> {
+        crate::selected_process_task()
+    }
+
+    unsafe fn fork(&mut self) -> libc::pid_t {
+        crate::process_fork()
+    }
+
+    unsafe fn after_fork_child(&mut self) {
+        crate::process_after_fork_child();
+    }
+
+    unsafe fn prepare_exec(&mut self) {
+        crate::process_prepare_exec();
+    }
+}
+
 pub(crate) fn default_task_provider() -> Box<dyn TaskProvider> {
-    if cfg!(feature = "coro") {
+    let local: Box<dyn TaskProvider> = if cfg!(feature = "coro") {
         Box::new(CoroTaskProvider::new())
     } else {
         Box::new(ThreadTaskProvider::new())
-    }
+    };
+    Box::new(ProcessTaskProvider::new(local))
 }
