@@ -192,26 +192,150 @@ mod coro {
     use std::cell::Cell;
     use std::collections::HashMap;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicI32, Ordering};
 
     enum CoroYield {
         Yielded,
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    const ARCH_SET_FS: libc::c_int = 0x1002;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    const ARCH_GET_FS: libc::c_int = 0x1003;
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe fn get_fs_base() -> usize {
+        let mut base = 0usize;
+        let r = libc::syscall(libc::SYS_arch_prctl, ARCH_GET_FS, &mut base);
+        assert_eq!(r, 0, "rsched: ARCH_GET_FS failed");
+        base
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    unsafe fn get_fs_base() -> usize {
+        0
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe fn set_fs_base(base: usize) {
+        let r = libc::syscall(libc::SYS_arch_prctl, ARCH_SET_FS, base);
+        assert_eq!(r, 0, "rsched: ARCH_SET_FS failed");
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    unsafe fn set_fs_base(_base: usize) {}
+
+    #[cfg(target_os = "linux")]
+    unsafe fn futex_wait(addr: *const AtomicI32, expected: i32) {
+        const FUTEX_WAIT_PRIVATE: libc::c_int = 128;
+        loop {
+            let r = libc::syscall(
+                libc::SYS_futex,
+                addr as *const i32,
+                FUTEX_WAIT_PRIVATE,
+                expected,
+                core::ptr::null::<libc::timespec>(),
+            );
+            if r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN) {
+                return;
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                return;
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe fn futex_wake(addr: *const AtomicI32) {
+        const FUTEX_WAKE_PRIVATE: libc::c_int = 129;
+        libc::syscall(libc::SYS_futex, addr as *const i32, FUTEX_WAKE_PRIVATE, 1);
+    }
+
+    unsafe extern "C" {
+        fn pthread_attr_getdetachstate(attr: *const AttrT, state: *mut libc::c_int) -> libc::c_int;
+    }
+
     thread_local! {
-        static CORO_YIELDER: Cell<*const corosensei::Yielder<(), CoroYield>> =
+        static CORO_CONTEXT: Cell<*const CoroContext> =
             const { Cell::new(core::ptr::null()) };
+    }
+
+    struct CoroContext {
+        yielder: Cell<*const corosensei::Yielder<(), CoroYield>>,
+        fs_base: Cell<usize>,
+        host_fs_base: Cell<usize>,
+    }
+
+    impl CoroContext {
+        fn new(fs_base: usize) -> Self {
+            Self {
+                yielder: Cell::new(core::ptr::null()),
+                fs_base: Cell::new(fs_base),
+                host_fs_base: Cell::new(0),
+            }
+        }
+    }
+
+    struct ShadowThread {
+        state: AtomicI32,
+        pthread: PthreadT,
+        tid: libc::pid_t,
+        fs_base: usize,
+    }
+
+    impl ShadowThread {
+        unsafe fn new() -> *mut Self {
+            Box::into_raw(Box::new(Self {
+                state: AtomicI32::new(0),
+                pthread: core::mem::zeroed(),
+                tid: 0,
+                fs_base: 0,
+            }))
+        }
+
+        unsafe fn shutdown(shadow: *mut Self) {
+            if shadow.is_null() {
+                return;
+            }
+
+            (*shadow).state.store(2, Ordering::Release);
+            futex_wake(std::ptr::addr_of!((*shadow).state));
+
+            crate::with_internal_depth(|| {
+                (crate::rpt().join)((*shadow).pthread, core::ptr::null_mut())
+            });
+
+            drop(Box::from_raw(shadow));
+        }
+    }
+
+    extern "C" fn shadow_thread_main(raw: *mut libc::c_void) -> *mut libc::c_void {
+        unsafe {
+            let shadow = raw as *mut ShadowThread;
+
+            (*shadow).pthread = libc::pthread_self();
+            (*shadow).tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
+            (*shadow).fs_base = get_fs_base();
+            (*shadow).state.store(1, Ordering::Release);
+            futex_wake(std::ptr::addr_of!((*shadow).state));
+
+            while (*shadow).state.load(Ordering::Acquire) != 2 {
+                futex_wait(std::ptr::addr_of!((*shadow).state), 1);
+            }
+
+            core::ptr::null_mut()
+        }
     }
 
     struct CoroTask {
         coroutine: Coroutine<(), CoroYield, *mut libc::c_void>,
-        yielder: Rc<Cell<*const corosensei::Yielder<(), CoroYield>>>,
+        context: Rc<CoroContext>,
+        shadow: *mut ShadowThread,
         retval: Option<*mut libc::c_void>,
         tid: libc::pid_t,
     }
 
     pub(crate) struct CoroTaskProvider {
-        next_pthread: usize,
-        next_tid: libc::pid_t,
         tasks: HashMap<PthreadT, CoroTask>,
         requested_next: Option<PthreadT>,
     }
@@ -219,11 +343,70 @@ mod coro {
     impl CoroTaskProvider {
         pub(crate) fn new() -> Self {
             Self {
-                next_pthread: 1usize << (usize::BITS - 2),
-                next_tid: 1,
                 tasks: HashMap::new(),
                 requested_next: None,
             }
+        }
+
+        unsafe fn create_shadow(
+            &mut self,
+            attr: *const AttrT,
+        ) -> Result<(*mut ShadowThread, PthreadT, libc::pid_t, usize), libc::c_int> {
+            let mut detached = false;
+            if !attr.is_null() {
+                let mut detach_state = 0;
+                let r = crate::with_internal_depth(|| {
+                    pthread_attr_getdetachstate(attr, &mut detach_state)
+                });
+                if r == 0 {
+                    detached = detach_state == libc::PTHREAD_CREATE_DETACHED;
+                }
+            }
+
+            let shadow = ShadowThread::new();
+            let mut shadow_pt: PthreadT = core::mem::zeroed();
+            let mut attr_copy = core::mem::MaybeUninit::<AttrT>::uninit();
+            let create_attr = if detached && !attr.is_null() {
+                attr_copy.write(core::ptr::read(attr));
+                let attr_copy_ptr = attr_copy.as_mut_ptr();
+                crate::with_internal_depth(|| {
+                    libc::pthread_attr_setdetachstate(attr_copy_ptr, libc::PTHREAD_CREATE_JOINABLE)
+                });
+                attr_copy_ptr as *const AttrT
+            } else {
+                attr
+            };
+            #[cfg(feature = "asan")]
+            let r = crate::with_internal_depth(|| {
+                libc::pthread_create(
+                    &mut shadow_pt,
+                    create_attr,
+                    shadow_thread_main,
+                    shadow.cast(),
+                )
+            });
+            #[cfg(not(feature = "asan"))]
+            let r = crate::with_internal_depth(|| {
+                (crate::rpt().create)(
+                    &mut shadow_pt,
+                    create_attr,
+                    shadow_thread_main,
+                    shadow.cast(),
+                )
+            });
+            if r != 0 {
+                drop(Box::from_raw(shadow));
+                return Err(r);
+            }
+
+            while (*shadow).state.load(Ordering::Acquire) == 0 {
+                futex_wait(std::ptr::addr_of!((*shadow).state), 0);
+            }
+            let pt = (*shadow).pthread;
+            let tid = (*shadow).tid;
+            let fs_base = (*shadow).fs_base;
+
+            Ok((shadow, pt, tid, fs_base))
         }
 
         unsafe fn resume_task(&mut self, pt: PthreadT) {
@@ -239,34 +422,50 @@ mod coro {
                 *c.borrow_mut() = pt;
                 previous
             });
-            CORO_YIELDER.with(|cell| cell.set(task.yielder.get()));
+            let host_fs_base = get_fs_base();
+            task.context.host_fs_base.set(host_fs_base);
+            set_fs_base(task.context.fs_base.get());
             match task.coroutine.resume(()) {
                 CoroutineResult::Yield(CoroYield::Yielded) => {}
                 CoroutineResult::Return(retval) => {
                     task.retval = Some(retval);
                 }
             }
-            CORO_YIELDER.with(|cell| cell.set(core::ptr::null()));
+            set_fs_base(host_fs_base);
             crate::MY_PT.with(|c| *c.borrow_mut() = previous_pt);
             self.tasks.insert(pt, task);
         }
 
         pub(crate) unsafe fn suspend_current() {
-            CORO_YIELDER.with(|cell| {
-                let yielder = cell.get();
-                if !yielder.is_null() {
-                    unsafe {
-                        (&*yielder).suspend(CoroYield::Yielded);
-                    }
-                }
-            });
+            let ctx = CORO_CONTEXT.with(|cell| cell.get());
+            if ctx.is_null() {
+                return;
+            }
+            let yielder = (*ctx).yielder.get();
+            if yielder.is_null() {
+                return;
+            }
+
+            (*ctx).fs_base.set(get_fs_base());
+            set_fs_base((*ctx).host_fs_base.get());
+            (&*yielder).suspend(CoroYield::Yielded);
+        }
+
+        unsafe fn finish_task(&mut self, mut task: CoroTask) {
+            ShadowThread::shutdown(task.shadow);
+            task.shadow = core::ptr::null_mut();
+            core::mem::forget(task);
         }
     }
 
     impl Drop for CoroTaskProvider {
         fn drop(&mut self) {
-            for (_, task) in self.tasks.drain() {
-                core::mem::forget(task);
+            for (_, mut task) in self.tasks.drain() {
+                unsafe {
+                    ShadowThread::shutdown(task.shadow);
+                    task.shadow = core::ptr::null_mut();
+                    core::mem::forget(task);
+                }
             }
         }
     }
@@ -275,29 +474,31 @@ mod coro {
         unsafe fn create(
             &mut self,
             thread: *mut PthreadT,
-            _attr: *const AttrT,
+            attr: *const AttrT,
             start_arg: *mut StartArg,
         ) -> libc::c_int {
-            let pt = self.next_pthread as PthreadT;
-            self.next_pthread += 1;
-            let tid = self.next_tid;
-            self.next_tid += 1;
+            let (shadow, pt, tid, fs_base) = match self.create_shadow(attr) {
+                Ok(shadow) => shadow,
+                Err(r) => return r,
+            };
             *thread = pt;
             let routine = (*start_arg).routine;
             let arg = (*start_arg).arg;
             (*start_arg).ready = true;
-            let yielder_cell = Rc::new(Cell::new(core::ptr::null()));
-            let yielder_for_coro = yielder_cell.clone();
+            let context = Rc::new(CoroContext::new(fs_base));
+            let context_for_coro = context.clone();
 
             let coroutine = Coroutine::with_stack(
                 DefaultStack::new(2 * 1024 * 1024).unwrap(),
                 move |yielder, ()| {
-                    yielder_for_coro.set(yielder as *const _);
-                    CORO_YIELDER.with(|cell| cell.set(yielder as *const _));
+                    context_for_coro.yielder.set(yielder as *const _);
+                    CORO_CONTEXT.with(|cell| cell.set(Rc::as_ptr(&context_for_coro)));
                     crate::MY_PT.with(|c| *c.borrow_mut() = pt);
                     let retval = routine(arg);
                     crate::do_thread_exit(pt);
-                    CORO_YIELDER.with(|cell| cell.set(core::ptr::null()));
+                    context_for_coro.fs_base.set(get_fs_base());
+                    CORO_CONTEXT.with(|cell| cell.set(core::ptr::null()));
+                    set_fs_base(context_for_coro.host_fs_base.get());
                     retval
                 },
             );
@@ -305,7 +506,8 @@ mod coro {
                 pt,
                 CoroTask {
                     coroutine,
-                    yielder: yielder_cell,
+                    context,
+                    shadow,
                     retval: None,
                     tid,
                 },
@@ -320,7 +522,7 @@ mod coro {
             if !retval.is_null() {
                 *retval = task.retval.unwrap_or(core::ptr::null_mut());
             }
-            core::mem::forget(task);
+            self.finish_task(task);
             0
         }
 
@@ -349,7 +551,7 @@ mod coro {
                 return false;
             }
 
-            let in_coro = CORO_YIELDER.with(|cell| !cell.get().is_null());
+            let in_coro = CORO_CONTEXT.with(|cell| !cell.get().is_null());
             if in_coro {
                 self.requested_next = Some(next);
                 Self::suspend_current();

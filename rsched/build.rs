@@ -7,6 +7,7 @@ fn main() {
         .file("c-examples/uniform-lock.c")
         .file("c-examples/uaf.c")
         .file("c-examples/benchmarks.c")
+        .file("c-examples/coro_metadata.c")
         .include("include")
         .define("RSCHED", None)
         .compile("cexamples");
@@ -31,6 +32,7 @@ fn main() {
         "c-examples/uniform-lock.c",
         "c-examples/uaf.c",
         "c-examples/benchmarks.c",
+        "c-examples/coro_metadata.c",
     ];
     for (i, file) in c_files.iter().enumerate() {
         let obj = format!("{}/stdatomic_check_{}.o", out_dir, i);
