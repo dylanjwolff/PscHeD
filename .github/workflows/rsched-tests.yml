@@ -21,3 +21,5 @@ jobs:
       run: docker buildx build --progress=plain --cache-to type=gha --cache-from type=gha -t rsched .
     - name: Run tests
       run: docker run --security-opt seccomp=unconfined rsched
+    - name: Run tests with coroutine emulation
+      run: docker run --security-opt seccomp=unconfined rsched cargo test --workspace --features coro
