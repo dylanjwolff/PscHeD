@@ -26,8 +26,8 @@ pub use event::{AccessKind, Event, EventKind};
 
 mod task_provider;
 use task_provider::{
-    ParkingHandle, TaskChoice, TaskProvider, TaskStatus, deactivate_current_domain_tasks,
-    default_task_provider, exit_current_domain,
+    ParkingHandle, SwitchMode, SwitchResult, TaskChoice, TaskProvider, TaskStatus,
+    deactivate_current_domain_tasks, default_task_provider, exit_current_domain,
 };
 
 // ── Type aliases ──────────────────────────────────────────────────────────
@@ -237,25 +237,21 @@ impl State {
     /// Signal `next`'s suspend_cond and, if `suspend_caller` and next≠caller,
     /// suspend `caller` by waiting on its own cond (releases GMTX atomically).
     /// Must be called with GMTX held.
-    unsafe fn wake(&mut self, next: PthreadT, suspend_caller: bool, caller: PthreadT) {
+    unsafe fn wake_local(&mut self, next: PthreadT, suspend_caller: bool, caller: PthreadT) {
         if next != caller {
             let cond_ptr = addr_of_mut!(self.info.get_mut(&next).unwrap().suspend_cond);
-            let switched = self.task_provider.switch_to(next, caller);
-            if switched {
-                return;
-            }
-            if !self.task_provider.resume(next) {
-                self.task_provider.wake(ParkingHandle::new(cond_ptr));
-            }
+            self.task_provider.wake(ParkingHandle::new(cond_ptr));
             if suspend_caller {
                 let my_cond = addr_of_mut!(self.info.get_mut(&caller).unwrap().suspend_cond);
-                // Mark caller as waiting before releasing GMTX so choose() can see it.
-                self.info.get_mut(&caller).unwrap().is_in_rsched_wait = true;
-                self.refresh_task(caller);
                 self.task_provider.park(ParkingHandle::new(my_cond));
-                self.info.get_mut(&caller).unwrap().is_in_rsched_wait = false;
-                self.refresh_task(caller);
             }
+        }
+    }
+
+    unsafe fn mark_waiting(&mut self, pt: PthreadT, is_waiting: bool) {
+        if self.info.contains_key(&pt) {
+            self.t(pt).is_in_rsched_wait = is_waiting;
+            self.refresh_task(pt);
         }
     }
 
@@ -275,9 +271,7 @@ impl State {
         }
 
         if let Some(choice) = self.choose_task(caller) {
-            if choice.pthread != caller || choice.domain != self.task_provider.current_domain() {
-                self.run_task(choice, caller);
-            }
+            self.run_task(choice, caller);
         }
 
         let event = self.info.get(&caller).and_then(|t| t.next_event);
@@ -314,27 +308,23 @@ impl State {
     }
 
     unsafe fn run_task(&mut self, choice: TaskChoice, caller: PthreadT) {
-        let current = self.task_provider.current_domain();
-        if choice.domain == current {
-            self.wake(choice.pthread, true, caller);
-            return;
+        self.mark_waiting(caller, true);
+        match self
+            .task_provider
+            .switch_task(choice, caller, SwitchMode::SuspendCurrent)
+        {
+            SwitchResult::Handled => {}
+            SwitchResult::NotHandled => self.wake_local(choice.pthread, true, caller),
+            SwitchResult::DomainParked(selected) => self.resume_selected_thread(caller, selected),
         }
-
-        if !self.task_provider.switch_to_domain(choice) {
-            return;
-        }
-        self.info.get_mut(&caller).unwrap().is_in_rsched_wait = true;
-        self.refresh_task(caller);
-        self.task_provider.park_current_domain();
-        self.resume_selected_thread(caller);
+        self.mark_waiting(caller, false);
     }
 
-    unsafe fn resume_selected_thread(&mut self, caller: PthreadT) {
-        if let Some(selected) = self.task_provider.selected_domain_task()
+    unsafe fn resume_selected_thread(&mut self, caller: PthreadT, selected: Option<PthreadT>) {
+        if let Some(selected) = selected
             && self.info.contains_key(&selected)
-            && selected != caller
         {
-            self.wake(selected, true, caller);
+            self.wake_local(selected, selected != caller, caller);
         } else if self.info.contains_key(&caller) {
             self.t(caller).is_in_rsched_wait = false;
             self.refresh_task(caller);
@@ -1349,13 +1339,15 @@ pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
         let cond_ptr = addr_of_mut!(st().t(next).suspend_cond);
         st().task_provider.wake(ParkingHandle::new(cond_ptr));
     } else if let Some(choice) = st().choose_task(0 as PthreadT) {
-        if choice.domain == st().task_provider.current_domain()
-            && st().info.contains_key(&choice.pthread)
+        match st()
+            .task_provider
+            .switch_task(choice, 0 as PthreadT, SwitchMode::ReleaseCurrent)
         {
-            let cond_ptr = addr_of_mut!(st().t(choice.pthread).suspend_cond);
-            st().task_provider.wake(ParkingHandle::new(cond_ptr));
-        } else {
-            st().task_provider.switch_to_domain(choice);
+            SwitchResult::NotHandled if st().info.contains_key(&choice.pthread) => {
+                let cond_ptr = addr_of_mut!(st().t(choice.pthread).suspend_cond);
+                st().task_provider.wake(ParkingHandle::new(cond_ptr));
+            }
+            _ => {}
         }
     }
     rsched_gunlock();

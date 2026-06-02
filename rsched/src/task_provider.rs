@@ -31,6 +31,18 @@ pub(crate) struct TaskStatus {
     pub(crate) is_waiting: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SwitchMode {
+    SuspendCurrent,
+    ReleaseCurrent,
+}
+
+pub(crate) enum SwitchResult {
+    NotHandled,
+    Handled,
+    DomainParked(Option<PthreadT>),
+}
+
 pub(crate) trait TaskProvider {
     unsafe fn create(
         &mut self,
@@ -53,12 +65,13 @@ pub(crate) trait TaskProvider {
         0
     }
 
-    unsafe fn resume(&mut self, _thread: PthreadT) -> bool {
-        false
-    }
-
-    unsafe fn switch_to(&mut self, _next: PthreadT, _caller: PthreadT) -> bool {
-        false
+    unsafe fn switch_task(
+        &mut self,
+        _choice: TaskChoice,
+        _caller: PthreadT,
+        _mode: SwitchMode,
+    ) -> SwitchResult {
+        SwitchResult::NotHandled
     }
 
     fn starts_waiting(&self) -> bool {
@@ -90,16 +103,6 @@ pub(crate) trait TaskProvider {
         &mut self,
         _choose_index: &mut dyn FnMut(usize) -> Option<usize>,
     ) -> Option<TaskChoice> {
-        None
-    }
-
-    unsafe fn switch_to_domain(&mut self, _choice: TaskChoice) -> bool {
-        false
-    }
-
-    unsafe fn park_current_domain(&mut self) {}
-
-    unsafe fn selected_domain_task(&mut self) -> Option<PthreadT> {
         None
     }
 
@@ -186,7 +189,7 @@ impl TaskProvider for ThreadTaskProvider {
 }
 
 mod coro {
-    use super::{ParkingHandle, TaskProvider};
+    use super::{ParkingHandle, SwitchMode, SwitchResult, TaskChoice, TaskProvider};
     use crate::{AttrT, PthreadT, StartArg};
     use corosensei::{Coroutine, CoroutineResult, stack::DefaultStack};
     use std::cell::Cell;
@@ -538,24 +541,22 @@ mod coro {
 
         unsafe fn global_unlock(&mut self) {}
 
-        unsafe fn resume(&mut self, thread: PthreadT) -> bool {
-            if !self.tasks.contains_key(&thread) {
-                return false;
-            }
-            self.resume_task(thread);
-            true
-        }
-
-        unsafe fn switch_to(&mut self, next: PthreadT, caller: PthreadT) -> bool {
+        unsafe fn switch_task(
+            &mut self,
+            choice: TaskChoice,
+            caller: PthreadT,
+            _mode: SwitchMode,
+        ) -> SwitchResult {
+            let next = choice.pthread;
             if !self.tasks.contains_key(&next) {
-                return false;
+                return SwitchResult::NotHandled;
             }
 
             let in_coro = CORO_CONTEXT.with(|cell| !cell.get().is_null());
             if in_coro {
                 self.requested_next = Some(next);
                 Self::suspend_current();
-                return true;
+                return SwitchResult::Handled;
             }
 
             let mut selected = next;
@@ -568,7 +569,7 @@ mod coro {
                     _ => break,
                 }
             }
-            true
+            SwitchResult::Handled
         }
 
         fn starts_waiting(&self) -> bool {
@@ -1231,12 +1232,25 @@ impl TaskProvider for ProcessTaskProvider {
         self.inner.task_tid(thread)
     }
 
-    unsafe fn resume(&mut self, thread: PthreadT) -> bool {
-        self.inner.resume(thread)
-    }
+    unsafe fn switch_task(
+        &mut self,
+        choice: TaskChoice,
+        caller: PthreadT,
+        mode: SwitchMode,
+    ) -> SwitchResult {
+        if choice.domain == self.current_domain() {
+            return self.inner.switch_task(choice, caller, mode);
+        }
 
-    unsafe fn switch_to(&mut self, next: PthreadT, caller: PthreadT) -> bool {
-        self.inner.switch_to(next, caller)
+        if !self.switch_to_domain(choice) {
+            return SwitchResult::NotHandled;
+        }
+        if mode == SwitchMode::SuspendCurrent {
+            self.park_current_domain();
+            SwitchResult::DomainParked(self.selected_domain_task())
+        } else {
+            SwitchResult::Handled
+        }
     }
 
     fn starts_waiting(&self) -> bool {
@@ -1274,18 +1288,6 @@ impl TaskProvider for ProcessTaskProvider {
         choose_index: &mut dyn FnMut(usize) -> Option<usize>,
     ) -> Option<TaskChoice> {
         self.choose_domain_task(choose_index)
-    }
-
-    unsafe fn switch_to_domain(&mut self, choice: TaskChoice) -> bool {
-        self.switch_to_domain(choice)
-    }
-
-    unsafe fn park_current_domain(&mut self) {
-        self.park_current_domain();
-    }
-
-    unsafe fn selected_domain_task(&mut self) -> Option<PthreadT> {
-        self.selected_domain_task()
     }
 
     unsafe fn fork(&mut self) -> libc::pid_t {
