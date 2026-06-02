@@ -18,50 +18,71 @@ impl ParkingHandle {
 
 #[derive(Clone, Copy)]
 pub(crate) struct TaskChoice {
-    pub(crate) task_id: Option<usize>,
+    pub(crate) creation_idx: Option<usize>,
     pub(crate) domain: i32,
     pub(crate) pthread: PthreadT,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct TaskHandle {
-    task_id: usize,
-    task: *mut SharedTask,
+    creation_idx: usize,
 }
 
 impl TaskHandle {
-    fn new(task_id: usize, task: *mut SharedTask) -> Self {
-        Self { task_id, task }
+    fn new(creation_idx: usize) -> Self {
+        Self { creation_idx }
     }
 
-    pub(crate) fn id(self) -> usize {
-        self.task_id
+    pub(crate) fn creation_idx(self) -> usize {
+        self.creation_idx
     }
 
-    pub(crate) unsafe fn set_status(self, is_blocking: bool, startup_done: bool, is_waiting: bool) {
+    unsafe fn with_task<R>(self, f: impl FnOnce(&mut SharedTask) -> R) -> R {
         let ps = PROCESS_SHARED.load(Ordering::Acquire);
-        if !ps.is_null() {
-            process_lock(ps);
-        }
-        (*self.task).is_blocking = u8::from(is_blocking);
-        (*self.task).startup_done = u8::from(startup_done);
-        (*self.task).is_waiting = u8::from(is_waiting);
-        if !ps.is_null() {
-            process_unlock(ps);
-        }
+        assert!(
+            !ps.is_null(),
+            "rsched: task handle used before process state"
+        );
+        process_lock(ps);
+        assert!(
+            self.creation_idx < (*ps).task_count && self.creation_idx < MAX_TASKS,
+            "rsched: invalid task creation index"
+        );
+        let result = f(&mut (*ps).tasks[self.creation_idx]);
+        process_unlock(ps);
+        result
+    }
+
+    pub(crate) unsafe fn is_blocking(self) -> bool {
+        self.with_task(|task| task.is_blocking != 0)
+    }
+
+    pub(crate) unsafe fn set_blocking(self, is_blocking: bool) {
+        self.with_task(|task| task.is_blocking = u8::from(is_blocking));
+    }
+
+    pub(crate) unsafe fn startup_done(self) -> bool {
+        self.with_task(|task| task.startup_done != 0)
+    }
+
+    pub(crate) unsafe fn set_startup_done(self, startup_done: bool) {
+        self.with_task(|task| task.startup_done = u8::from(startup_done));
+    }
+
+    pub(crate) unsafe fn is_waiting(self) -> bool {
+        self.with_task(|task| task.is_waiting != 0)
+    }
+
+    pub(crate) unsafe fn set_waiting(self, is_waiting: bool) {
+        self.with_task(|task| task.is_waiting = u8::from(is_waiting));
     }
 
     pub(crate) unsafe fn deactivate(self) {
-        let ps = PROCESS_SHARED.load(Ordering::Acquire);
-        if !ps.is_null() {
-            process_lock(ps);
-        }
-        (*self.task).active = 0;
-        (*self.task).is_blocking = 1;
-        (*self.task).is_waiting = 0;
-        if !ps.is_null() {
-            process_unlock(ps);
-        }
+        self.with_task(|task| {
+            task.active = 0;
+            task.is_blocking = 1;
+            task.is_waiting = 0;
+        });
     }
 }
 
@@ -580,7 +601,7 @@ struct ProcessSlot {
     pid: libc::pid_t,
     active: u8,
     _pad: [u8; 3],
-    selected_task: usize,
+    selected_creation_idx: usize,
     gate: libc::sem_t,
 }
 
@@ -808,9 +829,9 @@ impl ProcessTaskProvider {
             process_unlock(ps);
             panic!("rsched: too many tasks; increase MAX_TASKS");
         }
-        let task_id = (*ps).task_count;
+        let creation_idx = (*ps).task_count;
         (*ps).task_count += 1;
-        (*ps).tasks[task_id] = SharedTask {
+        (*ps).tasks[creation_idx] = SharedTask {
             active: 1,
             is_blocking: 0,
             startup_done: 0,
@@ -818,7 +839,7 @@ impl ProcessTaskProvider {
             domain: slot,
             pthread: pt as usize,
         };
-        let handle = TaskHandle::new(task_id, addr_of_mut!((*ps).tasks[task_id]));
+        let handle = TaskHandle::new(creation_idx);
         process_unlock(ps);
         handle
     }
@@ -832,7 +853,7 @@ impl ProcessTaskProvider {
             return None;
         }
         let mut tasks = [TaskChoice {
-            task_id: None,
+            creation_idx: None,
             domain: -1,
             pthread: 0 as PthreadT,
         }; MAX_TASKS];
@@ -848,7 +869,7 @@ impl ProcessTaskProvider {
                 && task.is_waiting != 0
             {
                 tasks[n] = TaskChoice {
-                    task_id: Some(id),
+                    creation_idx: Some(id),
                     domain: task.domain,
                     pthread: task.pthread as PthreadT,
                 };
@@ -872,11 +893,11 @@ impl ProcessTaskProvider {
             process_unlock(ps);
             return None;
         }
-        let Some(task_id) = choice.task_id else {
+        let Some(creation_idx) = choice.creation_idx else {
             process_unlock(ps);
             return None;
         };
-        (*ps).slots[choice.domain as usize].selected_task = task_id;
+        (*ps).slots[choice.domain as usize].selected_creation_idx = creation_idx;
         process_log(format_args!(
             "pid {} switch slot {} -> {} thread {:#x}",
             libc::getpid(),
@@ -894,10 +915,10 @@ impl ProcessTaskProvider {
             process_wait_on_slot(ps, current);
 
             process_lock(ps);
-            let selected_task = (*ps).slots[current as usize].selected_task;
-            (*ps).slots[current as usize].selected_task = usize::MAX;
-            let selected = if selected_task < (*ps).task_count {
-                Some((*ps).tasks[selected_task].pthread as PthreadT)
+            let selected_creation_idx = (*ps).slots[current as usize].selected_creation_idx;
+            (*ps).slots[current as usize].selected_creation_idx = usize::MAX;
+            let selected = if selected_creation_idx < (*ps).task_count {
+                Some((*ps).tasks[selected_creation_idx].pthread as PthreadT)
             } else {
                 None
             };
@@ -906,7 +927,7 @@ impl ProcessTaskProvider {
                 "pid {} woke slot {} selected task {} thread {:#x}",
                 libc::getpid(),
                 current,
-                selected_task,
+                selected_creation_idx,
                 selected.unwrap_or(0 as PthreadT) as usize
             ));
             selected
@@ -952,7 +973,7 @@ impl ProcessTaskProvider {
                 assert_eq!(r, 0, "rsched: sem_init failed");
                 (*ps).slots[i].pid = pid;
                 (*ps).slots[i].active = 1;
-                (*ps).slots[i].selected_task = usize::MAX;
+                (*ps).slots[i].selected_creation_idx = usize::MAX;
                 process_unlock(ps);
                 PROCESS_SLOT.store(i as i32, Ordering::Release);
                 set_env_usize("RSCHED_PROCESS_SLOT", i);
@@ -987,7 +1008,7 @@ impl ProcessTaskProvider {
                 assert_eq!(r, 0, "rsched: fork sem_init failed");
                 (*ps).slots[i].pid = 0;
                 (*ps).slots[i].active = 1;
-                (*ps).slots[i].selected_task = usize::MAX;
+                (*ps).slots[i].selected_creation_idx = usize::MAX;
                 FORK_SLOT.store(i as i32, Ordering::Release);
                 set_env_usize("RSCHED_FORK_SLOT", i);
                 process_log(format_args!(
@@ -1055,7 +1076,8 @@ impl ProcessTaskProvider {
         ));
         process_wait_on_slot(ps, PROCESS_SLOT.load(Ordering::Acquire));
         process_lock(ps);
-        (*ps).slots[PROCESS_SLOT.load(Ordering::Acquire) as usize].selected_task = usize::MAX;
+        (*ps).slots[PROCESS_SLOT.load(Ordering::Acquire) as usize].selected_creation_idx =
+            usize::MAX;
         process_unlock(ps);
         crate::rsched_glock();
         crate::st().mark_waiting(crate::my_pt(), false);
@@ -1086,10 +1108,10 @@ impl ProcessTaskProvider {
         if let Some(choice) = next
             && choice.domain != current
             && choice.domain >= 0
-            && let Some(task_id) = choice.task_id
+            && let Some(creation_idx) = choice.creation_idx
         {
             process_lock(ps);
-            (*ps).slots[choice.domain as usize].selected_task = task_id;
+            (*ps).slots[choice.domain as usize].selected_creation_idx = creation_idx;
             let _ = crate::with_internal_depth(|| {
                 libc::sem_post(addr_of_mut!((*ps).slots[choice.domain as usize].gate))
             });
@@ -1108,7 +1130,7 @@ impl ProcessTaskProvider {
             ));
             process_lock(ps);
             deactivate_process_tasks_locked(ps, current);
-            (*ps).slots[current as usize].selected_task = usize::MAX;
+            (*ps).slots[current as usize].selected_creation_idx = usize::MAX;
             process_unlock(ps);
             set_env_usize("RSCHED_PROCESS_SLOT", current as usize);
         }
@@ -1167,7 +1189,7 @@ impl ProcessTaskProvider {
             if let Some(pthread) = self.switch_domain(choice, true) {
                 self.inner.switch_task(
                     TaskChoice {
-                        task_id: None,
+                        creation_idx: None,
                         domain: self.current_domain(),
                         pthread,
                     },

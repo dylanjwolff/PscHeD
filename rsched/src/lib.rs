@@ -46,18 +46,6 @@ struct Thread {
     task: Option<TaskHandle>,
     tid: libc::pid_t,
     pthread: PthreadT,
-    is_blocking: bool,
-    /// False until the parent's rsched_pthread_create returns and the sanitizer's
-    /// PostCreate (or equivalent) has been called for this thread.  While false,
-    /// context_switch never wakes this thread, preventing it from running
-    /// asan_thread_start / tsan_thread_start before the parent has finished the
-    /// thread-creation handshake.  The main thread is born with startup_done=true.
-    startup_done: bool,
-    /// True while this thread is blocked inside rsched's cond_wait (suspend_cond).
-    /// External threads (e.g. TSAN's background timer) are never in rsched's
-    /// cond_wait after startup, so this flag prevents choose() from picking them
-    /// and sending a lost cond_signal that would deadlock the scheduler.
-    is_in_rsched_wait: bool,
     /// Condition the scheduler uses to suspend/resume this thread.
     /// All suspensions wait on this cond with GMTX held.
     suspend_cond: CondT,
@@ -83,9 +71,6 @@ impl Thread {
             task: None,
             tid,
             pthread: pt,
-            is_blocking: false,
-            startup_done: false,
-            is_in_rsched_wait: false,
             suspend_cond: libc::PTHREAD_COND_INITIALIZER,
             joiner: None,
             is_exited: false,
@@ -159,13 +144,11 @@ impl State {
         t.task = Some(self.task_provider.register_task(pt));
         self.threads.push(pt);
         self.info.insert(pt, Box::new(t));
-        self.refresh_task(pt);
     }
 
     fn remove(&mut self, pt: PthreadT) {
         self.threads.retain(|&x| x != pt);
         if let Some(t) = self.info.get_mut(&pt) {
-            t.is_blocking = true;
             t.is_exited = true;
             unsafe {
                 t.task
@@ -182,12 +165,11 @@ impl State {
             .as_mut()
     }
 
-    unsafe fn refresh_task(&mut self, pt: PthreadT) {
-        if let Some(t) = self.info.get(&pt)
-            && let Some(task) = t.task
-        {
-            task.set_status(t.is_blocking, t.startup_done, t.is_in_rsched_wait);
-        }
+    fn task(&self, pt: PthreadT) -> TaskHandle {
+        self.info
+            .get(&pt)
+            .and_then(|t| t.task)
+            .expect("rsched: unknown task")
     }
 
     fn choose_index(&mut self, blocking: &[bool]) -> Option<usize> {
@@ -208,8 +190,7 @@ impl State {
             }
             drop(Box::from_raw(sa));
             if self.info.contains_key(&child_pt) {
-                self.t(child_pt).startup_done = true;
-                self.refresh_task(child_pt);
+                self.task(child_pt).set_startup_done(true);
             }
         }
     }
@@ -230,19 +211,16 @@ impl State {
 
     unsafe fn mark_waiting(&mut self, pt: PthreadT, is_waiting: bool) {
         if self.info.contains_key(&pt) {
-            self.t(pt).is_in_rsched_wait = is_waiting;
-            self.refresh_task(pt);
+            self.task(pt).set_waiting(is_waiting);
         }
     }
 
     unsafe fn park_if_blocked(&mut self, caller: PthreadT) {
-        if self.t(caller).is_blocking {
-            self.t(caller).is_in_rsched_wait = true;
-            self.refresh_task(caller);
+        if self.task(caller).is_blocking() {
+            self.task(caller).set_waiting(true);
             let cond = addr_of_mut!(self.t(caller).suspend_cond);
             self.task_provider.park(ParkingHandle::new(cond));
-            self.t(caller).is_in_rsched_wait = false;
-            self.refresh_task(caller);
+            self.task(caller).set_waiting(false);
         }
     }
 
@@ -256,9 +234,8 @@ impl State {
             return;
         }
 
-        if !self.info[&caller].startup_done {
-            self.t(caller).startup_done = true;
-            self.refresh_task(caller);
+        if !self.task(caller).startup_done() {
+            self.task(caller).set_startup_done(true);
         }
 
         if let Some(choice) = self.choose_task(caller) {
@@ -281,14 +258,7 @@ impl State {
 
     unsafe fn choose_task(&mut self, caller: PthreadT) -> Option<TaskChoice> {
         if self.info.contains_key(&caller) {
-            let task = self.t(caller).task;
-            if let Some(task) = task {
-                task.set_status(
-                    self.t(caller).is_blocking,
-                    self.t(caller).startup_done,
-                    true,
-                );
-            }
+            self.task(caller).set_waiting(true);
         }
         let scheduler = &mut self.scheduler;
         let mut choose_index = |n: usize| {
@@ -298,16 +268,22 @@ impl State {
         if let Some(choice) = self.task_provider.choose_domain_task(&mut choose_index) {
             return Some(choice);
         }
-        self.refresh_task(caller);
+        if self.info.contains_key(&caller) {
+            self.task(caller).set_waiting(false);
+        }
 
         let current = self.task_provider.current_domain();
         {
             let mut tasks = Vec::new();
             for pt in self.threads.iter().copied() {
                 let t = self.info[&pt].as_ref();
-                if !t.is_blocking && t.startup_done && (pt == caller || t.is_in_rsched_wait) {
+                let task = t
+                    .task
+                    .expect("rsched: registered thread has no task handle");
+                if !task.is_blocking() && task.startup_done() && (pt == caller || task.is_waiting())
+                {
                     tasks.push(TaskChoice {
-                        task_id: t.task.map(TaskHandle::id),
+                        creation_idx: Some(task.creation_idx()),
                         domain: current,
                         pthread: pt,
                     });
@@ -356,8 +332,7 @@ impl State {
             if !e.waiters.contains(&caller) {
                 e.waiters.push(caller);
             }
-            self.t(caller).is_blocking = true;
-            self.refresh_task(caller);
+            self.task(caller).set_blocking(true);
             self.context_switch(caller);
             // context_switch may have returned immediately (None path) without
             // suspending us, e.g. when the mutex owner is running but not in
@@ -400,8 +375,7 @@ impl State {
         let waiter = self.mutexes.get_mut(&key).unwrap().waiters.remove(idx);
         let waiter_tid = self.info[&waiter].tid;
         self.mutexes.get_mut(&key).unwrap().owner_tid = waiter_tid;
-        self.t(waiter).is_blocking = false;
-        self.refresh_task(waiter);
+        self.task(waiter).set_blocking(false);
         0
     }
 }
@@ -1110,9 +1084,8 @@ pub unsafe extern "C" fn rsched_init() {
     let self_pt = libc::pthread_self();
     MY_PT.with(|c| *c.borrow_mut() = self_pt);
     rsched_glock();
-    let mut t = Thread::new(self_pt);
-    t.startup_done = true; // main thread needs no sanitizer handshake
-    st().add(t);
+    st().add(Thread::new(self_pt));
+    st().task(self_pt).set_startup_done(true);
     rsched_gunlock();
     install_seccomp_tripwire_if_requested();
 }
@@ -1145,9 +1118,8 @@ pub unsafe extern "C" fn rsched_reinit(seed: u64) {
     let self_pt = libc::pthread_self();
     MY_PT.with(|c| *c.borrow_mut() = self_pt);
     rsched_glock();
-    let mut t = Thread::new(self_pt);
-    t.startup_done = true;
-    st().add(t);
+    st().add(Thread::new(self_pt));
+    st().task(self_pt).set_startup_done(true);
     rsched_gunlock();
 }
 
@@ -1227,12 +1199,10 @@ extern "C" fn tsan_user_start_gate(raw: *mut libc::c_void) -> *mut libc::c_void 
         depth_enter();
         rsched_glock();
         if st().info.contains_key(&self_pt) {
-            st().t(self_pt).is_in_rsched_wait = true;
-            st().refresh_task(self_pt);
+            st().task(self_pt).set_waiting(true);
             let cond_ptr = addr_of_mut!(st().t(self_pt).suspend_cond);
             st().task_provider.park(ParkingHandle::new(cond_ptr));
-            st().t(self_pt).is_in_rsched_wait = false;
-            st().refresh_task(self_pt);
+            st().task(self_pt).set_waiting(false);
         }
         rsched_gunlock();
         depth_exit();
@@ -1303,14 +1273,13 @@ pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
     rsched_glock();
     let joiner_opt = st().info.get(&caller).and_then(|t| t.joiner);
     if let Some(joiner) = joiner_opt {
-        st().t(joiner).is_blocking = false;
-        st().refresh_task(joiner);
+        st().task(joiner).set_blocking(false);
     }
     st().remove(caller);
     let mut local_tasks = Vec::new();
     for pt in st().threads.iter().copied() {
-        let t = st().info[&pt].as_ref();
-        if !t.is_blocking && t.startup_done && t.is_in_rsched_wait {
+        let task = st().task(pt);
+        if !task.is_blocking() && task.startup_done() && task.is_waiting() {
             local_tasks.push(pt);
         }
     }
@@ -1375,12 +1344,10 @@ pub(crate) extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void
         #[cfg(not(feature = "tsan"))]
         {
             // Suspend until the scheduler picks us (releases GMTX atomically).
-            st().t(self_pt).is_in_rsched_wait = true;
-            st().refresh_task(self_pt);
+            st().task(self_pt).set_waiting(true);
             let cond_ptr = addr_of_mut!(st().t(self_pt).suspend_cond);
             st().task_provider.park(ParkingHandle::new(cond_ptr));
-            st().t(self_pt).is_in_rsched_wait = false;
-            st().refresh_task(self_pt);
+            st().task(self_pt).set_waiting(false);
         }
 
         st().task_provider.global_unlock();
@@ -1446,8 +1413,7 @@ pub unsafe extern "C" fn rsched_pthread_create(
     let child_tid = st().task_provider.task_tid(*thread);
     st().add(Thread::new_with_tid(*thread, child_tid));
     if st().task_provider.starts_waiting() {
-        st().t(*thread).is_in_rsched_wait = true;
-        st().refresh_task(*thread);
+        st().task(*thread).set_waiting(true);
     }
 
     // Return immediately without waiting for the child to register.  Sanitiser
@@ -1486,8 +1452,7 @@ pub unsafe extern "C" fn rsched_pthread_join(
 
     if st().threads.contains(&thread) {
         st().t(thread).joiner = Some(caller);
-        st().t(caller).is_blocking = true;
-        st().refresh_task(caller);
+        st().task(caller).set_blocking(true);
         while st().threads.contains(&thread) {
             st().context_switch(caller);
         }
@@ -1644,8 +1609,7 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
         })
         .waiters
         .push(caller);
-    st().t(caller).is_blocking = true;
-    st().refresh_task(caller);
+    st().task(caller).set_blocking(true);
     st().context_switch(caller);
     st().park_if_blocked(caller);
 
@@ -1671,8 +1635,7 @@ pub unsafe extern "C" fn rsched_pthread_cond_signal(cond: *mut CondT) -> libc::c
             .choose_index(&blocking)
             .expect("rsched: non-empty cond waiter list");
         let w = st().conds.get_mut(&key).unwrap().waiters.remove(idx);
-        st().t(w).is_blocking = false;
-        st().refresh_task(w);
+        st().task(w).set_blocking(false);
     }
     st().context_switch(caller);
     rsched_gunlock();
@@ -1689,8 +1652,7 @@ pub unsafe extern "C" fn rsched_pthread_cond_broadcast(cond: *mut CondT) -> libc
     let caller = my_pt();
     if let Some(c) = st().conds.remove(&key) {
         for w in c.waiters {
-            st().t(w).is_blocking = false;
-            st().refresh_task(w);
+            st().task(w).set_blocking(false);
         }
     }
     st().context_switch(caller);
@@ -1746,8 +1708,7 @@ pub unsafe extern "C" fn rsched_pthread_barrier_wait(barrier: *mut BarrierT) -> 
             b.waiters.push(caller);
         }
         if b.waiters.len() < b.count as usize {
-            st().t(caller).is_blocking = true;
-            st().refresh_task(caller);
+            st().task(caller).set_blocking(true);
         }
     }
 
@@ -1758,8 +1719,7 @@ pub unsafe extern "C" fn rsched_pthread_barrier_wait(barrier: *mut BarrierT) -> 
         if b.waiters.len() >= b.count as usize {
             let ws: Vec<PthreadT> = b.waiters.drain(..).collect();
             for w in ws {
-                st().t(w).is_blocking = false;
-                st().refresh_task(w);
+                st().task(w).set_blocking(false);
             }
             released = true;
         }
