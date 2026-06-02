@@ -38,9 +38,11 @@ pub(crate) enum SwitchMode {
 }
 
 pub(crate) enum SwitchResult {
-    NotHandled,
-    Handled,
-    DomainParked(Option<PthreadT>),
+    Done,
+    WakeLocal {
+        pthread: PthreadT,
+        suspend_caller: bool,
+    },
 }
 
 pub(crate) trait TaskProvider {
@@ -67,11 +69,14 @@ pub(crate) trait TaskProvider {
 
     unsafe fn switch_task(
         &mut self,
-        _choice: TaskChoice,
+        choice: TaskChoice,
         _caller: PthreadT,
-        _mode: SwitchMode,
+        mode: SwitchMode,
     ) -> SwitchResult {
-        SwitchResult::NotHandled
+        SwitchResult::WakeLocal {
+            pthread: choice.pthread,
+            suspend_caller: mode == SwitchMode::SuspendCurrent,
+        }
     }
 
     fn starts_waiting(&self) -> bool {
@@ -548,15 +553,21 @@ mod coro {
             _mode: SwitchMode,
         ) -> SwitchResult {
             let next = choice.pthread;
+            if next == caller {
+                return SwitchResult::Done;
+            }
             if !self.tasks.contains_key(&next) {
-                return SwitchResult::NotHandled;
+                return SwitchResult::WakeLocal {
+                    pthread: next,
+                    suspend_caller: _mode == SwitchMode::SuspendCurrent,
+                };
             }
 
             let in_coro = CORO_CONTEXT.with(|cell| !cell.get().is_null());
             if in_coro {
                 self.requested_next = Some(next);
                 Self::suspend_current();
-                return SwitchResult::Handled;
+                return SwitchResult::Done;
             }
 
             let mut selected = next;
@@ -569,7 +580,7 @@ mod coro {
                     _ => break,
                 }
             }
-            SwitchResult::Handled
+            SwitchResult::Done
         }
 
         fn starts_waiting(&self) -> bool {
@@ -1243,13 +1254,25 @@ impl TaskProvider for ProcessTaskProvider {
         }
 
         if !self.switch_to_domain(choice) {
-            return SwitchResult::NotHandled;
+            return SwitchResult::Done;
         }
         if mode == SwitchMode::SuspendCurrent {
             self.park_current_domain();
-            SwitchResult::DomainParked(self.selected_domain_task())
+            if let Some(pthread) = self.selected_domain_task() {
+                self.inner.switch_task(
+                    TaskChoice {
+                        task_id: usize::MAX,
+                        domain: self.current_domain(),
+                        pthread,
+                    },
+                    caller,
+                    SwitchMode::SuspendCurrent,
+                )
+            } else {
+                SwitchResult::Done
+            }
         } else {
-            SwitchResult::Handled
+            SwitchResult::Done
         }
     }
 

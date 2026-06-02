@@ -271,7 +271,17 @@ impl State {
         }
 
         if let Some(choice) = self.choose_task(caller) {
-            self.run_task(choice, caller);
+            self.mark_waiting(caller, true);
+            if let SwitchResult::WakeLocal {
+                pthread,
+                suspend_caller,
+            } = self
+                .task_provider
+                .switch_task(choice, caller, SwitchMode::SuspendCurrent)
+            {
+                self.wake_local(pthread, suspend_caller, caller);
+            }
+            self.mark_waiting(caller, false);
         }
 
         let event = self.info.get(&caller).and_then(|t| t.next_event);
@@ -304,30 +314,6 @@ impl State {
             }
             let blocking = vec![false; tasks.len()];
             self.choose_index(&blocking).map(|idx| tasks[idx])
-        }
-    }
-
-    unsafe fn run_task(&mut self, choice: TaskChoice, caller: PthreadT) {
-        self.mark_waiting(caller, true);
-        match self
-            .task_provider
-            .switch_task(choice, caller, SwitchMode::SuspendCurrent)
-        {
-            SwitchResult::Handled => {}
-            SwitchResult::NotHandled => self.wake_local(choice.pthread, true, caller),
-            SwitchResult::DomainParked(selected) => self.resume_selected_thread(caller, selected),
-        }
-        self.mark_waiting(caller, false);
-    }
-
-    unsafe fn resume_selected_thread(&mut self, caller: PthreadT, selected: Option<PthreadT>) {
-        if let Some(selected) = selected
-            && self.info.contains_key(&selected)
-        {
-            self.wake_local(selected, selected != caller, caller);
-        } else if self.info.contains_key(&caller) {
-            self.t(caller).is_in_rsched_wait = false;
-            self.refresh_task(caller);
         }
     }
 
@@ -1338,17 +1324,15 @@ pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
         let next = local_tasks[idx];
         let cond_ptr = addr_of_mut!(st().t(next).suspend_cond);
         st().task_provider.wake(ParkingHandle::new(cond_ptr));
-    } else if let Some(choice) = st().choose_task(0 as PthreadT) {
-        match st()
-            .task_provider
-            .switch_task(choice, 0 as PthreadT, SwitchMode::ReleaseCurrent)
-        {
-            SwitchResult::NotHandled if st().info.contains_key(&choice.pthread) => {
-                let cond_ptr = addr_of_mut!(st().t(choice.pthread).suspend_cond);
-                st().task_provider.wake(ParkingHandle::new(cond_ptr));
-            }
-            _ => {}
-        }
+    } else if let Some(choice) = st().choose_task(0 as PthreadT)
+        && let SwitchResult::WakeLocal { pthread, .. } =
+            st()
+                .task_provider
+                .switch_task(choice, 0 as PthreadT, SwitchMode::ReleaseCurrent)
+        && st().info.contains_key(&pthread)
+    {
+        let cond_ptr = addr_of_mut!(st().t(pthread).suspend_cond);
+        st().task_provider.wake(ParkingHandle::new(cond_ptr));
     }
     rsched_gunlock();
     depth_exit();
