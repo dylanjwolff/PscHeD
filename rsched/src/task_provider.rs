@@ -23,12 +23,46 @@ pub(crate) struct TaskChoice {
     pub(crate) pthread: PthreadT,
 }
 
-pub(crate) struct TaskStatus {
-    pub(crate) task_id: usize,
-    pub(crate) pthread: PthreadT,
-    pub(crate) is_blocking: bool,
-    pub(crate) startup_done: bool,
-    pub(crate) is_waiting: bool,
+#[derive(Clone, Copy)]
+pub(crate) struct TaskHandle {
+    task_id: usize,
+    task: *mut SharedTask,
+}
+
+impl TaskHandle {
+    fn new(task_id: usize, task: *mut SharedTask) -> Self {
+        Self { task_id, task }
+    }
+
+    pub(crate) fn id(self) -> usize {
+        self.task_id
+    }
+
+    pub(crate) unsafe fn set_status(self, is_blocking: bool, startup_done: bool, is_waiting: bool) {
+        let ps = PROCESS_SHARED.load(Ordering::Acquire);
+        if !ps.is_null() {
+            process_lock(ps);
+        }
+        (*self.task).is_blocking = u8::from(is_blocking);
+        (*self.task).startup_done = u8::from(startup_done);
+        (*self.task).is_waiting = u8::from(is_waiting);
+        if !ps.is_null() {
+            process_unlock(ps);
+        }
+    }
+
+    pub(crate) unsafe fn deactivate(self) {
+        let ps = PROCESS_SHARED.load(Ordering::Acquire);
+        if !ps.is_null() {
+            process_lock(ps);
+        }
+        (*self.task).active = 0;
+        (*self.task).is_blocking = 1;
+        (*self.task).is_waiting = 0;
+        if !ps.is_null() {
+            process_unlock(ps);
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -713,22 +747,6 @@ unsafe fn process_unlock(ps: *mut ProcessShared) {
     assert_eq!(r, 0, "rsched: process shared unlock failed");
 }
 
-unsafe fn set_task_status_locked(
-    ps: *mut ProcessShared,
-    task_id: usize,
-    is_blocking: bool,
-    startup_done: bool,
-    is_waiting: bool,
-) {
-    if task_id >= (*ps).task_count || task_id >= MAX_TASKS {
-        return;
-    }
-    let task = &mut (*ps).tasks[task_id];
-    task.is_blocking = u8::from(is_blocking);
-    task.startup_done = u8::from(startup_done);
-    task.is_waiting = u8::from(is_waiting);
-}
-
 unsafe fn deactivate_process_tasks_locked(ps: *mut ProcessShared, domain: i32) {
     for id in 0..(*ps).task_count.min(MAX_TASKS) {
         if (*ps).tasks[id].domain == domain {
@@ -782,23 +800,7 @@ impl ProcessTaskProvider {
         Self { inner }
     }
 
-    unsafe fn update_process_task_status(
-        &mut self,
-        task_id: usize,
-        is_blocking: bool,
-        startup_done: bool,
-        is_waiting: bool,
-    ) {
-        let ps = PROCESS_SHARED.load(Ordering::Acquire);
-        if ps.is_null() {
-            return;
-        }
-        process_lock(ps);
-        set_task_status_locked(ps, task_id, is_blocking, startup_done, is_waiting);
-        process_unlock(ps);
-    }
-
-    unsafe fn register_process_task(&mut self, pt: PthreadT) -> usize {
+    unsafe fn register_process_task(&mut self, pt: PthreadT) -> TaskHandle {
         let slot = PROCESS_SLOT.load(Ordering::Acquire);
         let ps = process_shared_ptr();
         process_lock(ps);
@@ -816,29 +818,9 @@ impl ProcessTaskProvider {
             domain: slot,
             pthread: pt as usize,
         };
+        let handle = TaskHandle::new(task_id, addr_of_mut!((*ps).tasks[task_id]));
         process_unlock(ps);
-        task_id
-    }
-
-    unsafe fn publish_process_tasks(&mut self, tasks: &[TaskStatus]) {
-        let ps = PROCESS_SHARED.load(Ordering::Acquire);
-        if ps.is_null() {
-            return;
-        }
-        process_lock(ps);
-        for task in tasks {
-            set_task_status_locked(
-                ps,
-                task.task_id,
-                task.is_blocking,
-                task.startup_done,
-                task.is_waiting,
-            );
-            if task.task_id < (*ps).task_count && task.task_id < MAX_TASKS {
-                (*ps).tasks[task.task_id].pthread = task.pthread as usize;
-            }
-        }
-        process_unlock(ps);
+        handle
     }
 
     unsafe fn choose_process_task(
@@ -1064,7 +1046,7 @@ impl ProcessTaskProvider {
         }
         crate::reset_local_state_after_fork();
         crate::rsched_glock();
-        crate::st().publish_local_tasks(crate::my_pt());
+        crate::st().mark_waiting(crate::my_pt(), true);
         crate::rsched_gunlock();
         process_log(format_args!(
             "pid {} child waiting on slot {}",
@@ -1075,6 +1057,9 @@ impl ProcessTaskProvider {
         process_lock(ps);
         (*ps).slots[PROCESS_SLOT.load(Ordering::Acquire) as usize].selected_task = usize::MAX;
         process_unlock(ps);
+        crate::rsched_glock();
+        crate::st().mark_waiting(crate::my_pt(), false);
+        crate::rsched_gunlock();
         process_log(format_args!("pid {} child resumed", libc::getpid()));
     }
 
@@ -1210,22 +1195,8 @@ impl ProcessTaskProvider {
         self.register_current(initially_runnable);
     }
 
-    pub(crate) unsafe fn register_task(&mut self, thread: PthreadT) -> usize {
+    pub(crate) unsafe fn register_task(&mut self, thread: PthreadT) -> TaskHandle {
         self.register_process_task(thread)
-    }
-
-    pub(crate) unsafe fn update_task_status(
-        &mut self,
-        task_id: usize,
-        is_blocking: bool,
-        startup_done: bool,
-        is_waiting: bool,
-    ) {
-        self.update_process_task_status(task_id, is_blocking, startup_done, is_waiting);
-    }
-
-    pub(crate) unsafe fn publish_tasks(&mut self, tasks: &[TaskStatus]) {
-        self.publish_process_tasks(tasks);
     }
 
     pub(crate) unsafe fn choose_domain_task(
