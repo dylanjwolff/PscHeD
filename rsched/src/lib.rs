@@ -26,7 +26,7 @@ pub use event::{AccessKind, Event, EventKind};
 
 mod task_provider;
 use task_provider::{
-    ParkingHandle, SwitchMode, SwitchResult, TaskChoice, TaskProvider, TaskStatus,
+    ParkingHandle, ProcessTaskProvider, SwitchMode, SwitchResult, TaskChoice, TaskStatus,
     deactivate_current_domain_tasks, default_task_provider, exit_current_domain,
 };
 
@@ -43,7 +43,7 @@ type StartRoutine = unsafe extern "C" fn(*mut libc::c_void) -> *mut libc::c_void
 // ── Thread descriptor ─────────────────────────────────────────────────────
 
 struct Thread {
-    task_id: usize,
+    task_id: Option<usize>,
     tid: libc::pid_t,
     pthread: PthreadT,
     is_blocking: bool,
@@ -80,7 +80,7 @@ impl Thread {
 
     fn new_with_tid(pt: PthreadT, tid: libc::pid_t) -> Self {
         Thread {
-            task_id: usize::MAX,
+            task_id: None,
             tid,
             pthread: pt,
             is_blocking: false,
@@ -115,7 +115,7 @@ struct SBarrier {
 
 struct State {
     scheduler: Box<dyn Scheduler>,
-    task_provider: Box<dyn TaskProvider>,
+    task_provider: ProcessTaskProvider,
     threads: Vec<PthreadT>,
     info: HashMap<PthreadT, Box<Thread>>,
     mutexes: HashMap<usize, SMutex>,
@@ -156,7 +156,7 @@ impl State {
 
     unsafe fn add(&mut self, mut t: Thread) {
         let pt = t.pthread;
-        t.task_id = self.task_provider.register_task(pt);
+        t.task_id = Some(self.task_provider.register_task(pt));
         self.threads.push(pt);
         self.info.insert(pt, Box::new(t));
     }
@@ -168,7 +168,7 @@ impl State {
             t.is_exited = true;
             unsafe {
                 self.task_provider.update_task_status(
-                    t.task_id,
+                    t.task_id.expect("rsched: registered thread has no task id"),
                     t.is_blocking,
                     t.startup_done,
                     t.is_in_rsched_wait,
@@ -185,9 +185,11 @@ impl State {
     }
 
     unsafe fn refresh_task(&mut self, pt: PthreadT) {
-        if let Some(t) = self.info.get(&pt) {
+        if let Some(t) = self.info.get(&pt)
+            && let Some(task_id) = t.task_id
+        {
             self.task_provider.update_task_status(
-                t.task_id,
+                task_id,
                 t.is_blocking,
                 t.startup_done,
                 t.is_in_rsched_wait,
@@ -203,13 +205,15 @@ impl State {
         let mut tasks = Vec::with_capacity(self.threads.len());
         for pt in self.threads.iter().copied() {
             let t = self.info[&pt].as_ref();
-            tasks.push(TaskStatus {
-                task_id: t.task_id,
-                pthread: pt,
-                is_blocking: t.is_blocking,
-                startup_done: t.startup_done,
-                is_waiting: pt == caller || t.is_in_rsched_wait,
-            });
+            if let Some(task_id) = t.task_id {
+                tasks.push(TaskStatus {
+                    task_id,
+                    pthread: pt,
+                    is_blocking: t.is_blocking,
+                    startup_done: t.startup_done,
+                    is_waiting: pt == caller || t.is_in_rsched_wait,
+                });
+            }
         }
         self.task_provider.publish_tasks(&tasks);
     }
@@ -252,6 +256,15 @@ impl State {
         if self.info.contains_key(&pt) {
             self.t(pt).is_in_rsched_wait = is_waiting;
             self.refresh_task(pt);
+        }
+    }
+
+    unsafe fn park_if_blocked(&mut self, caller: PthreadT) {
+        if self.t(caller).is_blocking {
+            self.t(caller).is_in_rsched_wait = true;
+            let cond = addr_of_mut!(self.t(caller).suspend_cond);
+            self.task_provider.park(ParkingHandle::new(cond));
+            self.t(caller).is_in_rsched_wait = false;
         }
     }
 
@@ -364,12 +377,7 @@ impl State {
             // the owner can acquire GMTX to call mutex_unlock.
             // mutex_unlock will signal our suspend_cond after transferring
             // ownership, so this wait is always eventually resolved.
-            if self.t(caller).is_blocking {
-                self.t(caller).is_in_rsched_wait = true;
-                let cond = addr_of_mut!(self.t(caller).suspend_cond);
-                self.task_provider.park(ParkingHandle::new(cond));
-                self.t(caller).is_in_rsched_wait = false;
-            }
+            self.park_if_blocked(caller);
         }
     }
 
@@ -1326,8 +1334,7 @@ pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
         st().task_provider.wake(ParkingHandle::new(cond_ptr));
     } else if let Some(choice) = st().choose_task(0 as PthreadT)
         && let SwitchResult::WakeLocal { pthread, .. } =
-            st()
-                .task_provider
+            st().task_provider
                 .switch_task(choice, 0 as PthreadT, SwitchMode::ReleaseCurrent)
         && st().info.contains_key(&pthread)
     {
@@ -1646,12 +1653,7 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
         .push(caller);
     st().t(caller).is_blocking = true;
     st().context_switch(caller);
-    if st().t(caller).is_blocking {
-        st().t(caller).is_in_rsched_wait = true;
-        let cond = addr_of_mut!(st().t(caller).suspend_cond);
-        st().task_provider.park(ParkingHandle::new(cond));
-        st().t(caller).is_in_rsched_wait = false;
-    }
+    st().park_if_blocked(caller);
 
     st().mutex_lock(lkey, caller);
     rsched_gunlock();
@@ -1769,12 +1771,7 @@ pub unsafe extern "C" fn rsched_pthread_barrier_wait(barrier: *mut BarrierT) -> 
     // the releasing thread marks all waiters runnable.  If this caller released
     // the barrier, yielding gives the waiters a chance to run.
     st().context_switch(caller);
-    if st().t(caller).is_blocking {
-        st().t(caller).is_in_rsched_wait = true;
-        let cond = addr_of_mut!(st().t(caller).suspend_cond);
-        st().task_provider.park(ParkingHandle::new(cond));
-        st().t(caller).is_in_rsched_wait = false;
-    }
+    st().park_if_blocked(caller);
     rsched_gunlock();
     if released {
         libc::PTHREAD_BARRIER_SERIAL_THREAD

@@ -18,7 +18,7 @@ impl ParkingHandle {
 
 #[derive(Clone, Copy)]
 pub(crate) struct TaskChoice {
-    pub(crate) task_id: usize,
+    pub(crate) task_id: Option<usize>,
     pub(crate) domain: i32,
     pub(crate) pthread: PthreadT,
 }
@@ -45,7 +45,7 @@ pub(crate) enum SwitchResult {
     },
 }
 
-pub(crate) trait TaskProvider {
+pub(crate) trait LocalTaskProvider {
     unsafe fn create(
         &mut self,
         thread: *mut PthreadT,
@@ -82,65 +82,6 @@ pub(crate) trait TaskProvider {
     fn starts_waiting(&self) -> bool {
         false
     }
-
-    fn current_domain(&self) -> i32 {
-        -1
-    }
-
-    unsafe fn register_current_domain(&mut self, _initially_runnable: bool) {}
-
-    unsafe fn register_task(&mut self, _thread: PthreadT) -> usize {
-        usize::MAX
-    }
-
-    unsafe fn update_task_status(
-        &mut self,
-        _task_id: usize,
-        _is_blocking: bool,
-        _startup_done: bool,
-        _is_waiting: bool,
-    ) {
-    }
-
-    unsafe fn publish_tasks(&mut self, _tasks: &[TaskStatus]) {}
-
-    unsafe fn choose_domain_task(
-        &mut self,
-        _choose_index: &mut dyn FnMut(usize) -> Option<usize>,
-    ) -> Option<TaskChoice> {
-        None
-    }
-
-    unsafe fn fork(&mut self) -> libc::pid_t {
-        crate::with_internal_depth(|| libc::fork())
-    }
-
-    unsafe fn before_fork(&mut self) {}
-
-    unsafe fn after_fork_parent(&mut self, _child: libc::pid_t) -> bool {
-        false
-    }
-
-    unsafe fn after_fork_child(&mut self) {}
-
-    unsafe fn process_exit(&mut self, _next: Option<TaskChoice>) {}
-
-    unsafe fn execv(
-        &mut self,
-        path: *const libc::c_char,
-        argv: *const *const libc::c_char,
-    ) -> libc::c_int {
-        crate::with_internal_depth(|| libc::execv(path, argv))
-    }
-
-    unsafe fn execve(
-        &mut self,
-        path: *const libc::c_char,
-        argv: *const *const libc::c_char,
-        envp: *const *const libc::c_char,
-    ) -> libc::c_int {
-        crate::with_internal_depth(|| libc::execve(path, argv, envp))
-    }
 }
 
 pub(crate) struct ThreadTaskProvider;
@@ -151,7 +92,7 @@ impl ThreadTaskProvider {
     }
 }
 
-impl TaskProvider for ThreadTaskProvider {
+impl LocalTaskProvider for ThreadTaskProvider {
     unsafe fn create(
         &mut self,
         thread: *mut PthreadT,
@@ -194,7 +135,7 @@ impl TaskProvider for ThreadTaskProvider {
 }
 
 mod coro {
-    use super::{ParkingHandle, SwitchMode, SwitchResult, TaskChoice, TaskProvider};
+    use super::{LocalTaskProvider, ParkingHandle, SwitchMode, SwitchResult, TaskChoice};
     use crate::{AttrT, PthreadT, StartArg};
     use corosensei::{Coroutine, CoroutineResult, stack::DefaultStack};
     use std::cell::Cell;
@@ -478,7 +419,7 @@ mod coro {
         }
     }
 
-    impl TaskProvider for CoroTaskProvider {
+    impl LocalTaskProvider for CoroTaskProvider {
         unsafe fn create(
             &mut self,
             thread: *mut PthreadT,
@@ -833,11 +774,11 @@ unsafe fn process_wait_until_published(ps: *mut ProcessShared, slot: i32) {
 }
 
 pub(crate) struct ProcessTaskProvider {
-    inner: Box<dyn TaskProvider>,
+    inner: Box<dyn LocalTaskProvider>,
 }
 
 impl ProcessTaskProvider {
-    pub(crate) fn new(inner: Box<dyn TaskProvider>) -> Self {
+    pub(crate) fn new(inner: Box<dyn LocalTaskProvider>) -> Self {
         Self { inner }
     }
 
@@ -849,7 +790,7 @@ impl ProcessTaskProvider {
         is_waiting: bool,
     ) {
         let ps = PROCESS_SHARED.load(Ordering::Acquire);
-        if ps.is_null() || task_id == usize::MAX {
+        if ps.is_null() {
             return;
         }
         process_lock(ps);
@@ -900,7 +841,7 @@ impl ProcessTaskProvider {
         process_unlock(ps);
     }
 
-    unsafe fn choose_domain_task(
+    unsafe fn choose_process_task(
         &mut self,
         choose_index: &mut dyn FnMut(usize) -> Option<usize>,
     ) -> Option<TaskChoice> {
@@ -909,7 +850,7 @@ impl ProcessTaskProvider {
             return None;
         }
         let mut tasks = [TaskChoice {
-            task_id: usize::MAX,
+            task_id: None,
             domain: -1,
             pthread: 0 as PthreadT,
         }; MAX_TASKS];
@@ -925,7 +866,7 @@ impl ProcessTaskProvider {
                 && task.is_waiting != 0
             {
                 tasks[n] = TaskChoice {
-                    task_id: id,
+                    task_id: Some(id),
                     domain: task.domain,
                     pthread: task.pthread as PthreadT,
                 };
@@ -937,19 +878,23 @@ impl ProcessTaskProvider {
         choice
     }
 
-    unsafe fn switch_to_domain(&mut self, choice: TaskChoice) -> bool {
+    unsafe fn switch_domain(&mut self, choice: TaskChoice, park_current: bool) -> Option<PthreadT> {
         let current = PROCESS_SLOT.load(Ordering::Acquire);
         let ps = PROCESS_SHARED.load(Ordering::Acquire);
         if ps.is_null() || current < 0 {
-            return false;
+            return None;
         }
 
         process_lock(ps);
         if choice.domain < 0 || (*ps).slots[choice.domain as usize].active == 0 {
             process_unlock(ps);
-            return false;
+            return None;
         }
-        (*ps).slots[choice.domain as usize].selected_task = choice.task_id;
+        let Some(task_id) = choice.task_id else {
+            process_unlock(ps);
+            return None;
+        };
+        (*ps).slots[choice.domain as usize].selected_task = task_id;
         process_log(format_args!(
             "pid {} switch slot {} -> {} thread {:#x}",
             libc::getpid(),
@@ -963,40 +908,29 @@ impl ProcessTaskProvider {
         assert_eq!(r, 0, "rsched: sem_post failed");
         process_unlock(ps);
 
-        true
-    }
-
-    unsafe fn park_current_domain(&mut self) {
-        let current = PROCESS_SLOT.load(Ordering::Acquire);
-        let ps = PROCESS_SHARED.load(Ordering::Acquire);
-        if current >= 0 && !ps.is_null() {
+        if park_current {
             process_wait_on_slot(ps, current);
-        }
-    }
 
-    unsafe fn selected_domain_task(&mut self) -> Option<PthreadT> {
-        let current = PROCESS_SLOT.load(Ordering::Acquire);
-        let ps = PROCESS_SHARED.load(Ordering::Acquire);
-        if current < 0 || ps.is_null() {
-            return None;
-        }
-        process_lock(ps);
-        let selected_task = (*ps).slots[current as usize].selected_task;
-        (*ps).slots[current as usize].selected_task = usize::MAX;
-        let selected = if selected_task < (*ps).task_count {
-            Some((*ps).tasks[selected_task].pthread as PthreadT)
+            process_lock(ps);
+            let selected_task = (*ps).slots[current as usize].selected_task;
+            (*ps).slots[current as usize].selected_task = usize::MAX;
+            let selected = if selected_task < (*ps).task_count {
+                Some((*ps).tasks[selected_task].pthread as PthreadT)
+            } else {
+                None
+            };
+            process_unlock(ps);
+            process_log(format_args!(
+                "pid {} woke slot {} selected task {} thread {:#x}",
+                libc::getpid(),
+                current,
+                selected_task,
+                selected.unwrap_or(0 as PthreadT) as usize
+            ));
+            selected
         } else {
             None
-        };
-        process_unlock(ps);
-        process_log(format_args!(
-            "pid {} woke slot {} selected task {} thread {:#x}",
-            libc::getpid(),
-            current,
-            selected_task,
-            selected.unwrap_or(0 as PthreadT) as usize
-        ));
-        selected
+        }
     }
 
     unsafe fn register_current(&mut self, initially_runnable: bool) -> i32 {
@@ -1058,20 +992,6 @@ impl ProcessTaskProvider {
 
         process_unlock(ps);
         panic!("rsched: too many forked processes; increase MAX_PROCESSES");
-    }
-
-    pub(crate) unsafe fn deactivate_current_domain_tasks() {
-        let current_slot = PROCESS_SLOT.load(Ordering::Acquire);
-        let ps = PROCESS_SHARED.load(Ordering::Acquire);
-        if current_slot >= 0 && !ps.is_null() {
-            process_lock(ps);
-            deactivate_process_tasks_locked(ps, current_slot);
-            process_unlock(ps);
-        }
-    }
-
-    pub(crate) unsafe fn exit_current_domain(next: Option<TaskChoice>) {
-        Self::process_exit_impl(next);
     }
 
     unsafe fn before_fork_impl(&mut self) {
@@ -1181,9 +1101,10 @@ impl ProcessTaskProvider {
         if let Some(choice) = next
             && choice.domain != current
             && choice.domain >= 0
+            && let Some(task_id) = choice.task_id
         {
             process_lock(ps);
-            (*ps).slots[choice.domain as usize].selected_task = choice.task_id;
+            (*ps).slots[choice.domain as usize].selected_task = task_id;
             let _ = crate::with_internal_depth(|| {
                 libc::sem_post(addr_of_mut!((*ps).slots[choice.domain as usize].gate))
             });
@@ -1209,8 +1130,8 @@ impl ProcessTaskProvider {
     }
 }
 
-impl TaskProvider for ProcessTaskProvider {
-    unsafe fn create(
+impl ProcessTaskProvider {
+    pub(crate) unsafe fn create(
         &mut self,
         thread: *mut PthreadT,
         attr: *const AttrT,
@@ -1219,31 +1140,35 @@ impl TaskProvider for ProcessTaskProvider {
         self.inner.create(thread, attr, start_arg)
     }
 
-    unsafe fn join(&mut self, thread: PthreadT, retval: *mut *mut libc::c_void) -> libc::c_int {
+    pub(crate) unsafe fn join(
+        &mut self,
+        thread: PthreadT,
+        retval: *mut *mut libc::c_void,
+    ) -> libc::c_int {
         self.inner.join(thread, retval)
     }
 
-    unsafe fn wake(&mut self, handle: ParkingHandle) -> libc::c_int {
+    pub(crate) unsafe fn wake(&mut self, handle: ParkingHandle) -> libc::c_int {
         self.inner.wake(handle)
     }
 
-    unsafe fn park(&mut self, handle: ParkingHandle) {
+    pub(crate) unsafe fn park(&mut self, handle: ParkingHandle) {
         self.inner.park(handle);
     }
 
-    unsafe fn global_lock(&mut self) {
+    pub(crate) unsafe fn global_lock(&mut self) {
         self.inner.global_lock();
     }
 
-    unsafe fn global_unlock(&mut self) {
+    pub(crate) unsafe fn global_unlock(&mut self) {
         self.inner.global_unlock();
     }
 
-    fn task_tid(&self, thread: PthreadT) -> libc::pid_t {
+    pub(crate) fn task_tid(&self, thread: PthreadT) -> libc::pid_t {
         self.inner.task_tid(thread)
     }
 
-    unsafe fn switch_task(
+    pub(crate) unsafe fn switch_task(
         &mut self,
         choice: TaskChoice,
         caller: PthreadT,
@@ -1253,15 +1178,11 @@ impl TaskProvider for ProcessTaskProvider {
             return self.inner.switch_task(choice, caller, mode);
         }
 
-        if !self.switch_to_domain(choice) {
-            return SwitchResult::Done;
-        }
         if mode == SwitchMode::SuspendCurrent {
-            self.park_current_domain();
-            if let Some(pthread) = self.selected_domain_task() {
+            if let Some(pthread) = self.switch_domain(choice, true) {
                 self.inner.switch_task(
                     TaskChoice {
-                        task_id: usize::MAX,
+                        task_id: None,
                         domain: self.current_domain(),
                         pthread,
                     },
@@ -1272,27 +1193,28 @@ impl TaskProvider for ProcessTaskProvider {
                 SwitchResult::Done
             }
         } else {
+            self.switch_domain(choice, false);
             SwitchResult::Done
         }
     }
 
-    fn starts_waiting(&self) -> bool {
+    pub(crate) fn starts_waiting(&self) -> bool {
         self.inner.starts_waiting()
     }
 
-    fn current_domain(&self) -> i32 {
+    pub(crate) fn current_domain(&self) -> i32 {
         PROCESS_SLOT.load(Ordering::Acquire)
     }
 
-    unsafe fn register_current_domain(&mut self, initially_runnable: bool) {
+    pub(crate) unsafe fn register_current_domain(&mut self, initially_runnable: bool) {
         self.register_current(initially_runnable);
     }
 
-    unsafe fn register_task(&mut self, thread: PthreadT) -> usize {
+    pub(crate) unsafe fn register_task(&mut self, thread: PthreadT) -> usize {
         self.register_process_task(thread)
     }
 
-    unsafe fn update_task_status(
+    pub(crate) unsafe fn update_task_status(
         &mut self,
         task_id: usize,
         is_blocking: bool,
@@ -1302,18 +1224,18 @@ impl TaskProvider for ProcessTaskProvider {
         self.update_process_task_status(task_id, is_blocking, startup_done, is_waiting);
     }
 
-    unsafe fn publish_tasks(&mut self, tasks: &[TaskStatus]) {
+    pub(crate) unsafe fn publish_tasks(&mut self, tasks: &[TaskStatus]) {
         self.publish_process_tasks(tasks);
     }
 
-    unsafe fn choose_domain_task(
+    pub(crate) unsafe fn choose_domain_task(
         &mut self,
         choose_index: &mut dyn FnMut(usize) -> Option<usize>,
     ) -> Option<TaskChoice> {
-        self.choose_domain_task(choose_index)
+        self.choose_process_task(choose_index)
     }
 
-    unsafe fn fork(&mut self) -> libc::pid_t {
+    pub(crate) unsafe fn fork(&mut self) -> libc::pid_t {
         self.before_fork();
         let pid = crate::with_internal_depth(|| libc::fork());
         if pid == 0 {
@@ -1327,23 +1249,23 @@ impl TaskProvider for ProcessTaskProvider {
         pid
     }
 
-    unsafe fn before_fork(&mut self) {
+    pub(crate) unsafe fn before_fork(&mut self) {
         self.before_fork_impl();
     }
 
-    unsafe fn after_fork_parent(&mut self, child: libc::pid_t) -> bool {
+    pub(crate) unsafe fn after_fork_parent(&mut self, child: libc::pid_t) -> bool {
         self.after_fork_parent_impl(child)
     }
 
-    unsafe fn after_fork_child(&mut self) {
+    pub(crate) unsafe fn after_fork_child(&mut self) {
         self.after_fork_child_impl();
     }
 
-    unsafe fn process_exit(&mut self, next: Option<TaskChoice>) {
+    pub(crate) unsafe fn process_exit(&mut self, next: Option<TaskChoice>) {
         Self::process_exit_impl(next);
     }
 
-    unsafe fn execv(
+    pub(crate) unsafe fn execv(
         &mut self,
         path: *const libc::c_char,
         argv: *const *const libc::c_char,
@@ -1352,7 +1274,7 @@ impl TaskProvider for ProcessTaskProvider {
         crate::with_internal_depth(|| libc::execv(path, argv))
     }
 
-    unsafe fn execve(
+    pub(crate) unsafe fn execve(
         &mut self,
         path: *const libc::c_char,
         argv: *const *const libc::c_char,
@@ -1365,18 +1287,24 @@ impl TaskProvider for ProcessTaskProvider {
 }
 
 pub(crate) unsafe fn deactivate_current_domain_tasks() {
-    ProcessTaskProvider::deactivate_current_domain_tasks();
+    let current_slot = PROCESS_SLOT.load(Ordering::Acquire);
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if current_slot >= 0 && !ps.is_null() {
+        process_lock(ps);
+        deactivate_process_tasks_locked(ps, current_slot);
+        process_unlock(ps);
+    }
 }
 
 pub(crate) unsafe fn exit_current_domain(next: Option<TaskChoice>) {
-    ProcessTaskProvider::exit_current_domain(next);
+    ProcessTaskProvider::process_exit_impl(next);
 }
 
-pub(crate) fn default_task_provider() -> Box<dyn TaskProvider> {
-    let local: Box<dyn TaskProvider> = if cfg!(feature = "coro") {
+pub(crate) fn default_task_provider() -> ProcessTaskProvider {
+    let local: Box<dyn LocalTaskProvider> = if cfg!(feature = "coro") {
         Box::new(CoroTaskProvider::new())
     } else {
         Box::new(ThreadTaskProvider::new())
     };
-    Box::new(ProcessTaskProvider::new(local))
+    ProcessTaskProvider::new(local)
 }
