@@ -1,3 +1,4 @@
+use crate::scheduler::SharedDfsState;
 use crate::{AttrT, CondT, PthreadT, StartArg};
 use std::ffi::{CStr, CString};
 use std::ptr::addr_of_mut;
@@ -616,8 +617,13 @@ struct SharedTask {
 #[repr(C)]
 struct ProcessShared {
     task_count: usize,
+    dfs: SharedDfsState,
     tasks: [SharedTask; MAX_TASKS],
     slots: [ProcessSlot; MAX_PROCESSES],
+}
+
+pub(crate) unsafe fn shared_dfs_state() -> *mut SharedDfsState {
+    addr_of_mut!((*process_shared_ptr()).dfs)
 }
 
 unsafe fn process_shared_ptr() -> *mut ProcessShared {
@@ -796,6 +802,8 @@ impl ProcessTaskProvider {
 
     unsafe fn choose_process_task(
         &mut self,
+        caller: PthreadT,
+        avoid_self: bool,
         choose_index: &mut dyn FnMut(usize) -> Option<usize>,
     ) -> Option<TaskChoice> {
         let ps = PROCESS_SHARED.load(Ordering::Acquire);
@@ -824,6 +832,17 @@ impl ProcessTaskProvider {
                 };
                 n += 1;
             }
+        }
+        if avoid_self && n > 1 {
+            let current = self.current_domain();
+            let mut write = 0usize;
+            for read in 0..n {
+                if !(tasks[read].domain == current && tasks[read].pthread == caller) {
+                    tasks[write] = tasks[read];
+                    write += 1;
+                }
+            }
+            n = write;
         }
         choose_index(n).map(|idx| tasks[idx])
     }
@@ -1148,9 +1167,11 @@ impl ProcessTaskProvider {
 
     pub(crate) unsafe fn choose_domain_task(
         &mut self,
+        caller: PthreadT,
+        avoid_self: bool,
         choose_index: &mut dyn FnMut(usize) -> Option<usize>,
     ) -> Option<TaskChoice> {
-        self.choose_process_task(choose_index)
+        self.choose_process_task(caller, avoid_self, choose_index)
     }
 
     pub(crate) unsafe fn fork(&mut self) -> libc::pid_t {

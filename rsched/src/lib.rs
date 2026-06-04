@@ -16,7 +16,7 @@ use std::ptr::addr_of_mut;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 mod scheduler;
-use scheduler::{LoggingScheduler, RandomWalk, Scheduler};
+use scheduler::{Scheduler, SchedulerImpl};
 
 mod event;
 pub use event::{AccessKind, Event, EventKind};
@@ -99,7 +99,7 @@ struct SBarrier {
 // ── Scheduler state ───────────────────────────────────────────────────────
 
 struct State {
-    scheduler: Box<dyn Scheduler>,
+    scheduler: SchedulerImpl,
     task_provider: ProcessTaskProvider,
     threads: Vec<PthreadT>,
     info: HashMap<PthreadT, Box<Thread>>,
@@ -119,14 +119,8 @@ struct State {
 
 impl State {
     fn new(seed: u64) -> Self {
-        let logging = std::env::var("RSCHED_LOG").is_ok_and(|v| v == "1");
-        let scheduler: Box<dyn Scheduler> = if logging {
-            Box::new(LoggingScheduler::new(RandomWalk::new(seed)))
-        } else {
-            Box::new(RandomWalk::new(seed))
-        };
         State {
-            scheduler,
+            scheduler: SchedulerImpl::new(seed),
             task_provider: default_task_provider(),
             threads: Vec::new(),
             info: HashMap::new(),
@@ -238,7 +232,23 @@ impl State {
             self.task(caller).set_startup_done(true);
         }
 
-        if let Some(choice) = self.choose_task(caller) {
+        let event = self.info.get(&caller).and_then(|t| t.next_event);
+        self.scheduler.on_event(event.as_ref());
+        if event.is_some() {
+            self.clear_event(caller);
+        }
+
+        let avoid_self = self.scheduler.avoid_self_on_stutter()
+            && (event.is_none()
+                || matches!(
+                    event,
+                    Some(Event {
+                        kind: EventKind::SchedYield,
+                        ..
+                    })
+                ));
+
+        if let Some(choice) = self.choose_task(caller, avoid_self) {
             self.mark_waiting(caller, true);
             if let SwitchResult::WakeLocal {
                 pthread,
@@ -251,12 +261,9 @@ impl State {
             }
             self.mark_waiting(caller, false);
         }
-
-        let event = self.info.get(&caller).and_then(|t| t.next_event);
-        self.scheduler.on_event(event.as_ref());
     }
 
-    unsafe fn choose_task(&mut self, caller: PthreadT) -> Option<TaskChoice> {
+    unsafe fn choose_task(&mut self, caller: PthreadT, avoid_self: bool) -> Option<TaskChoice> {
         if self.info.contains_key(&caller) {
             self.task(caller).set_waiting(true);
         }
@@ -265,7 +272,10 @@ impl State {
             let blocking = vec![false; n];
             scheduler.choose(&blocking)
         };
-        if let Some(choice) = self.task_provider.choose_domain_task(&mut choose_index) {
+        if let Some(choice) =
+            self.task_provider
+                .choose_domain_task(caller, avoid_self, &mut choose_index)
+        {
             return Some(choice);
         }
         if self.info.contains_key(&caller) {
@@ -288,6 +298,9 @@ impl State {
                         pthread: pt,
                     });
                 }
+            }
+            if avoid_self && tasks.len() > 1 {
+                tasks.retain(|task| task.pthread != caller);
             }
             let blocking = vec![false; tasks.len()];
             self.choose_index(&blocking).map(|idx| tasks[idx])
@@ -614,7 +627,7 @@ pub unsafe extern "C" fn rsched_process_exit() {
     }
 
     rsched_glock();
-    let next = st().choose_task(0 as PthreadT);
+    let next = st().choose_task(0 as PthreadT, false);
     st().task_provider.process_exit(next);
     rsched_gunlock();
 }
@@ -774,6 +787,9 @@ fn ensure_init() {
 /// Used by integration tests to run multiple scenarios in one process.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_reinit(seed: u64) {
+    if let Some(state) = (*addr_of_mut!(STATE)).as_mut() {
+        state.scheduler.finish();
+    }
     deactivate_current_domain_tasks();
 
     // Drop any existing state (previous test run's threads/mutexes/etc.).
@@ -790,6 +806,28 @@ pub unsafe extern "C" fn rsched_reinit(seed: u64) {
     st().add(Thread::new(self_pt));
     st().task(self_pt).set_startup_done(true);
     rsched_gunlock();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_dfs_reset() {
+    scheduler::dfs_reset();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_dfs_has_next() -> bool {
+    scheduler::dfs_has_next()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_dfs_finish_current() {
+    if let Some(state) = (*addr_of_mut!(STATE)).as_mut() {
+        state.scheduler.finish();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_dfs_completed_schedules() -> usize {
+    scheduler::dfs_completed_schedules()
 }
 
 // ── Thread trampoline ─────────────────────────────────────────────────────
@@ -829,7 +867,7 @@ pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
         let next = local_tasks[idx];
         let cond_ptr = addr_of_mut!(st().t(next).suspend_cond);
         st().task_provider.wake(ParkingHandle::new(cond_ptr));
-    } else if let Some(choice) = st().choose_task(0 as PthreadT)
+    } else if let Some(choice) = st().choose_task(0 as PthreadT, false)
         && let SwitchResult::WakeLocal { pthread, .. } =
             st().task_provider
                 .switch_task(choice, 0 as PthreadT, SwitchMode::ReleaseCurrent)

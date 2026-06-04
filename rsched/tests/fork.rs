@@ -154,6 +154,30 @@ fn fork_explores_multiple_process_interleavings() {
     );
 }
 
+#[test]
+fn dfs_exhausts_fork_interleavings() {
+    let program = build_example("fork_dfs_count");
+    let output = run_with_seed(&program, 0);
+    assert!(
+        !output.timed_out,
+        "fork_dfs_count timed out\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert!(
+        output.status.success(),
+        "fork_dfs_count failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        output.stdout,
+        output.stderr
+    );
+    assert!(
+        output.stdout.contains("mask=0x3"),
+        "fork_dfs_count did not exhaust all process interleavings\nstdout:\n{}\nstderr:\n{}",
+        output.stdout,
+        output.stderr
+    );
+}
+
 fn last_from_output(seed: u64, output: RunOutput) -> i32 {
     assert!(
         !output.timed_out,
