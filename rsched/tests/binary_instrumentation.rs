@@ -180,11 +180,7 @@ fn clang_runtime(name: &str) -> Option<PathBuf> {
         return None;
     }
     let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 fn sanitizer_runtime(sanitizer: &str) -> Option<PathBuf> {
