@@ -67,12 +67,13 @@ fn run_timeout(program: &Path, args: &[OsString], envs: &[(&str, OsString)]) -> 
     let mut cmd = Command::new("timeout");
     cmd.arg("--kill-after=5s")
         .arg(format!("{}s", TIMEOUT.as_secs()))
-        .arg(program)
-        .args(args);
-    cmd.env_remove("LD_LIBRARY_PATH");
+        .arg("env")
+        .arg("-u")
+        .arg("LD_LIBRARY_PATH");
     for (key, value) in envs {
-        cmd.env(key, value);
+        cmd.arg(format!("{key}={}", value.to_string_lossy()));
     }
+    cmd.arg(program).args(args);
 
     let out = cmd.output().unwrap_or_else(|e| {
         panic!(

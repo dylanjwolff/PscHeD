@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ptr::addr_of_mut;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::arch::global_asm;
@@ -23,6 +23,12 @@ use scheduler::{LoggingScheduler, RandomWalk, Scheduler};
 
 mod event;
 pub use event::{AccessKind, Event, EventKind};
+
+mod task_provider;
+use task_provider::{
+    ParkingHandle, ProcessTaskProvider, SwitchMode, SwitchResult, TaskChoice, TaskHandle,
+    deactivate_current_domain_tasks, default_task_provider, exit_current_domain,
+};
 
 // ── Type aliases ──────────────────────────────────────────────────────────
 
@@ -37,20 +43,9 @@ type StartRoutine = unsafe extern "C" fn(*mut libc::c_void) -> *mut libc::c_void
 // ── Thread descriptor ─────────────────────────────────────────────────────
 
 struct Thread {
+    task: Option<TaskHandle>,
     tid: libc::pid_t,
     pthread: PthreadT,
-    is_blocking: bool,
-    /// False until the parent's rsched_pthread_create returns and the sanitizer's
-    /// PostCreate (or equivalent) has been called for this thread.  While false,
-    /// context_switch never wakes this thread, preventing it from running
-    /// asan_thread_start / tsan_thread_start before the parent has finished the
-    /// thread-creation handshake.  The main thread is born with startup_done=true.
-    startup_done: bool,
-    /// True while this thread is blocked inside rsched's cond_wait (suspend_cond).
-    /// External threads (e.g. TSAN's background timer) are never in rsched's
-    /// cond_wait after startup, so this flag prevents choose() from picking them
-    /// and sending a lost cond_signal that would deadlock the scheduler.
-    is_in_rsched_wait: bool,
     /// Condition the scheduler uses to suspend/resume this thread.
     /// All suspensions wait on this cond with GMTX held.
     suspend_cond: CondT,
@@ -73,11 +68,9 @@ impl Thread {
 
     fn new_with_tid(pt: PthreadT, tid: libc::pid_t) -> Self {
         Thread {
+            task: None,
             tid,
             pthread: pt,
-            is_blocking: false,
-            startup_done: false,
-            is_in_rsched_wait: false,
             suspend_cond: libc::PTHREAD_COND_INITIALIZER,
             joiner: None,
             is_exited: false,
@@ -107,6 +100,7 @@ struct SBarrier {
 
 struct State {
     scheduler: Box<dyn Scheduler>,
+    task_provider: ProcessTaskProvider,
     threads: Vec<PthreadT>,
     info: HashMap<PthreadT, Box<Thread>>,
     mutexes: HashMap<usize, SMutex>,
@@ -133,6 +127,7 @@ impl State {
         };
         State {
             scheduler,
+            task_provider: default_task_provider(),
             threads: Vec::new(),
             info: HashMap::new(),
             mutexes: HashMap::new(),
@@ -144,8 +139,9 @@ impl State {
         }
     }
 
-    fn add(&mut self, t: Thread) {
+    unsafe fn add(&mut self, mut t: Thread) {
         let pt = t.pthread;
+        t.task = Some(self.task_provider.register_task(pt));
         self.threads.push(pt);
         self.info.insert(pt, Box::new(t));
     }
@@ -153,8 +149,12 @@ impl State {
     fn remove(&mut self, pt: PthreadT) {
         self.threads.retain(|&x| x != pt);
         if let Some(t) = self.info.get_mut(&pt) {
-            t.is_blocking = true;
             t.is_exited = true;
+            unsafe {
+                t.task
+                    .expect("rsched: registered thread has no task handle")
+                    .deactivate();
+            }
         }
     }
 
@@ -165,23 +165,15 @@ impl State {
             .as_mut()
     }
 
-    fn choose(&mut self) -> Option<usize> {
-        let blocking: Vec<bool> = self
-            .threads
-            .iter()
-            .map(|pt| {
-                let t = self.info[pt].as_ref();
-                // A thread is ineligible if it is logically blocking (waiting for a
-                // resource), not yet started (sanitizer handshake pending), or not
-                // currently suspended inside rsched's own cond_wait.  The last
-                // condition filters out external threads (e.g. TSAN's background
-                // timer) that are registered in `st().threads` but are running their
-                // own code (nanosleep) without any rsched scheduling point, so
-                // signalling their suspend_cond would be a lost wakeup.
-                t.is_blocking || !t.startup_done || !t.is_in_rsched_wait
-            })
-            .collect();
-        self.scheduler.choose(&blocking)
+    fn task(&self, pt: PthreadT) -> TaskHandle {
+        self.info
+            .get(&pt)
+            .and_then(|t| t.task)
+            .expect("rsched: unknown task")
+    }
+
+    fn choose_index(&mut self, blocking: &[bool]) -> Option<usize> {
+        self.scheduler.choose(blocking)
     }
 
     /// Complete a deferred child startup handshake.
@@ -193,11 +185,12 @@ impl State {
     unsafe fn drain_pending_child(&mut self) {
         if let Some((sa, child_pt)) = self.pending_child.take() {
             while !(*sa).ready {
-                rsched_cond_wait(addr_of_mut!((*sa).ready_cond));
+                self.task_provider
+                    .park(ParkingHandle::new(addr_of_mut!((*sa).ready_cond)));
             }
             drop(Box::from_raw(sa));
             if self.info.contains_key(&child_pt) {
-                self.t(child_pt).startup_done = true;
+                self.task(child_pt).set_startup_done(true);
             }
         }
     }
@@ -205,17 +198,29 @@ impl State {
     /// Signal `next`'s suspend_cond and, if `suspend_caller` and next≠caller,
     /// suspend `caller` by waiting on its own cond (releases GMTX atomically).
     /// Must be called with GMTX held.
-    unsafe fn wake(&mut self, next: PthreadT, suspend_caller: bool, caller: PthreadT) {
+    unsafe fn wake_local(&mut self, next: PthreadT, suspend_caller: bool, caller: PthreadT) {
         if next != caller {
             let cond_ptr = addr_of_mut!(self.info.get_mut(&next).unwrap().suspend_cond);
-            with_internal_depth(|| (rpt().cond_signal)(cond_ptr));
+            self.task_provider.wake(ParkingHandle::new(cond_ptr));
             if suspend_caller {
                 let my_cond = addr_of_mut!(self.info.get_mut(&caller).unwrap().suspend_cond);
-                // Mark caller as waiting before releasing GMTX so choose() can see it.
-                self.info.get_mut(&caller).unwrap().is_in_rsched_wait = true;
-                rsched_cond_wait(my_cond);
-                self.info.get_mut(&caller).unwrap().is_in_rsched_wait = false;
+                self.task_provider.park(ParkingHandle::new(my_cond));
             }
+        }
+    }
+
+    unsafe fn mark_waiting(&mut self, pt: PthreadT, is_waiting: bool) {
+        if self.info.contains_key(&pt) {
+            self.task(pt).set_waiting(is_waiting);
+        }
+    }
+
+    unsafe fn park_if_blocked(&mut self, caller: PthreadT) {
+        if self.task(caller).is_blocking() {
+            self.task(caller).set_waiting(true);
+            let cond = addr_of_mut!(self.t(caller).suspend_cond);
+            self.task_provider.park(ParkingHandle::new(cond));
+            self.task(caller).set_waiting(false);
         }
     }
 
@@ -229,34 +234,64 @@ impl State {
             return;
         }
 
-        if self.threads.len() <= 1 {
-            return;
+        if !self.task(caller).startup_done() {
+            self.task(caller).set_startup_done(true);
         }
 
-        if !self.info[&caller].startup_done {
-            self.t(caller).startup_done = true;
-        }
-
-        if let Some(idx) = self.choose() {
-            let next = self.threads[idx];
-            self.wake(next, true, caller);
-        } else {
-            // No thread eligible to schedule.  This can happen when:
-            //  • the only other threads are external (e.g. TSAN's background
-            //    timer), registered in st().threads but not inside rsched's
-            //    cond_wait — signalling them would be a lost wakeup;
-            //  • a freshly-created thread is already in rsched's initial
-            //    cond_wait but still has startup_done=false — the caller
-            //    will set startup_done and signal it after we return;
-            //  • all other threads are logically blocking (is_blocking=true).
-            // In every case the right action is to return and let the
-            // caller continue; it will take the appropriate next step
-            // (signal child, block in rpt().join, etc.).
-            return;
+        if let Some(choice) = self.choose_task(caller) {
+            self.mark_waiting(caller, true);
+            if let SwitchResult::WakeLocal {
+                pthread,
+                suspend_caller,
+            } = self
+                .task_provider
+                .switch_task(choice, caller, SwitchMode::SuspendCurrent)
+            {
+                self.wake_local(pthread, suspend_caller, caller);
+            }
+            self.mark_waiting(caller, false);
         }
 
         let event = self.info.get(&caller).and_then(|t| t.next_event);
         self.scheduler.on_event(event.as_ref());
+    }
+
+    unsafe fn choose_task(&mut self, caller: PthreadT) -> Option<TaskChoice> {
+        if self.info.contains_key(&caller) {
+            self.task(caller).set_waiting(true);
+        }
+        let scheduler = &mut self.scheduler;
+        let mut choose_index = |n: usize| {
+            let blocking = vec![false; n];
+            scheduler.choose(&blocking)
+        };
+        if let Some(choice) = self.task_provider.choose_domain_task(&mut choose_index) {
+            return Some(choice);
+        }
+        if self.info.contains_key(&caller) {
+            self.task(caller).set_waiting(false);
+        }
+
+        let current = self.task_provider.current_domain();
+        {
+            let mut tasks = Vec::new();
+            for pt in self.threads.iter().copied() {
+                let t = self.info[&pt].as_ref();
+                let task = t
+                    .task
+                    .expect("rsched: registered thread has no task handle");
+                if !task.is_blocking() && task.startup_done() && (pt == caller || task.is_waiting())
+                {
+                    tasks.push(TaskChoice {
+                        creation_idx: Some(task.creation_idx()),
+                        domain: current,
+                        pthread: pt,
+                    });
+                }
+            }
+            let blocking = vec![false; tasks.len()];
+            self.choose_index(&blocking).map(|idx| tasks[idx])
+        }
     }
 
     // ── event helpers ─────────────────────────────────────────────────
@@ -297,7 +332,7 @@ impl State {
             if !e.waiters.contains(&caller) {
                 e.waiters.push(caller);
             }
-            self.t(caller).is_blocking = true;
+            self.task(caller).set_blocking(true);
             self.context_switch(caller);
             // context_switch may have returned immediately (None path) without
             // suspending us, e.g. when the mutex owner is running but not in
@@ -306,11 +341,7 @@ impl State {
             // the owner can acquire GMTX to call mutex_unlock.
             // mutex_unlock will signal our suspend_cond after transferring
             // ownership, so this wait is always eventually resolved.
-            if self.t(caller).is_blocking {
-                self.t(caller).is_in_rsched_wait = true;
-                rsched_cond_wait(addr_of_mut!(self.t(caller).suspend_cond));
-                self.t(caller).is_in_rsched_wait = false;
-            }
+            self.park_if_blocked(caller);
         }
     }
 
@@ -338,14 +369,13 @@ impl State {
         // Phase 2: pick a random waiter (needs self.scheduler, no mutexes borrow active).
         let blocking = vec![false; waiter_count];
         let idx = self
-            .scheduler
-            .choose(&blocking)
+            .choose_index(&blocking)
             .expect("rsched: non-empty waiter list");
         // Phase 3: transfer ownership to chosen waiter.
         let waiter = self.mutexes.get_mut(&key).unwrap().waiters.remove(idx);
         let waiter_tid = self.info[&waiter].tid;
         self.mutexes.get_mut(&key).unwrap().owner_tid = waiter_tid;
-        self.t(waiter).is_blocking = false;
+        self.task(waiter).set_blocking(false);
         0
     }
 }
@@ -469,11 +499,6 @@ struct RealPt {
         *mut libc::c_void,
     ) -> libc::c_int,
     join: unsafe extern "C" fn(PthreadT, *mut *mut libc::c_void) -> libc::c_int,
-    barrier_init: unsafe extern "C" fn(
-        *mut BarrierT,
-        *const libc::pthread_barrierattr_t,
-        libc::c_uint,
-    ) -> libc::c_int,
 }
 
 static REAL_PT: std::sync::OnceLock<RealPt> = std::sync::OnceLock::new();
@@ -488,10 +513,7 @@ unsafe fn rpt() -> &'static RealPt {
             libc::RTLD_LAZY | libc::RTLD_NOLOAD,
         );
         if lib.is_null() {
-            lib = libc::dlopen(
-                c"libc.so.6".as_ptr(),
-                libc::RTLD_LAZY | libc::RTLD_NOLOAD,
-            );
+            lib = libc::dlopen(c"libc.so.6".as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
         }
         assert!(
             !lib.is_null(),
@@ -514,15 +536,14 @@ unsafe fn rpt() -> &'static RealPt {
             cond_signal: sym(lib, b"pthread_cond_signal\0"),
             create: sym(lib, b"pthread_create\0"),
             join: sym(lib, b"pthread_join\0"),
-            barrier_init: sym(lib, b"pthread_barrier_init\0"),
         }
     })
 }
 
-unsafe fn glock() {
+pub(crate) unsafe fn thread_glock() {
     with_internal_depth(|| (rpt().mutex_lock)(addr_of_mut!(GMTX)));
 }
-unsafe fn gunlock() {
+pub(crate) unsafe fn thread_gunlock() {
     with_internal_depth(|| (rpt().mutex_unlock)(addr_of_mut!(GMTX)));
 }
 
@@ -535,19 +556,110 @@ unsafe fn sync_release() {
 }
 
 unsafe fn rsched_glock() {
-    glock();
+    st().task_provider.global_lock();
     sync_acquire();
 }
 
 unsafe fn rsched_gunlock() {
     sync_release();
-    gunlock();
+    st().task_provider.global_unlock();
 }
 
-unsafe fn rsched_cond_wait(cond: *mut CondT) {
+pub(crate) unsafe fn thread_cond_wait(cond: *mut CondT) {
     sync_release();
     with_internal_depth(|| (rpt().cond_wait)(cond, addr_of_mut!(GMTX)));
     sync_acquire();
+}
+
+extern "C" fn process_atexit() {
+    unsafe {
+        rsched_process_exit();
+    }
+}
+
+pub(crate) unsafe fn reset_local_state_after_fork() {
+    STATE = None;
+    INITED.store(false, Ordering::SeqCst);
+    rsched_init();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_before_fork() {
+    ensure_init();
+    st().task_provider.before_fork();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_after_fork_parent(child: libc::pid_t) {
+    if st().task_provider.after_fork_parent(child) {
+        rsched_glock();
+        let caller = my_pt();
+        st().context_switch(caller);
+        rsched_gunlock();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_after_fork_child() {
+    st().task_provider.after_fork_child();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_process_exit() {
+    if !INITED.load(Ordering::Acquire) {
+        exit_current_domain(None);
+        return;
+    }
+
+    rsched_glock();
+    let next = st().choose_task(0 as PthreadT);
+    st().task_provider.process_exit(next);
+    rsched_gunlock();
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_fork() -> libc::pid_t {
+    ensure_init();
+    st().task_provider.fork()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_execv(
+    path: *const libc::c_char,
+    argv: *const *const libc::c_char,
+) -> libc::c_int {
+    ensure_init();
+    st().task_provider.execv(path, argv)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_execve(
+    path: *const libc::c_char,
+    argv: *const *const libc::c_char,
+    envp: *const *const libc::c_char,
+) -> libc::c_int {
+    ensure_init();
+    st().task_provider.execve(path, argv, envp)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_waitpid(
+    pid: libc::pid_t,
+    status: *mut libc::c_int,
+    options: libc::c_int,
+) -> libc::pid_t {
+    ensure_init();
+    if options & libc::WNOHANG != 0 {
+        return with_internal_depth(|| libc::waitpid(pid, status, options));
+    }
+
+    loop {
+        let r = with_internal_depth(|| libc::waitpid(pid, status, options | libc::WNOHANG));
+        if r != 0 {
+            return r;
+        }
+        rsched_sched_yield();
+    }
 }
 
 unsafe fn tsan_user_acquire(addr: *mut libc::c_void) {
@@ -963,13 +1075,17 @@ pub unsafe extern "C" fn rsched_init() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0x12345678abcdu64);
     STATE = Some(State::new(seed));
+    let first_process = st().task_provider.current_domain() < 0;
+    st().task_provider.register_current_domain(first_process);
+    if first_process {
+        with_internal_depth(|| libc::atexit(process_atexit));
+    }
 
     let self_pt = libc::pthread_self();
     MY_PT.with(|c| *c.borrow_mut() = self_pt);
     rsched_glock();
-    let mut t = Thread::new(self_pt);
-    t.startup_done = true; // main thread needs no sanitizer handshake
-    st().add(t);
+    st().add(Thread::new(self_pt));
+    st().task(self_pt).set_startup_done(true);
     rsched_gunlock();
     install_seccomp_tripwire_if_requested();
 }
@@ -989,17 +1105,21 @@ fn ensure_init() {
 /// Used by integration tests to run multiple scenarios in one process.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_reinit(seed: u64) {
+    deactivate_current_domain_tasks();
+
     // Drop any existing state (previous test run's threads/mutexes/etc.).
     STATE = None;
     STATE = Some(State::new(seed));
     INITED.store(true, Ordering::SeqCst);
+    if st().task_provider.current_domain() < 0 {
+        st().task_provider.register_current_domain(true);
+    }
 
     let self_pt = libc::pthread_self();
     MY_PT.with(|c| *c.borrow_mut() = self_pt);
     rsched_glock();
-    let mut t = Thread::new(self_pt);
-    t.startup_done = true;
-    st().add(t);
+    st().add(Thread::new(self_pt));
+    st().task(self_pt).set_startup_done(true);
     rsched_gunlock();
 }
 
@@ -1046,12 +1166,12 @@ pub unsafe extern "C" fn rsched_fuzzer_test_one_input(
 
 // ── Thread trampoline ─────────────────────────────────────────────────────
 
-struct StartArg {
-    routine: StartRoutine,
-    arg: *mut libc::c_void,
+pub(crate) struct StartArg {
+    pub(crate) routine: StartRoutine,
+    pub(crate) arg: *mut libc::c_void,
     /// Signaled (with GMTX held) once the new thread has registered itself.
-    ready_cond: CondT,
-    ready: bool,
+    pub(crate) ready_cond: CondT,
+    pub(crate) ready: bool,
 }
 unsafe impl Send for StartArg {}
 
@@ -1079,10 +1199,10 @@ extern "C" fn tsan_user_start_gate(raw: *mut libc::c_void) -> *mut libc::c_void 
         depth_enter();
         rsched_glock();
         if st().info.contains_key(&self_pt) {
-            st().t(self_pt).is_in_rsched_wait = true;
+            st().task(self_pt).set_waiting(true);
             let cond_ptr = addr_of_mut!(st().t(self_pt).suspend_cond);
-            rsched_cond_wait(cond_ptr);
-            st().t(self_pt).is_in_rsched_wait = false;
+            st().task_provider.park(ParkingHandle::new(cond_ptr));
+            st().task(self_pt).set_waiting(false);
         }
         rsched_gunlock();
         depth_exit();
@@ -1146,29 +1266,47 @@ unsafe fn restore_tsan_start_gate(arg: *mut libc::c_void, gate: *mut TSanGateArg
 }
 
 /// Shared cleanup logic for thread exit.  Must be called with GMTX *not* held.
-unsafe fn do_thread_exit(caller: PthreadT) {
+pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
     // Raise CALL_DEPTH before acquiring GMTX so that any libc-internal PLT
     // re-entry through our preload interceptors is treated as non-outermost.
     depth_enter();
     rsched_glock();
     let joiner_opt = st().info.get(&caller).and_then(|t| t.joiner);
     if let Some(joiner) = joiner_opt {
-        st().t(joiner).is_blocking = false;
+        st().task(joiner).set_blocking(false);
     }
     st().remove(caller);
-    if !st().threads.is_empty()
-        && let Some(idx) = st().choose()
-    {
-        let next = st().threads[idx];
+    let mut local_tasks = Vec::new();
+    for pt in st().threads.iter().copied() {
+        let task = st().task(pt);
+        if !task.is_blocking() && task.startup_done() && task.is_waiting() {
+            local_tasks.push(pt);
+        }
+    }
+    if !local_tasks.is_empty() {
+        let blocking = vec![false; local_tasks.len()];
+        let idx = st()
+            .choose_index(&blocking)
+            .expect("rsched: non-empty local exit task list");
+        let next = local_tasks[idx];
         let cond_ptr = addr_of_mut!(st().t(next).suspend_cond);
-        with_internal_depth(|| (rpt().cond_signal)(cond_ptr));
+        st().task_provider.wake(ParkingHandle::new(cond_ptr));
+    } else if let Some(choice) = st().choose_task(0 as PthreadT)
+        && let SwitchResult::WakeLocal { pthread, .. } =
+            st().task_provider
+                .switch_task(choice, 0 as PthreadT, SwitchMode::ReleaseCurrent)
+        && st().info.contains_key(&pthread)
+    {
+        let cond_ptr = addr_of_mut!(st().t(pthread).suspend_cond);
+        st().task_provider.wake(ParkingHandle::new(cond_ptr));
     }
     rsched_gunlock();
     depth_exit();
 }
 
 // Safe fn required because libc::pthread_create takes a safe fn pointer.
-extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void {
+#[allow(dead_code)]
+pub(crate) extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void {
     unsafe {
         let sa = &mut *(raw as *mut StartArg);
         let routine = sa.routine;
@@ -1185,12 +1323,13 @@ extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void {
         depth_enter();
 
         // Acquire GMTX (creator released it via pthread_cond_wait below).
-        glock();
+        st().task_provider.global_lock();
         st().t(self_pt).tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
 
         // Signal parent that we are registered (parent may or may not be waiting).
         sa.ready = true;
-        with_internal_depth(|| (rpt().cond_signal)(addr_of_mut!(sa.ready_cond)));
+        st().task_provider
+            .wake(ParkingHandle::new(addr_of_mut!(sa.ready_cond)));
 
         // Under TSAN the parent returns from rsched_pthread_create immediately
         // and the sanitiser runs its handshake (p->sync.Wait / p->start.Post)
@@ -1205,13 +1344,13 @@ extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void {
         #[cfg(not(feature = "tsan"))]
         {
             // Suspend until the scheduler picks us (releases GMTX atomically).
-            st().t(self_pt).is_in_rsched_wait = true;
+            st().task(self_pt).set_waiting(true);
             let cond_ptr = addr_of_mut!(st().t(self_pt).suspend_cond);
-            rsched_cond_wait(cond_ptr);
-            st().t(self_pt).is_in_rsched_wait = false;
+            st().task_provider.park(ParkingHandle::new(cond_ptr));
+            st().task(self_pt).set_waiting(false);
         }
 
-        gunlock();
+        st().task_provider.global_unlock();
         depth_exit();
 
         // Run the user's thread function with CALL_DEPTH back to 0 so that
@@ -1259,14 +1398,7 @@ pub unsafe extern "C" fn rsched_pthread_create(
     // deterministic instead of letting the old and new children race to GMTX.
     st().drain_pending_child();
 
-    // Create the OS thread immediately.
-    #[cfg(feature = "asan")]
-    let r = with_internal_depth(|| {
-        libc::pthread_create(thread, attr, trampoline, sa as *mut libc::c_void)
-    });
-    #[cfg(not(feature = "asan"))]
-    let r =
-        with_internal_depth(|| (rpt().create)(thread, attr, trampoline, sa as *mut libc::c_void));
+    let r = st().task_provider.create(thread, attr, sa);
 
     if r != 0 {
         drop(Box::from_raw(sa));
@@ -1278,7 +1410,11 @@ pub unsafe extern "C" fn rsched_pthread_create(
         return r;
     }
 
-    st().add(Thread::new_with_tid(*thread, 0));
+    let child_tid = st().task_provider.task_tid(*thread);
+    st().add(Thread::new_with_tid(*thread, child_tid));
+    if st().task_provider.starts_waiting() {
+        st().task(*thread).set_waiting(true);
+    }
 
     // Return immediately without waiting for the child to register.  Sanitiser
     // runtimes (TSAN, ASAN) run their own post-create hooks (e.g. TSAN's
@@ -1316,12 +1452,14 @@ pub unsafe extern "C" fn rsched_pthread_join(
 
     if st().threads.contains(&thread) {
         st().t(thread).joiner = Some(caller);
-        st().t(caller).is_blocking = true;
-        st().context_switch(caller);
+        st().task(caller).set_blocking(true);
+        while st().threads.contains(&thread) {
+            st().context_switch(caller);
+        }
     }
 
     rsched_gunlock();
-    with_internal_depth(|| (rpt().join)(thread, retval))
+    st().task_provider.join(thread, retval)
 }
 
 // ── rsched_pthread_exit ───────────────────────────────────────────────────
@@ -1360,12 +1498,6 @@ pub unsafe extern "C" fn rsched_pthread_mutex_lock(lock: *mut MutexT) -> libc::c
         st().context_switch(caller);
     }
     st().mutex_lock(key, caller);
-    let r = with_internal_depth(|| (rpt().mutex_lock)(lock));
-    if r != 0 {
-        st().clear_event(caller);
-        rsched_gunlock();
-        return r;
-    }
     // Inform TSAN that this thread has logically acquired the user mutex.
     // Called while GMTX is still held so the annotation is ordered relative
     // to the paired tsan_release in rsched_pthread_mutex_unlock.
@@ -1399,12 +1531,6 @@ pub unsafe extern "C" fn rsched_pthread_mutex_trylock(lock: *mut MutexT) -> libc
     {
         if st().is_recursive_mutex(key) {
             st().mutex_lock(key, caller);
-            let r = with_internal_depth(|| (rpt().mutex_lock)(lock));
-            if r != 0 {
-                st().clear_event(caller);
-                rsched_gunlock();
-                return r;
-            }
             tsan_user_acquire(lock as *mut libc::c_void);
             st().clear_event(caller);
             rsched_gunlock();
@@ -1420,12 +1546,6 @@ pub unsafe extern "C" fn rsched_pthread_mutex_trylock(lock: *mut MutexT) -> libc
         return libc::EBUSY;
     }
     st().mutex_lock(key, caller);
-    let r = with_internal_depth(|| (rpt().mutex_lock)(lock));
-    if r != 0 {
-        st().clear_event(caller);
-        rsched_gunlock();
-        return r;
-    }
     tsan_user_acquire(lock as *mut libc::c_void);
     st().clear_event(caller);
     rsched_gunlock();
@@ -1455,14 +1575,6 @@ pub unsafe extern "C" fn rsched_pthread_mutex_unlock(lock: *mut MutexT) -> libc:
     // any subsequent tsan_acquire in the new owner.
     tsan_user_release(lock as *mut libc::c_void);
     let r = st().mutex_unlock(key, caller);
-    if r == 0 {
-        let real_r = with_internal_depth(|| (rpt().mutex_unlock)(lock));
-        if real_r != 0 {
-            st().clear_event(caller);
-            rsched_gunlock();
-            return real_r;
-        }
-    }
     st().context_switch(caller);
     st().clear_event(caller);
     rsched_gunlock();
@@ -1490,12 +1602,6 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
         rsched_gunlock();
         return r;
     }
-    let real_unlock = with_internal_depth(|| (rpt().mutex_unlock)(lock));
-    if real_unlock != 0 {
-        rsched_gunlock();
-        return real_unlock;
-    }
-
     st().conds
         .entry(ckey)
         .or_insert(SCond {
@@ -1503,20 +1609,11 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
         })
         .waiters
         .push(caller);
-    st().t(caller).is_blocking = true;
+    st().task(caller).set_blocking(true);
     st().context_switch(caller);
-    if st().t(caller).is_blocking {
-        st().t(caller).is_in_rsched_wait = true;
-        rsched_cond_wait(addr_of_mut!(st().t(caller).suspend_cond));
-        st().t(caller).is_in_rsched_wait = false;
-    }
+    st().park_if_blocked(caller);
 
     st().mutex_lock(lkey, caller);
-    let real_lock = with_internal_depth(|| (rpt().mutex_lock)(lock));
-    if real_lock != 0 {
-        rsched_gunlock();
-        return real_lock;
-    }
     rsched_gunlock();
     0
 }
@@ -1535,11 +1632,10 @@ pub unsafe extern "C" fn rsched_pthread_cond_signal(cond: *mut CondT) -> libc::c
     if n > 0 {
         let blocking = vec![false; n];
         let idx = st()
-            .scheduler
-            .choose(&blocking)
+            .choose_index(&blocking)
             .expect("rsched: non-empty cond waiter list");
         let w = st().conds.get_mut(&key).unwrap().waiters.remove(idx);
-        st().t(w).is_blocking = false;
+        st().task(w).set_blocking(false);
     }
     st().context_switch(caller);
     rsched_gunlock();
@@ -1556,7 +1652,7 @@ pub unsafe extern "C" fn rsched_pthread_cond_broadcast(cond: *mut CondT) -> libc
     let caller = my_pt();
     if let Some(c) = st().conds.remove(&key) {
         for w in c.waiters {
-            st().t(w).is_blocking = false;
+            st().task(w).set_blocking(false);
         }
     }
     st().context_switch(caller);
@@ -1577,18 +1673,16 @@ pub unsafe extern "C" fn rsched_pthread_barrier_init(
     rsched_glock();
     let caller = my_pt();
     st().context_switch(caller);
-    let r = with_internal_depth(|| (rpt().barrier_init)(barrier, attr, count));
-    if r == 0 {
-        st().barriers.insert(
-            key,
-            SBarrier {
-                count,
-                waiters: Vec::new(),
-            },
-        );
-    }
+    let _ = attr;
+    st().barriers.insert(
+        key,
+        SBarrier {
+            count,
+            waiters: Vec::new(),
+        },
+    );
     rsched_gunlock();
-    r
+    0
 }
 
 // ── rsched_pthread_barrier_wait ───────────────────────────────────────────
@@ -1614,7 +1708,7 @@ pub unsafe extern "C" fn rsched_pthread_barrier_wait(barrier: *mut BarrierT) -> 
             b.waiters.push(caller);
         }
         if b.waiters.len() < b.count as usize {
-            st().t(caller).is_blocking = true;
+            st().task(caller).set_blocking(true);
         }
     }
 
@@ -1625,7 +1719,7 @@ pub unsafe extern "C" fn rsched_pthread_barrier_wait(barrier: *mut BarrierT) -> 
         if b.waiters.len() >= b.count as usize {
             let ws: Vec<PthreadT> = b.waiters.drain(..).collect();
             for w in ws {
-                st().t(w).is_blocking = false;
+                st().task(w).set_blocking(false);
             }
             released = true;
         }
@@ -1635,11 +1729,7 @@ pub unsafe extern "C" fn rsched_pthread_barrier_wait(barrier: *mut BarrierT) -> 
     // the releasing thread marks all waiters runnable.  If this caller released
     // the barrier, yielding gives the waiters a chance to run.
     st().context_switch(caller);
-    if st().t(caller).is_blocking {
-        st().t(caller).is_in_rsched_wait = true;
-        rsched_cond_wait(addr_of_mut!(st().t(caller).suspend_cond));
-        st().t(caller).is_in_rsched_wait = false;
-    }
+    st().park_if_blocked(caller);
     rsched_gunlock();
     if released {
         libc::PTHREAD_BARRIER_SERIAL_THREAD
@@ -1684,7 +1774,7 @@ pub unsafe extern "C" fn rsched_sched_yield() -> libc::c_int {
 // The ptr variants accept void * so _Generic's default: arm can pass any
 // pointer-to-atomic-pointer without requiring a cast in the macro.
 
-use std::sync::atomic::{AtomicI32, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 
 /// Internal scheduling point for atomic memory operations.
 /// `instr_addr` must be obtained via `return_address()` at the call site of the
