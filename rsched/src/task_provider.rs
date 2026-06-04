@@ -43,14 +43,11 @@ impl TaskHandle {
             !ps.is_null(),
             "rsched: task handle used before process state"
         );
-        process_lock(ps);
         assert!(
             self.creation_idx < (*ps).task_count && self.creation_idx < MAX_TASKS,
             "rsched: invalid task creation index"
         );
-        let result = f(&mut (*ps).tasks[self.creation_idx]);
-        process_unlock(ps);
-        result
+        f(&mut (*ps).tasks[self.creation_idx])
     }
 
     pub(crate) unsafe fn is_blocking(self) -> bool {
@@ -858,7 +855,6 @@ impl ProcessTaskProvider {
             pthread: 0 as PthreadT,
         }; MAX_TASKS];
         let mut n = 0usize;
-        process_lock(ps);
         for id in 0..(*ps).task_count.min(MAX_TASKS) {
             let task = (*ps).tasks[id];
             if task.active != 0
@@ -876,9 +872,7 @@ impl ProcessTaskProvider {
                 n += 1;
             }
         }
-        let choice = choose_index(n).map(|idx| tasks[idx]);
-        process_unlock(ps);
-        choice
+        choose_index(n).map(|idx| tasks[idx])
     }
 
     unsafe fn switch_domain(&mut self, choice: TaskChoice, park_current: bool) -> Option<PthreadT> {
@@ -888,15 +882,10 @@ impl ProcessTaskProvider {
             return None;
         }
 
-        process_lock(ps);
         if choice.domain < 0 || (*ps).slots[choice.domain as usize].active == 0 {
-            process_unlock(ps);
             return None;
         }
-        let Some(creation_idx) = choice.creation_idx else {
-            process_unlock(ps);
-            return None;
-        };
+        let creation_idx = choice.creation_idx?;
         (*ps).slots[choice.domain as usize].selected_creation_idx = creation_idx;
         process_log(format_args!(
             "pid {} switch slot {} -> {} thread {:#x}",
@@ -909,12 +898,10 @@ impl ProcessTaskProvider {
             libc::sem_post(addr_of_mut!((*ps).slots[choice.domain as usize].gate))
         });
         assert_eq!(r, 0, "rsched: sem_post failed");
-        process_unlock(ps);
 
         if park_current {
             process_wait_on_slot(ps, current);
 
-            process_lock(ps);
             let selected_creation_idx = (*ps).slots[current as usize].selected_creation_idx;
             (*ps).slots[current as usize].selected_creation_idx = usize::MAX;
             let selected = if selected_creation_idx < (*ps).task_count {
@@ -922,7 +909,6 @@ impl ProcessTaskProvider {
             } else {
                 None
             };
-            process_unlock(ps);
             process_log(format_args!(
                 "pid {} woke slot {} selected task {} thread {:#x}",
                 libc::getpid(),
@@ -1075,10 +1061,8 @@ impl ProcessTaskProvider {
             PROCESS_SLOT.load(Ordering::Acquire)
         ));
         process_wait_on_slot(ps, PROCESS_SLOT.load(Ordering::Acquire));
-        process_lock(ps);
         (*ps).slots[PROCESS_SLOT.load(Ordering::Acquire) as usize].selected_creation_idx =
             usize::MAX;
-        process_unlock(ps);
         crate::rsched_glock();
         crate::st().mark_waiting(crate::my_pt(), false);
         crate::rsched_gunlock();
@@ -1094,10 +1078,8 @@ impl ProcessTaskProvider {
         if ps.is_null() {
             return;
         }
-        process_lock(ps);
         (*ps).slots[current as usize].active = 0;
         deactivate_process_tasks_locked(ps, current);
-        process_unlock(ps);
         process_log(format_args!(
             "pid {} exit slot {}, next slot {} thread {:#x}",
             libc::getpid(),
@@ -1110,12 +1092,10 @@ impl ProcessTaskProvider {
             && choice.domain >= 0
             && let Some(creation_idx) = choice.creation_idx
         {
-            process_lock(ps);
             (*ps).slots[choice.domain as usize].selected_creation_idx = creation_idx;
             let _ = crate::with_internal_depth(|| {
                 libc::sem_post(addr_of_mut!((*ps).slots[choice.domain as usize].gate))
             });
-            process_unlock(ps);
         }
     }
 
@@ -1128,10 +1108,8 @@ impl ProcessTaskProvider {
                 libc::getpid(),
                 current
             ));
-            process_lock(ps);
             deactivate_process_tasks_locked(ps, current);
             (*ps).slots[current as usize].selected_creation_idx = usize::MAX;
-            process_unlock(ps);
             set_env_usize("RSCHED_PROCESS_SLOT", current as usize);
         }
     }
@@ -1283,9 +1261,7 @@ pub(crate) unsafe fn deactivate_current_domain_tasks() {
     let current_slot = PROCESS_SLOT.load(Ordering::Acquire);
     let ps = PROCESS_SHARED.load(Ordering::Acquire);
     if current_slot >= 0 && !ps.is_null() {
-        process_lock(ps);
         deactivate_process_tasks_locked(ps, current_slot);
-        process_unlock(ps);
     }
 }
 
