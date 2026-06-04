@@ -15,16 +15,16 @@ use std::collections::{HashMap, HashSet};
 use std::ptr::addr_of_mut;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use std::arch::global_asm;
-
 mod scheduler;
 use scheduler::{LoggingScheduler, RandomWalk, Scheduler};
 
 mod event;
 pub use event::{AccessKind, Event, EventKind};
 
+mod fuzzing;
+mod seccomp;
 mod task_provider;
+mod tsan;
 use task_provider::{
     ParkingHandle, ProcessTaskProvider, SwitchMode, SwitchResult, TaskChoice, TaskHandle,
     deactivate_current_domain_tasks, default_task_provider, exit_current_domain,
@@ -547,28 +547,20 @@ pub(crate) unsafe fn thread_gunlock() {
     with_internal_depth(|| (rpt().mutex_unlock)(addr_of_mut!(GMTX)));
 }
 
-unsafe fn sync_acquire() {
-    tsan_ignore_begin();
-}
-
-unsafe fn sync_release() {
-    tsan_ignore_end();
-}
-
 unsafe fn rsched_glock() {
     st().task_provider.global_lock();
-    sync_acquire();
+    tsan::sync_acquire();
 }
 
 unsafe fn rsched_gunlock() {
-    sync_release();
+    tsan::sync_release();
     st().task_provider.global_unlock();
 }
 
 pub(crate) unsafe fn thread_cond_wait(cond: *mut CondT) {
-    sync_release();
+    tsan::sync_release();
     with_internal_depth(|| (rpt().cond_wait)(cond, addr_of_mut!(GMTX)));
-    sync_acquire();
+    tsan::sync_acquire();
 }
 
 extern "C" fn process_atexit() {
@@ -581,6 +573,16 @@ pub(crate) unsafe fn reset_local_state_after_fork() {
     STATE = None;
     INITED.store(false, Ordering::SeqCst);
     rsched_init();
+}
+
+#[cfg(feature = "tsan")]
+pub unsafe fn rsched_is_tsan_thread_start(start: StartRoutine, arg: *mut libc::c_void) -> bool {
+    tsan::is_thread_start(start, arg)
+}
+
+#[cfg(feature = "tsan")]
+pub unsafe fn rsched_is_tsan_background_start(start: StartRoutine, arg: *mut libc::c_void) -> bool {
+    tsan::is_background_start(start, arg)
 }
 
 #[unsafe(no_mangle)]
@@ -662,18 +664,6 @@ pub unsafe extern "C" fn rsched_waitpid(
     }
 }
 
-unsafe fn tsan_user_acquire(addr: *mut libc::c_void) {
-    tsan_ignore_end();
-    tsan_acquire(addr);
-    tsan_ignore_begin();
-}
-
-unsafe fn tsan_user_release(addr: *mut libc::c_void) {
-    tsan_ignore_end();
-    tsan_release(addr);
-    tsan_ignore_begin();
-}
-
 // ── Reentrancy depth tracking ─────────────────────────────────────────────────
 //
 // CALL_DEPTH lives here so that both the preload interceptors and rsched's own
@@ -733,327 +723,6 @@ unsafe fn with_internal_depth<T>(f: impl FnOnce() -> T) -> T {
     r
 }
 
-// ── Optional seccomp tripwire ────────────────────────────────────────────────
-//
-// RSCHED_SECCOMP=1 installs a process-wide filter that traps raw futex syscalls
-// unless they come from rsched's single internal raw-syscall instruction.  The
-// SIGSYS handler either emulates the syscall through that whitelisted
-// instruction while rsched is active, or aborts if user code reached such a
-// syscall without going through an intercepted pthread/synchronization API.
-//
-// RSCHED_SECCOMP_TRAP_CLONE=1 also traps clone/clone3.  That is intentionally
-// not part of RSCHED_SECCOMP=1 because clone cannot be safely emulated from a
-// SIGSYS handler: the child returns on its new stack without the signal frame
-// needed to resume the original trapped instruction.
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-global_asm!(
-    r#"
-    .text
-    .globl rsched_internal_syscall6
-    .hidden rsched_internal_syscall6
-    .type rsched_internal_syscall6,@function
-rsched_internal_syscall6:
-    mov rax, rdi
-    mov rdi, rsi
-    mov rsi, rdx
-    mov rdx, rcx
-    mov r10, r8
-    mov r8,  r9
-    mov r9,  qword ptr [rsp + 8]
-    .globl rsched_internal_syscall6_insn
-    .hidden rsched_internal_syscall6_insn
-rsched_internal_syscall6_insn:
-    syscall
-    ret
-    .size rsched_internal_syscall6, .-rsched_internal_syscall6
-"#
-);
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-unsafe extern "C" {
-    fn rsched_internal_syscall6(
-        nr: libc::c_long,
-        a0: libc::c_long,
-        a1: libc::c_long,
-        a2: libc::c_long,
-        a3: libc::c_long,
-        a4: libc::c_long,
-        a5: libc::c_long,
-    ) -> libc::c_long;
-
-    static rsched_internal_syscall6_insn: u8;
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-unsafe fn raw_syscall6(
-    nr: libc::c_long,
-    a0: libc::c_long,
-    a1: libc::c_long,
-    a2: libc::c_long,
-    a3: libc::c_long,
-    a4: libc::c_long,
-    a5: libc::c_long,
-) -> libc::c_long {
-    rsched_internal_syscall6(nr, a0, a1, a2, a3, a4, a5)
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-extern "C" fn seccomp_sigsys_handler(
-    _sig: libc::c_int,
-    _info: *mut libc::siginfo_t,
-    ucontext: *mut libc::c_void,
-) {
-    unsafe {
-        let ctx = &mut *(ucontext as *mut libc::ucontext_t);
-        let regs = &mut ctx.uc_mcontext.gregs;
-        let nr = regs[libc::REG_RAX as usize] as libc::c_long;
-
-        if is_in_rsched() {
-            let ret = raw_syscall6(
-                nr,
-                regs[libc::REG_RDI as usize] as libc::c_long,
-                regs[libc::REG_RSI as usize] as libc::c_long,
-                regs[libc::REG_RDX as usize] as libc::c_long,
-                regs[libc::REG_R10 as usize] as libc::c_long,
-                regs[libc::REG_R8 as usize] as libc::c_long,
-                regs[libc::REG_R9 as usize] as libc::c_long,
-            );
-            regs[libc::REG_RAX as usize] = ret;
-            return;
-        }
-
-        const MSG: &[u8] = b"rsched: intercepted raw futex/clone syscall outside rsched\n";
-        let _ = raw_syscall6(
-            libc::SYS_write as libc::c_long,
-            libc::STDERR_FILENO as libc::c_long,
-            MSG.as_ptr() as libc::c_long,
-            MSG.len() as libc::c_long,
-            0,
-            0,
-            0,
-        );
-        let _ = raw_syscall6(libc::SYS_getpid as libc::c_long, 0, 0, 0, 0, 0, 0);
-        let _ = raw_syscall6(libc::SYS_exit_group as libc::c_long, 101, 0, 0, 0, 0, 0);
-        core::hint::unreachable_unchecked();
-    }
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-unsafe fn install_seccomp_tripwire_if_requested() {
-    if std::env::var("RSCHED_SECCOMP").map_or(true, |v| v != "1") {
-        return;
-    }
-
-    install_sigsys_handler();
-    install_seccomp_filter();
-}
-
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-unsafe fn install_seccomp_tripwire_if_requested() {
-    if std::env::var("RSCHED_SECCOMP").map_or(false, |v| v == "1") {
-        panic!("rsched: RSCHED_SECCOMP=1 is only implemented on linux x86_64");
-    }
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-unsafe fn install_sigsys_handler() {
-    let mut sa: libc::sigaction = core::mem::zeroed();
-    sa.sa_sigaction = seccomp_sigsys_handler as *const () as usize;
-    sa.sa_flags = libc::SA_SIGINFO;
-    libc::sigemptyset(&mut sa.sa_mask);
-    let r = libc::sigaction(libc::SIGSYS, &sa, core::ptr::null_mut());
-    assert_eq!(r, 0, "rsched: sigaction(SIGSYS) failed");
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-unsafe fn install_seccomp_filter() {
-    const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
-    const SECCOMP_RET_TRAP: u32 = 0x0003_0000;
-    const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
-    const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
-    const SECCOMP_DATA_NR: u32 = 0;
-    const SECCOMP_DATA_ARCH: u32 = 4;
-    const SECCOMP_DATA_IP_LO: u32 = 8;
-    const SECCOMP_DATA_IP_HI: u32 = 12;
-    const SYS_CLONE3_X86_64: u32 = 435;
-
-    fn stmt(code: u16, k: u32) -> libc::sock_filter {
-        libc::sock_filter {
-            code,
-            jt: 0,
-            jf: 0,
-            k,
-        }
-    }
-    fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
-        libc::sock_filter { code, jt, jf, k }
-    }
-
-    let syscall_ip = &rsched_internal_syscall6_insn as *const u8 as usize as u64 + 2;
-    let syscall_ip_lo = syscall_ip as u32;
-    let syscall_ip_hi = (syscall_ip >> 32) as u32;
-    let trap_clone = std::env::var("RSCHED_SECCOMP_TRAP_CLONE").is_ok_and(|v| v == "1");
-    let clone_syscall = if trap_clone {
-        libc::SYS_clone as u32
-    } else {
-        u32::MAX
-    };
-    let clone3_syscall = if trap_clone {
-        SYS_CLONE3_X86_64
-    } else {
-        u32::MAX - 1
-    };
-
-    let mut filter = [
-        stmt(
-            (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-            SECCOMP_DATA_ARCH,
-        ),
-        jump(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            AUDIT_ARCH_X86_64,
-            1,
-            0,
-        ),
-        stmt(
-            (libc::BPF_RET | libc::BPF_K) as u16,
-            SECCOMP_RET_KILL_PROCESS,
-        ),
-        stmt(
-            (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-            SECCOMP_DATA_NR,
-        ),
-        jump(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            libc::SYS_futex as u32,
-            3,
-            0,
-        ),
-        jump(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            clone_syscall,
-            2,
-            0,
-        ),
-        jump(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            clone3_syscall,
-            1,
-            0,
-        ),
-        stmt((libc::BPF_RET | libc::BPF_K) as u16, SECCOMP_RET_ALLOW),
-        stmt(
-            (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-            SECCOMP_DATA_IP_LO,
-        ),
-        jump(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            syscall_ip_lo,
-            0,
-            2,
-        ),
-        stmt(
-            (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-            SECCOMP_DATA_IP_HI,
-        ),
-        jump(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            syscall_ip_hi,
-            1,
-            0,
-        ),
-        stmt((libc::BPF_RET | libc::BPF_K) as u16, SECCOMP_RET_TRAP),
-        stmt((libc::BPF_RET | libc::BPF_K) as u16, SECCOMP_RET_ALLOW),
-    ];
-    let mut prog = libc::sock_fprog {
-        len: filter.len() as u16,
-        filter: filter.as_mut_ptr(),
-    };
-
-    let r = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-    assert_eq!(r, 0, "rsched: prctl(PR_SET_NO_NEW_PRIVS) failed");
-    let r = libc::prctl(
-        libc::PR_SET_SECCOMP,
-        libc::SECCOMP_MODE_FILTER,
-        &mut prog as *mut libc::sock_fprog,
-    );
-    assert_eq!(r, 0, "rsched: prctl(PR_SET_SECCOMP) failed");
-}
-
-// ── TSAN happens-before annotations ──────────────────────────────────────────
-//
-// When the preload cdylib is built with `--features tsan`, these wrappers call
-// into the ThreadSanitizer runtime to record the acquire/release edges that
-// rsched's virtual mutexes create.  Without them TSAN cannot see the
-// happens-before established by rsched's scheduler and would report false
-// positives on correctly-synchronised programs.
-//
-// The symbols are resolved at load time from the TSAN runtime that the
-// -fsanitize=thread program carries; the cdylib itself does not link against
-// libtsan.  Building *without* the feature leaves no-op stubs so the rest of
-// the code is identical in both configurations.
-
-#[cfg(feature = "tsan")]
-unsafe fn tsan_acquire(addr: *mut libc::c_void) {
-    unsafe extern "C" {
-        #[linkage = "extern_weak"]
-        static __tsan_acquire: Option<unsafe extern "C" fn(*mut libc::c_void)>;
-    }
-    if let Some(f) = __tsan_acquire {
-        f(addr);
-    }
-}
-
-#[cfg(not(feature = "tsan"))]
-#[inline(always)]
-unsafe fn tsan_acquire(_addr: *mut libc::c_void) {}
-
-#[cfg(feature = "tsan")]
-unsafe fn tsan_release(addr: *mut libc::c_void) {
-    unsafe extern "C" {
-        #[linkage = "extern_weak"]
-        static __tsan_release: Option<unsafe extern "C" fn(*mut libc::c_void)>;
-    }
-    if let Some(f) = __tsan_release {
-        f(addr);
-    }
-}
-
-#[cfg(not(feature = "tsan"))]
-#[inline(always)]
-unsafe fn tsan_release(_addr: *mut libc::c_void) {}
-
-#[cfg(feature = "tsan")]
-unsafe fn tsan_ignore_begin() {
-    unsafe extern "C" {
-        #[linkage = "extern_weak"]
-        static __tsan_ignore_thread_begin: Option<unsafe extern "C" fn()>;
-    }
-    if let Some(f) = __tsan_ignore_thread_begin {
-        f();
-    }
-}
-
-#[cfg(not(feature = "tsan"))]
-#[inline(always)]
-unsafe fn tsan_ignore_begin() {}
-
-#[cfg(feature = "tsan")]
-unsafe fn tsan_ignore_end() {
-    unsafe extern "C" {
-        #[linkage = "extern_weak"]
-        static __tsan_ignore_thread_end: Option<unsafe extern "C" fn()>;
-    }
-    if let Some(f) = __tsan_ignore_thread_end {
-        f();
-    }
-}
-
-#[cfg(not(feature = "tsan"))]
-#[inline(always)]
-unsafe fn tsan_ignore_end() {}
-
 unsafe fn st() -> &'static mut State {
     (*addr_of_mut!(STATE))
         .as_mut()
@@ -1087,7 +756,7 @@ pub unsafe extern "C" fn rsched_init() {
     st().add(Thread::new(self_pt));
     st().task(self_pt).set_startup_done(true);
     rsched_gunlock();
-    install_seccomp_tripwire_if_requested();
+    seccomp::install_tripwire_if_requested();
 }
 
 fn ensure_init() {
@@ -1123,47 +792,6 @@ pub unsafe extern "C" fn rsched_reinit(seed: u64) {
     rsched_gunlock();
 }
 
-type FuzzerTestOneInput =
-    unsafe extern "C" fn(data: *const libc::c_uchar, size: usize) -> libc::c_int;
-
-fn fuzzer_schedule_count() -> usize {
-    std::env::var("RSCHED_FUZZ_SCHEDULES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5)
-}
-
-fn fuzzer_input_hash(data: *const libc::c_uchar, size: usize) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-
-    let mut hash = FNV_OFFSET;
-    if !data.is_null() {
-        for byte in unsafe { std::slice::from_raw_parts(data, size) } {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-    }
-    hash ^ (size as u64).wrapping_mul(FNV_PRIME)
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rsched_fuzzer_test_one_input(
-    data: *const libc::c_uchar,
-    size: usize,
-    test_one_input: FuzzerTestOneInput,
-) -> libc::c_int {
-    let base_seed = fuzzer_input_hash(data, size);
-    let mut result = 0;
-    for schedule in 0..fuzzer_schedule_count() {
-        unsafe {
-            rsched_reinit(base_seed.wrapping_add(schedule as u64));
-            result = test_one_input(data, size);
-        }
-    }
-    result
-}
-
 // ── Thread trampoline ─────────────────────────────────────────────────────
 
 pub(crate) struct StartArg {
@@ -1174,96 +802,6 @@ pub(crate) struct StartArg {
     pub(crate) ready: bool,
 }
 unsafe impl Send for StartArg {}
-
-#[cfg(feature = "tsan")]
-struct TSanGateArg {
-    routine: StartRoutine,
-    arg: *mut libc::c_void,
-}
-
-#[cfg(feature = "tsan")]
-unsafe impl Send for TSanGateArg {}
-
-#[cfg(feature = "tsan")]
-extern "C" fn tsan_user_start_gate(raw: *mut libc::c_void) -> *mut libc::c_void {
-    unsafe {
-        let gate = Box::from_raw(raw as *mut TSanGateArg);
-        let routine = gate.routine;
-        let arg = gate.arg;
-        let self_pt = my_pt();
-
-        // TSAN has completed its parent/child pthread_create handshake before
-        // calling this gate.  Now block under rsched control so the child
-        // cannot enter user code until a deterministic scheduler decision
-        // wakes it.
-        depth_enter();
-        rsched_glock();
-        if st().info.contains_key(&self_pt) {
-            st().task(self_pt).set_waiting(true);
-            let cond_ptr = addr_of_mut!(st().t(self_pt).suspend_cond);
-            st().task_provider.park(ParkingHandle::new(cond_ptr));
-            st().task(self_pt).set_waiting(false);
-        }
-        rsched_gunlock();
-        depth_exit();
-
-        routine(arg)
-    }
-}
-
-#[cfg(feature = "tsan")]
-const TSAN_THREAD_START_PREFIX: &[u8] = &[
-    0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50, 0x49, 0x89, 0xfe, 0x4c, 0x8b,
-    0x27, 0x48, 0x8b, 0x5f, 0x08,
-];
-
-#[cfg(feature = "tsan")]
-const TSAN_BACKGROUND_START_PREFIX: &[u8] = &[
-    0x64, 0x48, 0x8b, 0x04, 0x25, 0xe8, 0xf8, 0xff, 0xff, 0x48, 0x85, 0xc0, 0x0f, 0x84, 0x8d, 0x03,
-    0x00, 0x00, 0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83, 0xec, 0x18,
-];
-
-#[cfg(feature = "tsan")]
-pub unsafe fn rsched_is_tsan_thread_start(start: StartRoutine, arg: *mut libc::c_void) -> bool {
-    if arg.is_null() {
-        return false;
-    }
-
-    let code = std::slice::from_raw_parts(start as *const u8, TSAN_THREAD_START_PREFIX.len());
-    code == TSAN_THREAD_START_PREFIX
-}
-
-#[cfg(feature = "tsan")]
-pub unsafe fn rsched_is_tsan_background_start(start: StartRoutine, arg: *mut libc::c_void) -> bool {
-    if !arg.is_null() {
-        return false;
-    }
-
-    let code = std::slice::from_raw_parts(start as *const u8, TSAN_BACKGROUND_START_PREFIX.len());
-    code == TSAN_BACKGROUND_START_PREFIX
-}
-
-#[cfg(feature = "tsan")]
-unsafe fn prepare_tsan_start_gate(arg: *mut libc::c_void) -> *mut TSanGateArg {
-    let fields = arg as *mut usize;
-    let routine = std::mem::transmute_copy::<usize, StartRoutine>(&*fields);
-    let user_arg = *fields.add(1) as *mut libc::c_void;
-    let gate = Box::into_raw(Box::new(TSanGateArg {
-        routine,
-        arg: user_arg,
-    }));
-    *fields = tsan_user_start_gate as *const () as usize;
-    *fields.add(1) = gate as usize;
-    gate
-}
-
-#[cfg(feature = "tsan")]
-unsafe fn restore_tsan_start_gate(arg: *mut libc::c_void, gate: *mut TSanGateArg) {
-    let gate_box = Box::from_raw(gate);
-    let fields = arg as *mut usize;
-    *fields = gate_box.routine as usize;
-    *fields.add(1) = gate_box.arg as usize;
-}
 
 /// Shared cleanup logic for thread exit.  Must be called with GMTX *not* held.
 pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
@@ -1376,8 +914,8 @@ pub unsafe extern "C" fn rsched_pthread_create(
     ensure_init();
 
     #[cfg(feature = "tsan")]
-    let tsan_gate = if rsched_is_tsan_thread_start(start_routine, arg) {
-        Some(prepare_tsan_start_gate(arg))
+    let tsan_gate = if tsan::is_thread_start(start_routine, arg) {
+        Some(tsan::prepare_start_gate(arg))
     } else {
         None
     };
@@ -1404,7 +942,7 @@ pub unsafe extern "C" fn rsched_pthread_create(
         drop(Box::from_raw(sa));
         #[cfg(feature = "tsan")]
         if let Some(gate) = tsan_gate {
-            restore_tsan_start_gate(arg, gate);
+            tsan::restore_start_gate(arg, gate);
         }
         rsched_gunlock();
         return r;
@@ -1501,7 +1039,7 @@ pub unsafe extern "C" fn rsched_pthread_mutex_lock(lock: *mut MutexT) -> libc::c
     // Inform TSAN that this thread has logically acquired the user mutex.
     // Called while GMTX is still held so the annotation is ordered relative
     // to the paired tsan_release in rsched_pthread_mutex_unlock.
-    tsan_user_acquire(lock as *mut libc::c_void);
+    tsan::user_acquire(lock as *mut libc::c_void);
     st().clear_event(caller);
     rsched_gunlock();
     0
@@ -1531,7 +1069,7 @@ pub unsafe extern "C" fn rsched_pthread_mutex_trylock(lock: *mut MutexT) -> libc
     {
         if st().is_recursive_mutex(key) {
             st().mutex_lock(key, caller);
-            tsan_user_acquire(lock as *mut libc::c_void);
+            tsan::user_acquire(lock as *mut libc::c_void);
             st().clear_event(caller);
             rsched_gunlock();
             return 0;
@@ -1546,7 +1084,7 @@ pub unsafe extern "C" fn rsched_pthread_mutex_trylock(lock: *mut MutexT) -> libc
         return libc::EBUSY;
     }
     st().mutex_lock(key, caller);
-    tsan_user_acquire(lock as *mut libc::c_void);
+    tsan::user_acquire(lock as *mut libc::c_void);
     st().clear_event(caller);
     rsched_gunlock();
     0
@@ -1573,7 +1111,7 @@ pub unsafe extern "C" fn rsched_pthread_mutex_unlock(lock: *mut MutexT) -> libc:
     // the waiter's is_blocking is already false and it appears eligible.
     // tsan_release is called first so TSAN records the release edge before
     // any subsequent tsan_acquire in the new owner.
-    tsan_user_release(lock as *mut libc::c_void);
+    tsan::user_release(lock as *mut libc::c_void);
     let r = st().mutex_unlock(key, caller);
     st().context_switch(caller);
     st().clear_event(caller);
