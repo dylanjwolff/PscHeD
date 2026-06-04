@@ -1,4 +1,4 @@
-use crate::{AttrT, CondT, MutexT, PthreadT, StartArg};
+use crate::{AttrT, CondT, PthreadT, StartArg};
 use std::ffi::{CStr, CString};
 use std::ptr::addr_of_mut;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
@@ -615,7 +615,6 @@ struct SharedTask {
 
 #[repr(C)]
 struct ProcessShared {
-    lock: MutexT,
     task_count: usize,
     tasks: [SharedTask; MAX_TASKS],
     slots: [ProcessSlot; MAX_PROCESSES],
@@ -673,17 +672,6 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
     p = raw.cast::<ProcessShared>();
     PROCESS_SHARED_FD.store(fd, Ordering::Release);
     set_env_usize("RSCHED_SHM_FD", fd as usize);
-
-    let mut attr: libc::pthread_mutexattr_t = core::mem::zeroed();
-    let r = crate::with_internal_depth(|| libc::pthread_mutexattr_init(&mut attr));
-    assert_eq!(r, 0, "rsched: pthread_mutexattr_init failed");
-    let r = crate::with_internal_depth(|| {
-        libc::pthread_mutexattr_setpshared(&mut attr, libc::PTHREAD_PROCESS_SHARED)
-    });
-    assert_eq!(r, 0, "rsched: pthread_mutexattr_setpshared failed");
-    let r = crate::with_internal_depth(|| libc::pthread_mutex_init(addr_of_mut!((*p).lock), &attr));
-    assert_eq!(r, 0, "rsched: process-shared mutex init failed");
-    crate::with_internal_depth(|| libc::pthread_mutexattr_destroy(&mut attr));
 
     match PROCESS_SHARED.compare_exchange(
         core::ptr::null_mut(),
@@ -755,17 +743,7 @@ fn process_log(args: core::fmt::Arguments<'_>) {
     }
 }
 
-unsafe fn process_lock(ps: *mut ProcessShared) {
-    let r = crate::with_internal_depth(|| (crate::rpt().mutex_lock)(addr_of_mut!((*ps).lock)));
-    assert_eq!(r, 0, "rsched: process shared lock failed");
-}
-
-unsafe fn process_unlock(ps: *mut ProcessShared) {
-    let r = crate::with_internal_depth(|| (crate::rpt().mutex_unlock)(addr_of_mut!((*ps).lock)));
-    assert_eq!(r, 0, "rsched: process shared unlock failed");
-}
-
-unsafe fn deactivate_process_tasks_locked(ps: *mut ProcessShared, domain: i32) {
+unsafe fn deactivate_process_tasks(ps: *mut ProcessShared, domain: i32) {
     for id in 0..(*ps).task_count.min(MAX_TASKS) {
         if (*ps).tasks[id].domain == domain {
             (*ps).tasks[id].active = 0;
@@ -788,27 +766,6 @@ unsafe fn process_wait_on_slot(ps: *mut ProcessShared, slot: i32) {
     }
 }
 
-unsafe fn process_wait_until_published(ps: *mut ProcessShared, slot: i32) {
-    loop {
-        process_lock(ps);
-        let mut ready = false;
-        if slot >= 0 && (*ps).slots[slot as usize].active != 0 {
-            for id in 0..(*ps).task_count.min(MAX_TASKS) {
-                let task = (*ps).tasks[id];
-                if task.active != 0 && task.domain == slot {
-                    ready = true;
-                    break;
-                }
-            }
-        }
-        process_unlock(ps);
-        if ready {
-            return;
-        }
-        crate::with_internal_depth(|| libc::sched_yield());
-    }
-}
-
 pub(crate) struct ProcessTaskProvider {
     inner: Box<dyn LocalTaskProvider>,
 }
@@ -821,9 +778,7 @@ impl ProcessTaskProvider {
     unsafe fn register_process_task(&mut self, pt: PthreadT) -> TaskHandle {
         let slot = PROCESS_SLOT.load(Ordering::Acquire);
         let ps = process_shared_ptr();
-        process_lock(ps);
         if (*ps).task_count >= MAX_TASKS {
-            process_unlock(ps);
             panic!("rsched: too many tasks; increase MAX_TASKS");
         }
         let creation_idx = (*ps).task_count;
@@ -836,9 +791,7 @@ impl ProcessTaskProvider {
             domain: slot,
             pthread: pt as usize,
         };
-        let handle = TaskHandle::new(creation_idx);
-        process_unlock(ps);
-        handle
+        TaskHandle::new(creation_idx)
     }
 
     unsafe fn choose_process_task(
@@ -924,7 +877,6 @@ impl ProcessTaskProvider {
 
     unsafe fn register_current(&mut self, initially_runnable: bool) -> i32 {
         let ps = process_shared_ptr();
-        process_lock(ps);
         let pid = libc::getpid();
 
         if let Ok(raw_slot) = std::env::var("RSCHED_PROCESS_SLOT")
@@ -933,14 +885,12 @@ impl ProcessTaskProvider {
             && (*ps).slots[slot].active != 0
         {
             (*ps).slots[slot].pid = pid;
-            process_unlock(ps);
             PROCESS_SLOT.store(slot as i32, Ordering::Release);
             return slot as i32;
         }
 
         for i in 0..MAX_PROCESSES {
             if (*ps).slots[i].active != 0 && (*ps).slots[i].pid == pid {
-                process_unlock(ps);
                 PROCESS_SLOT.store(i as i32, Ordering::Release);
                 set_env_usize("RSCHED_PROCESS_SLOT", i);
                 return i as i32;
@@ -960,7 +910,6 @@ impl ProcessTaskProvider {
                 (*ps).slots[i].pid = pid;
                 (*ps).slots[i].active = 1;
                 (*ps).slots[i].selected_creation_idx = usize::MAX;
-                process_unlock(ps);
                 PROCESS_SLOT.store(i as i32, Ordering::Release);
                 set_env_usize("RSCHED_PROCESS_SLOT", i);
                 if initially_runnable {
@@ -979,13 +928,11 @@ impl ProcessTaskProvider {
             }
         }
 
-        process_unlock(ps);
         panic!("rsched: too many forked processes; increase MAX_PROCESSES");
     }
 
     unsafe fn before_fork_impl(&mut self) {
         let ps = process_shared_ptr();
-        process_lock(ps);
         for i in 0..MAX_PROCESSES {
             if (*ps).slots[i].active == 0 {
                 let r = crate::with_internal_depth(|| {
@@ -1002,11 +949,9 @@ impl ProcessTaskProvider {
                     libc::getpid(),
                     i
                 ));
-                process_unlock(ps);
                 return;
             }
         }
-        process_unlock(ps);
         panic!("rsched: too many forked processes; increase MAX_PROCESSES");
     }
 
@@ -1016,10 +961,8 @@ impl ProcessTaskProvider {
             return false;
         }
         let ps = process_shared_ptr();
-        process_lock(ps);
         if child <= 0 {
             (*ps).slots[slot as usize].active = 0;
-            process_unlock(ps);
             return false;
         }
         (*ps).slots[slot as usize].pid = child;
@@ -1029,16 +972,15 @@ impl ProcessTaskProvider {
             child,
             slot
         ));
-        process_unlock(ps);
-        process_wait_until_published(ps, slot);
+        process_wait_on_slot(ps, PROCESS_SLOT.load(Ordering::Acquire));
         true
     }
 
     unsafe fn after_fork_child_impl(&mut self) {
+        let parent_slot = PROCESS_SLOT.load(Ordering::Acquire);
         let slot = FORK_SLOT.swap(-1, Ordering::AcqRel);
         let ps = process_shared_ptr();
         if slot >= 0 {
-            process_lock(ps);
             (*ps).slots[slot as usize].pid = libc::getpid();
             set_env_usize("RSCHED_PROCESS_SLOT", slot as usize);
             process_log(format_args!(
@@ -1046,7 +988,6 @@ impl ProcessTaskProvider {
                 libc::getpid(),
                 slot
             ));
-            process_unlock(ps);
             PROCESS_SLOT.store(slot, Ordering::Release);
         } else {
             self.register_current(false);
@@ -1055,6 +996,12 @@ impl ProcessTaskProvider {
         crate::rsched_glock();
         crate::st().mark_waiting(crate::my_pt(), true);
         crate::rsched_gunlock();
+        if parent_slot >= 0 {
+            let r = crate::with_internal_depth(|| {
+                libc::sem_post(addr_of_mut!((*ps).slots[parent_slot as usize].gate))
+            });
+            assert_eq!(r, 0, "rsched: fork readiness sem_post failed");
+        }
         process_log(format_args!(
             "pid {} child waiting on slot {}",
             libc::getpid(),
@@ -1079,7 +1026,7 @@ impl ProcessTaskProvider {
             return;
         }
         (*ps).slots[current as usize].active = 0;
-        deactivate_process_tasks_locked(ps, current);
+        deactivate_process_tasks(ps, current);
         process_log(format_args!(
             "pid {} exit slot {}, next slot {} thread {:#x}",
             libc::getpid(),
@@ -1108,7 +1055,7 @@ impl ProcessTaskProvider {
                 libc::getpid(),
                 current
             ));
-            deactivate_process_tasks_locked(ps, current);
+            deactivate_process_tasks(ps, current);
             (*ps).slots[current as usize].selected_creation_idx = usize::MAX;
             set_env_usize("RSCHED_PROCESS_SLOT", current as usize);
         }
@@ -1261,7 +1208,7 @@ pub(crate) unsafe fn deactivate_current_domain_tasks() {
     let current_slot = PROCESS_SLOT.load(Ordering::Acquire);
     let ps = PROCESS_SHARED.load(Ordering::Acquire);
     if current_slot >= 0 && !ps.is_null() {
-        deactivate_process_tasks_locked(ps, current_slot);
+        deactivate_process_tasks(ps, current_slot);
     }
 }
 
