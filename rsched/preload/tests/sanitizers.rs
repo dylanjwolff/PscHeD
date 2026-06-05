@@ -210,7 +210,7 @@ fn asan_preload_compatibility() {
             &[],
             &[
                 ("ASAN_OPTIONS", asan_options),
-                ("RANDOM_SEED", OsString::from("2")),
+                ("RSCHED_SCHEDULER", OsString::from("dfs")),
             ],
             TIMEOUT,
         ),

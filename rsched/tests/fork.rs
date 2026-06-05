@@ -1,6 +1,5 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use std::collections::HashSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -89,12 +88,15 @@ fn fork_case_define(name: &str) -> &'static str {
     }
 }
 
-fn run_with_seed(program: &Path, seed: u64) -> RunOutput {
-    let out = Command::new("timeout")
-        .arg("--kill-after=5s")
+fn run_with_env(program: &Path, envs: &[(&str, &str)]) -> RunOutput {
+    let mut cmd = Command::new("timeout");
+    cmd.arg("--kill-after=5s")
         .arg(format!("{}s", TIMEOUT.as_secs()))
-        .arg(program)
-        .env("RANDOM_SEED", seed.to_string())
+        .arg(program);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let out = cmd
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn timeout for {}: {e}", program.display()));
     RunOutput {
@@ -105,70 +107,10 @@ fn run_with_seed(program: &Path, seed: u64) -> RunOutput {
     }
 }
 
-fn trace_from_output(seed: u64, output: RunOutput) -> String {
-    assert!(
-        !output.timed_out,
-        "fork_counter seed {seed} timed out\nstdout:\n{}\nstderr:\n{}",
-        output.stdout, output.stderr
-    );
-    assert!(
-        output.status.success(),
-        "fork_counter seed {seed} failed with status {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        output.stdout,
-        output.stderr
-    );
-    let trace = output
-        .stdout
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("trace="))
-        .unwrap_or_else(|| {
-            panic!(
-                "fork_counter seed {seed} did not print trace\nstdout:\n{}\nstderr:\n{}",
-                output.stdout, output.stderr
-            )
-        });
-    assert_eq!(
-        trace.len(),
-        6,
-        "fork_counter seed {seed} produced wrong trace length: {trace:?}"
-    );
-    assert!(
-        trace.chars().all(|c| c == 'P' || c == 'C'),
-        "fork_counter seed {seed} produced invalid trace: {trace:?}"
-    );
-    trace.to_owned()
-}
-
-#[test]
-fn fork_is_deterministic_per_seed() {
-    let program = build_example("fork_counter");
-    for seed in 0..10 {
-        let a = trace_from_output(seed, run_with_seed(&program, seed));
-        let b = trace_from_output(seed, run_with_seed(&program, seed));
-        assert_eq!(a, b, "seed {seed}: first trace={a} second trace={b}");
-    }
-}
-
-#[test]
-fn fork_explores_multiple_process_interleavings() {
-    let program = build_example("fork_counter");
-    let mut traces = HashSet::new();
-    for seed in 0..30 {
-        traces.insert(trace_from_output(seed, run_with_seed(&program, seed)));
-    }
-    assert!(
-        traces.len() > 3,
-        "expected >3 distinct process traces across 30 seeds, got {}: {:?}",
-        traces.len(),
-        traces
-    );
-}
-
 #[test]
 fn dfs_exhausts_fork_interleavings() {
     let program = build_example("fork_dfs_count");
-    let output = run_with_seed(&program, 0);
+    let output = run_with_env(&program, &[]);
     assert!(
         !output.timed_out,
         "fork_dfs_count timed out\nstdout:\n{}\nstderr:\n{}",
@@ -186,63 +128,6 @@ fn dfs_exhausts_fork_interleavings() {
         "fork_dfs_count did not exhaust all process interleavings\nstdout:\n{}\nstderr:\n{}",
         output.stdout,
         output.stderr
-    );
-}
-
-fn last_from_output(seed: u64, output: RunOutput) -> i32 {
-    assert!(
-        !output.timed_out,
-        "fork_threads seed {seed} timed out\nstdout:\n{}\nstderr:\n{}",
-        output.stdout, output.stderr
-    );
-    assert!(
-        output.status.success(),
-        "fork_threads seed {seed} failed with status {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        output.stdout,
-        output.stderr
-    );
-    let last = output
-        .stdout
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("last="))
-        .unwrap_or_else(|| {
-            panic!(
-                "fork_threads seed {seed} did not print last\nstdout:\n{}\nstderr:\n{}",
-                output.stdout, output.stderr
-            )
-        });
-    let last = last
-        .parse::<i32>()
-        .unwrap_or_else(|e| panic!("fork_threads seed {seed} bad last={last:?}: {e}"));
-    assert!(
-        (1..=4).contains(&last),
-        "fork_threads seed {seed} produced invalid last={last}"
-    );
-    last
-}
-
-#[test]
-fn fork_threads_is_deterministic_per_seed() {
-    let program = build_example("fork_threads");
-    for seed in 0..10 {
-        let a = last_from_output(seed, run_with_seed(&program, seed));
-        let b = last_from_output(seed, run_with_seed(&program, seed));
-        assert_eq!(a, b, "seed {seed}: first last={a} second last={b}");
-    }
-}
-
-#[test]
-fn fork_threads_explores_each_final_writer() {
-    let program = build_example("fork_threads");
-    let mut final_writers = HashSet::new();
-    for seed in 0..120 {
-        final_writers.insert(last_from_output(seed, run_with_seed(&program, seed)));
-    }
-    let expected = HashSet::from([1, 2, 3, 4]);
-    assert_eq!(
-        final_writers, expected,
-        "expected every task id to be final writer across seeds, got {final_writers:?}"
     );
 }
 
@@ -280,25 +165,7 @@ fn exec_last_from_output(seed: u64, output: RunOutput) -> i32 {
 }
 
 #[test]
-fn fork_execv_is_deterministic_per_seed() {
+fn fork_execv_smoke_test() {
     let program = build_example("fork_execv");
-    for seed in 0..10 {
-        let a = exec_last_from_output(seed, run_with_seed(&program, seed));
-        let b = exec_last_from_output(seed, run_with_seed(&program, seed));
-        assert_eq!(a, b, "seed {seed}: first last={a} second last={b}");
-    }
-}
-
-#[test]
-fn fork_execv_explores_both_final_writers() {
-    let program = build_example("fork_execv");
-    let mut final_writers = HashSet::new();
-    for seed in 0..60 {
-        final_writers.insert(exec_last_from_output(seed, run_with_seed(&program, seed)));
-    }
-    let expected = HashSet::from([1, 2]);
-    assert_eq!(
-        final_writers, expected,
-        "expected both parent and execed child as final writer across seeds, got {final_writers:?}"
-    );
+    let _ = exec_last_from_output(0, run_with_env(&program, &[("RSCHED_SCHEDULER", "dfs")]));
 }

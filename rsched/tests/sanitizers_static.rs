@@ -175,7 +175,7 @@ fn asan_static_compatibility() {
             &racy,
             &[
                 ("ASAN_OPTIONS", asan_options),
-                ("RANDOM_SEED", OsString::from("2")),
+                ("RSCHED_SCHEDULER", OsString::from("dfs")),
             ],
         ),
         "heap-use-after-free",

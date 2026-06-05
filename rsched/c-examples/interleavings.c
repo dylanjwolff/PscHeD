@@ -96,6 +96,69 @@ int run_uniform_lock(unsigned long long seed) {
     return run_uniform_variant(seed, 1);
 }
 
+// Small bounded variants used by DFS tests. The full uniform fixtures above
+// have enough scheduling points to exceed the fixed task table during one
+// exhaustive in-process DFS run.
+
+static _Atomic int uniform_dfs_x;
+static pthread_barrier_t uniform_dfs_barrier;
+static pthread_mutex_t uniform_dfs_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int uniform_dfs_use_lock;
+
+static void *uniform_dfs_add_worker(void *arg) {
+    (void)arg;
+    pthread_barrier_wait(&uniform_dfs_barrier);
+
+    if (uniform_dfs_use_lock) {
+        pthread_mutex_lock(&uniform_dfs_mutex);
+        atomic_fetch_add_explicit(&uniform_dfs_x, 1, memory_order_seq_cst);
+        pthread_mutex_unlock(&uniform_dfs_mutex);
+        return NULL;
+    }
+    atomic_fetch_add_explicit(&uniform_dfs_x, 1, memory_order_seq_cst);
+    atomic_fetch_add_explicit(&uniform_dfs_x, 1, memory_order_seq_cst);
+    return NULL;
+}
+
+static void *uniform_dfs_xor_worker(void *arg) {
+    (void)arg;
+    pthread_barrier_wait(&uniform_dfs_barrier);
+
+    if (uniform_dfs_use_lock) {
+        pthread_mutex_lock(&uniform_dfs_mutex);
+        atomic_fetch_xor_explicit(&uniform_dfs_x, 3, memory_order_seq_cst);
+        pthread_mutex_unlock(&uniform_dfs_mutex);
+        return NULL;
+    }
+    atomic_fetch_xor_explicit(&uniform_dfs_x, 3, memory_order_seq_cst);
+    atomic_fetch_xor_explicit(&uniform_dfs_x, 5, memory_order_seq_cst);
+    return NULL;
+}
+
+static int run_uniform_dfs_variant(int use_lock) {
+    rsched_reinit(0);
+    uniform_dfs_use_lock = use_lock;
+    uniform_dfs_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    atomic_store_explicit(&uniform_dfs_x, 0, memory_order_relaxed);
+
+    pthread_t threads[2];
+    pthread_barrier_init(&uniform_dfs_barrier, NULL, 2);
+    pthread_create(&threads[0], NULL, uniform_dfs_add_worker, NULL);
+    pthread_create(&threads[1], NULL, uniform_dfs_xor_worker, NULL);
+    pthread_join(threads[0], NULL);
+    pthread_join(threads[1], NULL);
+
+    return atomic_load_explicit(&uniform_dfs_x, memory_order_relaxed);
+}
+
+int run_uniform_dfs(void) {
+    return run_uniform_dfs_variant(0);
+}
+
+int run_uniform_lock_dfs(void) {
+    return run_uniform_dfs_variant(1);
+}
+
 // uaf race fixture
 
 struct Node {

@@ -53,7 +53,7 @@ int main(void) {
 
 #else
 
-static pthread_barrier_t b1, b2;
+static pthread_barrier_t b1, b2, b3;
 
 static void *producer(void *arg) {
     (void)arg;
@@ -66,6 +66,7 @@ static void *producer(void *arg) {
 
     free(data);
     shared_ptr = NULL;
+    pthread_barrier_wait(&b3);
     return NULL;
 }
 
@@ -76,6 +77,7 @@ static void *consumer(void *arg) {
     int *local = shared_ptr;
 
     pthread_barrier_wait(&b2);
+    pthread_barrier_wait(&b3);
 
     if (local)
         printf("val=%d\n", *local);
@@ -86,6 +88,7 @@ int main(void) {
     pthread_t t1, t2;
     pthread_barrier_init(&b1, NULL, 2);
     pthread_barrier_init(&b2, NULL, 2);
+    pthread_barrier_init(&b3, NULL, 2);
     pthread_create(&t1, NULL, producer, NULL);
     pthread_create(&t2, NULL, consumer, NULL);
     pthread_join(t1, NULL);
