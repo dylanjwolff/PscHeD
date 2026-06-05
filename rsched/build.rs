@@ -3,12 +3,9 @@ fn main() {
     // Cargo automatically emits `cargo:rustc-link-lib=static=cexamples` and
     // places the archive where integration-test binaries can find it.
     cc::Build::new()
-        .file("c-examples/uniform.c")
-        .file("c-examples/uniform-lock.c")
-        .file("c-examples/uaf.c")
+        .file("c-examples/interleavings.c")
         .file("c-examples/benchmarks.c")
         .file("c-examples/coro_metadata.c")
-        .file("c-examples/dfs-count.c")
         .include("include")
         .define("RSCHED", None)
         .compile("cexamples");
@@ -29,12 +26,9 @@ fn main() {
     let compiler = cc::Build::new().include("include").get_compiler();
 
     let c_files = [
-        "c-examples/uniform.c",
-        "c-examples/uniform-lock.c",
-        "c-examples/uaf.c",
+        "c-examples/interleavings.c",
         "c-examples/benchmarks.c",
         "c-examples/coro_metadata.c",
-        "c-examples/dfs-count.c",
     ];
     for (i, file) in c_files.iter().enumerate() {
         let obj = format!("{}/stdatomic_check_{}.o", out_dir, i);

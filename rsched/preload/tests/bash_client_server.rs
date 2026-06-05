@@ -82,7 +82,7 @@ fn next_artifact_id() -> usize {
 }
 
 fn build_c_program(name: &str, artifact_id: usize) -> PathBuf {
-    let src = repo_root().join("c-examples").join(format!("{name}.c"));
+    let src = repo_root().join("c-examples").join("preload_fifo_cases.c");
     let out = temp_dir().join(format!(
         "{name}-{artifact_id}{}",
         std::env::consts::EXE_SUFFIX
@@ -97,6 +97,7 @@ fn build_c_program(name: &str, artifact_id: usize) -> PathBuf {
         .to_command();
     let status = compiler
         .args(["-g", "-Wall", "-Wextra", "-pthread"])
+        .arg(format!("-D{}", fifo_case_define(name)))
         .arg("-o")
         .arg(&out)
         .arg(&src)
@@ -104,6 +105,14 @@ fn build_c_program(name: &str, artifact_id: usize) -> PathBuf {
         .unwrap_or_else(|e| panic!("failed to invoke clang for {}: {e}", src.display()));
     assert!(status.success(), "failed to build {}", src.display());
     out
+}
+
+fn fifo_case_define(name: &str) -> &'static str {
+    match name {
+        "preload_fifo_server" => "ROLE_FIFO_SERVER",
+        "preload_fifo_client" => "ROLE_FIFO_CLIENT",
+        other => panic!("unknown FIFO example: {other}"),
+    }
 }
 
 fn write_script(artifact_id: usize) -> PathBuf {

@@ -58,11 +58,12 @@ fn build_example(name: &str) -> PathBuf {
     let root = repo_root();
     let build_id = BUILD_ID.fetch_add(1, Ordering::Relaxed);
     let out = temp_dir().join(format!("{name}-{build_id}"));
-    let src = root.join("c-examples").join(format!("{name}.c"));
+    let src = root.join("c-examples").join("fork_cases.c");
     let lib = static_lib();
 
     let status = Command::new("clang")
         .args(["-g", "-O0", "-Wall", "-Wextra", "-DRSCHED"])
+        .arg(format!("-D{}", fork_case_define(name)))
         .arg(format!("-I{}", root.join("include").display()))
         .arg("-o")
         .arg(&out)
@@ -76,6 +77,16 @@ fn build_example(name: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("failed to invoke clang for {}: {e}", src.display()));
     assert!(status.success(), "failed to build {}", src.display());
     out
+}
+
+fn fork_case_define(name: &str) -> &'static str {
+    match name {
+        "fork_counter" => "CASE_FORK_COUNTER",
+        "fork_threads" => "CASE_FORK_THREADS",
+        "fork_execv" => "CASE_FORK_EXECV",
+        "fork_dfs_count" => "CASE_FORK_DFS_COUNT",
+        other => panic!("unknown fork example: {other}"),
+    }
 }
 
 fn run_with_seed(program: &Path, seed: u64) -> RunOutput {

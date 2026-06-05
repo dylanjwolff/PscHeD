@@ -65,11 +65,12 @@ fn build_example(name: &str, sanitizer: &str, lib: &Path) -> PathBuf {
         "{name}-static-{sanitizer}{}",
         std::env::consts::EXE_SUFFIX
     ));
-    let src = root.join("c-examples").join(format!("{name}.c"));
+    let src = root.join("c-examples").join("sanitizer_cases.c");
 
     let status = Command::new("clang")
         .arg(format!("-fsanitize={sanitizer}"))
         .args(["-g", "-Wall", "-Wextra", "-DRSCHED"])
+        .arg(format!("-D{}", sanitizer_case_define(name)))
         .arg(format!("-I{}", root.join("include").display()))
         .arg("-o")
         .arg(&out)
@@ -88,6 +89,16 @@ fn build_example(name: &str, sanitizer: &str, lib: &Path) -> PathBuf {
     );
 
     out
+}
+
+fn sanitizer_case_define(name: &str) -> &'static str {
+    match name {
+        "asan_no_uaf" => "CASE_ASAN_CLEAN",
+        "asan_uaf" => "CASE_ASAN_UAF",
+        "ubsan_no_ub" => "CASE_UBSAN_CLEAN",
+        "ubsan_ub" => "CASE_UBSAN_UB",
+        other => panic!("unknown sanitizer example: {other}"),
+    }
 }
 
 fn run_with_timeout(program: &Path, envs: &[(&str, OsString)]) -> RunOutput {

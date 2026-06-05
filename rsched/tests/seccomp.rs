@@ -54,11 +54,12 @@ fn build_static_lib() -> PathBuf {
 fn build_example(name: &str) -> PathBuf {
     let root = repo_root();
     let out = temp_dir().join(name);
-    let src = root.join("c-examples").join(format!("{name}.c"));
+    let src = root.join("c-examples").join("seccomp_cases.c");
     let lib = static_lib();
 
     let status = Command::new("clang")
         .args(["-g", "-Wall", "-Wextra", "-DRSCHED"])
+        .arg(format!("-D{}", seccomp_case_define(name)))
         .arg(format!("-I{}", root.join("include").display()))
         .arg("-o")
         .arg(&out)
@@ -73,6 +74,14 @@ fn build_example(name: &str) -> PathBuf {
     assert!(status.success(), "failed to build {}", src.display());
 
     out
+}
+
+fn seccomp_case_define(name: &str) -> &'static str {
+    match name {
+        "seccomp_ok" => "CASE_SECCOMP_OK",
+        "seccomp_raw_futex" => "CASE_SECCOMP_RAW_FUTEX",
+        other => panic!("unknown seccomp example: {other}"),
+    }
 }
 
 fn run_with_timeout(program: &Path, envs: &[(&str, &str)]) -> RunOutput {
