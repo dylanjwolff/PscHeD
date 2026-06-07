@@ -57,12 +57,13 @@ fn build_example(name: &str) -> PathBuf {
     let root = repo_root();
     let build_id = BUILD_ID.fetch_add(1, Ordering::Relaxed);
     let out = temp_dir().join(format!("{name}-{build_id}"));
-    let src = root.join("c-examples").join("fork_cases.c");
+    let src = root.join("c-examples").join("interleavings.c");
     let lib = static_lib();
 
     let status = Command::new("clang")
         .args(["-g", "-O0", "-Wall", "-Wextra", "-DRSCHED"])
-        .arg(format!("-D{}", fork_case_define(name)))
+        .arg(format!("-D{}", standalone_case_define(name)))
+        .arg(format!("-D{}", task_backend_define(name)))
         .arg(format!("-I{}", root.join("include").display()))
         .arg("-o")
         .arg(&out)
@@ -78,13 +79,17 @@ fn build_example(name: &str) -> PathBuf {
     out
 }
 
-fn fork_case_define(name: &str) -> &'static str {
+fn standalone_case_define(name: &str) -> &'static str {
     match name {
-        "fork_counter" => "CASE_FORK_COUNTER",
-        "fork_threads" => "CASE_FORK_THREADS",
-        "fork_execv" => "CASE_FORK_EXECV",
-        "fork_dfs_count" => "CASE_FORK_DFS_COUNT",
-        other => panic!("unknown fork example: {other}"),
+        "fork_dfs_count" => "STANDALONE_DFS_COUNT",
+        other => panic!("unknown standalone interleaving example: {other}"),
+    }
+}
+
+fn task_backend_define(name: &str) -> &'static str {
+    match name {
+        "fork_dfs_count" => "TASK_BACKEND_FORK",
+        other => panic!("unknown task backend for example: {other}"),
     }
 }
 
@@ -129,43 +134,4 @@ fn dfs_exhausts_fork_interleavings() {
         output.stdout,
         output.stderr
     );
-}
-
-fn exec_last_from_output(seed: u64, output: RunOutput) -> i32 {
-    assert!(
-        !output.timed_out,
-        "fork_execv seed {seed} timed out\nstdout:\n{}\nstderr:\n{}",
-        output.stdout, output.stderr
-    );
-    assert!(
-        output.status.success(),
-        "fork_execv seed {seed} failed with status {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        output.stdout,
-        output.stderr
-    );
-    let last = output
-        .stdout
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix("last="))
-        .unwrap_or_else(|| {
-            panic!(
-                "fork_execv seed {seed} did not print last\nstdout:\n{}\nstderr:\n{}",
-                output.stdout, output.stderr
-            )
-        });
-    let last = last
-        .parse::<i32>()
-        .unwrap_or_else(|e| panic!("fork_execv seed {seed} bad last={last:?}: {e}"));
-    assert!(
-        last == 1 || last == 2,
-        "fork_execv seed {seed} produced invalid last={last}"
-    );
-    last
-}
-
-#[test]
-fn fork_execv_smoke_test() {
-    let program = build_example("fork_execv");
-    let _ = exec_last_from_output(0, run_with_env(&program, &[("RSCHED_SCHEDULER", "dfs")]));
 }

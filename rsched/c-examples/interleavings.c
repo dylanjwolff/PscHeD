@@ -7,7 +7,13 @@
 #  include <stdint.h>
 #endif
 
+#include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 static unsigned long long lcg_next(unsigned long long s) {
     return s * 6364136223846793005ULL + 1442695040888963407ULL;
@@ -247,3 +253,192 @@ int run_dfs_count(void) {
         encoded = encoded * 10 + dfs_order[i];
     return encoded;
 }
+
+// Standalone variants used by tests that need a separately linked binary.
+
+#if defined(STANDALONE_COUNTER)
+
+#define COUNTER_OPS 10
+
+static _Atomic int standalone_counter;
+static pthread_barrier_t standalone_counter_barrier;
+
+static void *standalone_counter_worker(void *arg) {
+    (void)arg;
+    pthread_barrier_wait(&standalone_counter_barrier);
+    for (int i = 0; i < COUNTER_OPS; i++)
+        atomic_fetch_add_explicit(&standalone_counter, 1, memory_order_seq_cst);
+    return NULL;
+}
+
+int main(void) {
+    atomic_store_explicit(&standalone_counter, 0, memory_order_relaxed);
+
+    pthread_t t1, t2;
+    pthread_barrier_init(&standalone_counter_barrier, NULL, 2);
+    pthread_create(&t1, NULL, standalone_counter_worker, NULL);
+    pthread_create(&t2, NULL, standalone_counter_worker, NULL);
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+
+    int result = atomic_load_explicit(&standalone_counter, memory_order_relaxed);
+    if (result != 2 * COUNTER_OPS) {
+        fprintf(stderr, "expected counter=%d, got %d\n", 2 * COUNTER_OPS, result);
+        return 1;
+    }
+    return 0;
+}
+
+#elif defined(STANDALONE_DFS_COUNT)
+
+#if defined(TASK_BACKEND_FORK)
+
+#define PROCESS_DFS_OPS 1
+
+struct process_dfs_trace {
+    _Atomic int len;
+    char trace[PROCESS_DFS_OPS * 2 + 1];
+};
+
+static void process_record_ops(struct process_dfs_trace *shared, char tag) {
+    for (int i = 0; i < PROCESS_DFS_OPS; i++) {
+        int pos = atomic_fetch_add_explicit(&shared->len, 1, memory_order_seq_cst);
+        if (pos >= 0 && pos < PROCESS_DFS_OPS * 2)
+            shared->trace[pos] = tag;
+    }
+}
+
+static int run_process_dfs_once(char out[PROCESS_DFS_OPS * 2 + 1]) {
+    rsched_reinit(0);
+
+    struct process_dfs_trace *shared = mmap(0, sizeof(*shared), PROT_READ | PROT_WRITE,
+                                            MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+    if (shared == MAP_FAILED) {
+        perror("mmap");
+        return 2;
+    }
+    atomic_store_explicit(&shared->len, 0, memory_order_relaxed);
+    for (int i = 0; i < PROCESS_DFS_OPS * 2 + 1; i++)
+        shared->trace[i] = 0;
+
+    pid_t child = fork();
+    if (child < 0) {
+        perror("fork");
+        return 2;
+    }
+
+    if (child == 0) {
+        process_record_ops(shared, 'C');
+#ifdef RSCHED
+        rsched_process_exit();
+#endif
+        _exit(0);
+    }
+
+    process_record_ops(shared, 'P');
+
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) {
+            perror("waitpid");
+            return 2;
+        }
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "child failed: status=%d\n", status);
+        return 1;
+    }
+    int len = atomic_load_explicit(&shared->len, memory_order_relaxed);
+    if (len != PROCESS_DFS_OPS * 2) {
+        fprintf(stderr, "bad trace length: %d\n", len);
+        return 1;
+    }
+
+    for (int i = 0; i < PROCESS_DFS_OPS * 2; i++)
+        out[i] = shared->trace[i];
+    out[PROCESS_DFS_OPS * 2] = 0;
+    return 0;
+}
+
+static int process_trace_bit(const char *trace) {
+    if (!strcmp(trace, "PC"))
+        return 1 << 0;
+    if (!strcmp(trace, "CP"))
+        return 1 << 1;
+    return 0;
+}
+
+int main(void) {
+    setenv("RSCHED_SCHEDULER", "dfs", 1);
+    rsched_dfs_reset();
+
+    int mask = 0;
+    size_t runs = 0;
+    while (rsched_dfs_has_next()) {
+        char trace[PROCESS_DFS_OPS * 2 + 1];
+        int r = run_process_dfs_once(trace);
+        if (r != 0)
+            return r;
+        int bit = process_trace_bit(trace);
+        if (bit == 0) {
+            fprintf(stderr, "unexpected trace: %s\n", trace);
+            return 1;
+        }
+        mask |= bit;
+        rsched_dfs_finish_current();
+        runs++;
+        if (runs > 1024) {
+            fprintf(stderr, "too many dfs runs\n");
+            return 1;
+        }
+    }
+
+    printf("runs=%zu completed=%zu mask=0x%x\n", runs,
+           rsched_dfs_completed_schedules(), mask);
+    return mask == 0x3 && runs == rsched_dfs_completed_schedules() ? 0 : 1;
+}
+
+#else
+
+int main(void) {
+    setenv("RSCHED_SCHEDULER", "dfs", 1);
+    rsched_dfs_reset();
+
+    int mask = 0;
+    size_t runs = 0;
+    while (rsched_dfs_has_next()) {
+        switch (run_dfs_count()) {
+        case 1122:
+            mask |= 1 << 0;
+            break;
+        case 1212:
+            mask |= 1 << 1;
+            break;
+        case 1221:
+            mask |= 1 << 2;
+            break;
+        case 2112:
+            mask |= 1 << 3;
+            break;
+        case 2121:
+            mask |= 1 << 4;
+            break;
+        case 2211:
+            mask |= 1 << 5;
+            break;
+        default:
+            fprintf(stderr, "unexpected encoded trace\n");
+            return 1;
+        }
+        rsched_dfs_finish_current();
+        runs++;
+    }
+
+    printf("runs=%zu completed=%zu mask=0x%x\n", runs,
+           rsched_dfs_completed_schedules(), mask);
+    return mask == 0x3f && runs == rsched_dfs_completed_schedules() ? 0 : 1;
+}
+
+#endif
+#endif

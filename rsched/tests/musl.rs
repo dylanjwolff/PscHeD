@@ -56,7 +56,7 @@ fn musl_static_lib() -> PathBuf {
 fn build_musl_binary(lib: &Path) -> PathBuf {
     let root = repo_root();
     let out = temp_dir().join("musl_counter");
-    let src = root.join("c-examples").join("musl_counter.c");
+    let src = root.join("c-examples").join("interleavings.c");
 
     // GCC 13's libgcc_eh.a (Ubuntu 24.04) references _dl_find_object (glibc 2.35+),
     // which is absent in musl. Provide a stub; the function is only called during
@@ -69,7 +69,7 @@ fn build_musl_binary(lib: &Path) -> PathBuf {
     .expect("write _dl_find_object stub");
 
     let status = Command::new("musl-gcc")
-        .args(["-g", "-Wall", "-Wextra", "-DRSCHED"])
+        .args(["-g", "-Wall", "-Wextra", "-DRSCHED", "-DSTANDALONE_COUNTER"])
         .arg(format!("-I{}", root.join("include").display()))
         .arg("-o")
         .arg(&out)
@@ -82,7 +82,7 @@ fn build_musl_binary(lib: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("failed to invoke musl-gcc: {e}"));
     assert!(
         status.success(),
-        "failed to build musl_counter.c with musl-gcc"
+        "failed to build interleavings.c counter variant with musl-gcc"
     );
 
     out
