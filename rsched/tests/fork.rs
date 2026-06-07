@@ -4,10 +4,12 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 static STATIC_LIB: OnceLock<PathBuf> = OnceLock::new();
+static BUILD_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug)]
 struct RunOutput {
@@ -22,8 +24,8 @@ fn repo_root() -> PathBuf {
 }
 
 fn temp_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rsched-seccomp-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create seccomp test temp dir");
+    let dir = std::env::temp_dir().join(format!("rsched-fork-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create fork test temp dir");
     dir
 }
 
@@ -39,7 +41,7 @@ fn build_static_lib() -> PathBuf {
         .env("CARGO_TARGET_DIR", &target_dir)
         .args(["build", "--lib"])
         .status()
-        .expect("spawn cargo build for seccomp staticlib");
+        .expect("spawn cargo build for fork staticlib");
     assert!(status.success(), "cargo build --lib failed");
 
     let path = target_dir.join("debug").join("librsched.a");
@@ -53,13 +55,15 @@ fn build_static_lib() -> PathBuf {
 
 fn build_example(name: &str) -> PathBuf {
     let root = repo_root();
-    let out = temp_dir().join(name);
-    let src = root.join("c-examples").join("seccomp_cases.c");
+    let build_id = BUILD_ID.fetch_add(1, Ordering::Relaxed);
+    let out = temp_dir().join(format!("{name}-{build_id}"));
+    let src = root.join("c-examples").join("interleavings.c");
     let lib = static_lib();
 
     let status = Command::new("clang")
-        .args(["-g", "-Wall", "-Wextra", "-DRSCHED"])
-        .arg(format!("-D{}", seccomp_case_define(name)))
+        .args(["-g", "-O0", "-Wall", "-Wextra", "-DRSCHED"])
+        .arg(format!("-D{}", standalone_case_define(name)))
+        .arg(format!("-D{}", task_backend_define(name)))
         .arg(format!("-I{}", root.join("include").display()))
         .arg("-o")
         .arg(&out)
@@ -72,28 +76,31 @@ fn build_example(name: &str) -> PathBuf {
         .status()
         .unwrap_or_else(|e| panic!("failed to invoke clang for {}: {e}", src.display()));
     assert!(status.success(), "failed to build {}", src.display());
-
     out
 }
 
-fn seccomp_case_define(name: &str) -> &'static str {
+fn standalone_case_define(name: &str) -> &'static str {
     match name {
-        "seccomp_ok" => "CASE_SECCOMP_OK",
-        "seccomp_raw_futex" => "CASE_SECCOMP_RAW_FUTEX",
-        other => panic!("unknown seccomp example: {other}"),
+        "fork_dfs_count" => "STANDALONE_DFS_COUNT",
+        other => panic!("unknown standalone interleaving example: {other}"),
     }
 }
 
-fn run_with_timeout(program: &Path, envs: &[(&str, &str)]) -> RunOutput {
+fn task_backend_define(name: &str) -> &'static str {
+    match name {
+        "fork_dfs_count" => "TASK_BACKEND_FORK",
+        other => panic!("unknown task backend for example: {other}"),
+    }
+}
+
+fn run_with_env(program: &Path, envs: &[(&str, &str)]) -> RunOutput {
     let mut cmd = Command::new("timeout");
     cmd.arg("--kill-after=5s")
         .arg(format!("{}s", TIMEOUT.as_secs()))
         .arg(program);
-    cmd.env_remove("LD_LIBRARY_PATH");
     for (key, value) in envs {
         cmd.env(key, value);
     }
-
     let out = cmd
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn timeout for {}: {e}", program.display()));
@@ -106,49 +113,24 @@ fn run_with_timeout(program: &Path, envs: &[(&str, &str)]) -> RunOutput {
 }
 
 #[test]
-fn seccomp_allows_rsched_internal_futexes() {
-    let program = build_example("seccomp_ok");
-    let output = run_with_timeout(&program, &[("RSCHED_SECCOMP", "1")]);
+fn dfs_exhausts_fork_interleavings() {
+    let program = build_example("fork_dfs_count");
+    let output = run_with_env(&program, &[]);
     assert!(
         !output.timed_out,
-        "seccomp_ok timed out\nstdout:\n{}\nstderr:\n{}",
+        "fork_dfs_count timed out\nstdout:\n{}\nstderr:\n{}",
         output.stdout, output.stderr
     );
     assert!(
         output.status.success(),
-        "seccomp_ok failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        "fork_dfs_count failed with status {}\nstdout:\n{}\nstderr:\n{}",
         output.status,
         output.stdout,
         output.stderr
     );
     assert!(
-        output.stdout.contains("counter = 1"),
-        "seccomp_ok did not complete expected work\nstdout:\n{}\nstderr:\n{}",
-        output.stdout,
-        output.stderr
-    );
-}
-
-#[test]
-fn seccomp_rejects_raw_futex_outside_rsched() {
-    let program = build_example("seccomp_raw_futex");
-    let output = run_with_timeout(&program, &[("RSCHED_SECCOMP", "1")]);
-    assert!(
-        !output.timed_out,
-        "seccomp_raw_futex timed out\nstdout:\n{}\nstderr:\n{}",
-        output.stdout, output.stderr
-    );
-    assert!(
-        !output.status.success(),
-        "seccomp_raw_futex unexpectedly exited cleanly\nstdout:\n{}\nstderr:\n{}",
-        output.stdout,
-        output.stderr
-    );
-    assert!(
-        output
-            .stderr
-            .contains("rsched: intercepted raw futex/clone syscall outside rsched"),
-        "seccomp_raw_futex did not print expected diagnostic\nstdout:\n{}\nstderr:\n{}",
+        output.stdout.contains("mask=0x3"),
+        "fork_dfs_count did not exhaust all process interleavings\nstdout:\n{}\nstderr:\n{}",
         output.stdout,
         output.stderr
     );

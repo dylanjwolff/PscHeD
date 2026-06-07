@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, SamplingMode};
+use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use std::time::Duration;
 
 const TOTAL_EVENTS: u32 = 10000;
