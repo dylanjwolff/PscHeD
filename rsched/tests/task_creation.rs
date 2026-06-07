@@ -24,8 +24,8 @@ fn repo_root() -> PathBuf {
 }
 
 fn temp_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rsched-fork-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create fork test temp dir");
+    let dir = std::env::temp_dir().join(format!("rsched-task-creation-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create task creation test temp dir");
     dir
 }
 
@@ -41,7 +41,7 @@ fn build_static_lib() -> PathBuf {
         .env("CARGO_TARGET_DIR", &target_dir)
         .args(["build", "--lib"])
         .status()
-        .expect("spawn cargo build for fork staticlib");
+        .expect("spawn cargo build for task creation staticlib");
     assert!(status.success(), "cargo build --lib failed");
 
     let path = target_dir.join("debug").join("librsched.a");
@@ -53,23 +53,27 @@ fn build_static_lib() -> PathBuf {
     path
 }
 
-fn build_example(name: &str) -> PathBuf {
+fn build_example(backend: &str) -> PathBuf {
     let root = repo_root();
     let build_id = BUILD_ID.fetch_add(1, Ordering::Relaxed);
-    let out = temp_dir().join(format!("{name}-{build_id}"));
+    let out = temp_dir().join(format!("dfs-{backend}-{build_id}"));
     let src = root.join("c-examples").join("interleavings.c");
     let lib = static_lib();
 
     let status = Command::new("clang")
-        .args(["-g", "-O0", "-Wall", "-Wextra", "-DRSCHED"])
-        .arg(format!("-D{}", standalone_case_define(name)))
-        .arg(format!("-D{}", task_backend_define(name)))
+        .args([
+            "-g",
+            "-O0",
+            "-Wall",
+            "-Wextra",
+            "-DRSCHED",
+            "-DSTANDALONE_DFS_COUNT",
+        ])
+        .arg(format!("-DTASK_BACKEND_{}", backend.to_ascii_uppercase()))
         .arg(format!("-I{}", root.join("include").display()))
         .arg("-o")
         .arg(&out)
         .arg(&src)
-        .arg("-L")
-        .arg(lib.parent().expect("staticlib should have parent"))
         .args(["-Wl,--start-group"])
         .arg(&lib)
         .args(["-Wl,--end-group", "-lpthread", "-ldl", "-lm"])
@@ -79,29 +83,11 @@ fn build_example(name: &str) -> PathBuf {
     out
 }
 
-fn standalone_case_define(name: &str) -> &'static str {
-    match name {
-        "fork_dfs_count" => "STANDALONE_DFS_COUNT",
-        other => panic!("unknown standalone interleaving example: {other}"),
-    }
-}
-
-fn task_backend_define(name: &str) -> &'static str {
-    match name {
-        "fork_dfs_count" => "TASK_BACKEND_FORK",
-        other => panic!("unknown task backend for example: {other}"),
-    }
-}
-
-fn run_with_env(program: &Path, envs: &[(&str, &str)]) -> RunOutput {
-    let mut cmd = Command::new("timeout");
-    cmd.arg("--kill-after=5s")
+fn run(program: &Path) -> RunOutput {
+    let out = Command::new("timeout")
+        .arg("--kill-after=5s")
         .arg(format!("{}s", TIMEOUT.as_secs()))
-        .arg(program);
-    for (key, value) in envs {
-        cmd.env(key, value);
-    }
-    let out = cmd
+        .arg(program)
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn timeout for {}: {e}", program.display()));
     RunOutput {
@@ -112,26 +98,34 @@ fn run_with_env(program: &Path, envs: &[(&str, &str)]) -> RunOutput {
     }
 }
 
-#[test]
-fn dfs_exhausts_fork_interleavings() {
-    let program = build_example("fork_dfs_count");
-    let output = run_with_env(&program, &[]);
+fn assert_dfs_coverage(backend: &str, expected_mask: &str) {
+    let output = run(&build_example(backend));
     assert!(
         !output.timed_out,
-        "fork_dfs_count timed out\nstdout:\n{}\nstderr:\n{}",
+        "{backend} task creation timed out\nstdout:\n{}\nstderr:\n{}",
         output.stdout, output.stderr
     );
     assert!(
         output.status.success(),
-        "fork_dfs_count failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        "{backend} task creation failed with status {}\nstdout:\n{}\nstderr:\n{}",
         output.status,
         output.stdout,
         output.stderr
     );
     assert!(
-        output.stdout.contains("mask=0x3"),
-        "fork_dfs_count did not exhaust all process interleavings\nstdout:\n{}\nstderr:\n{}",
+        output.stdout.contains(expected_mask),
+        "{backend} task creation did not exhaust expected interleavings\nstdout:\n{}\nstderr:\n{}",
         output.stdout,
         output.stderr
     );
+}
+
+#[test]
+fn dfs_exhausts_pthread_create_interleavings() {
+    assert_dfs_coverage("pthread", "mask=0x3f");
+}
+
+#[test]
+fn dfs_exhausts_clone_interleavings() {
+    assert_dfs_coverage("clone", "mask=0x3");
 }

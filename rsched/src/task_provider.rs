@@ -1188,6 +1188,53 @@ impl ProcessTaskProvider {
         pid
     }
 
+    pub(crate) unsafe fn clone_process(
+        &mut self,
+        flags: libc::c_long,
+        child_stack: libc::c_long,
+        parent_tid: libc::c_long,
+        child_tid: libc::c_long,
+        tls: libc::c_long,
+    ) -> libc::pid_t {
+        let unsupported_flags = libc::CLONE_VM
+            | libc::CLONE_THREAD
+            | libc::CLONE_SIGHAND
+            | libc::CLONE_FS
+            | libc::CLONE_FILES
+            | libc::CLONE_SETTLS
+            | libc::CLONE_VFORK;
+        if child_stack != 0 || flags & unsupported_flags as libc::c_long != 0 {
+            *libc::__errno_location() = libc::ENOTSUP;
+            return -1;
+        }
+
+        self.before_fork();
+        let result = crate::seccomp::raw_syscall6(
+            libc::SYS_clone,
+            flags,
+            child_stack,
+            parent_tid,
+            child_tid,
+            tls,
+            0,
+        );
+        if (-4095..0).contains(&result) {
+            *libc::__errno_location() = -result as libc::c_int;
+            self.after_fork_parent(-1);
+            return -1;
+        }
+        let pid = result as libc::pid_t;
+        if pid == 0 {
+            self.after_fork_child();
+        } else if self.after_fork_parent(pid) {
+            crate::rsched_glock();
+            let caller = crate::my_pt();
+            crate::st().context_switch(caller);
+            crate::rsched_gunlock();
+        }
+        pid
+    }
+
     pub(crate) unsafe fn before_fork(&mut self) {
         self.before_fork_impl();
     }

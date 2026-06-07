@@ -45,6 +45,7 @@ int  rsched_pthread_barrier_wait(pthread_barrier_t *);
 
 int  rsched_sched_yield(void);
 pid_t rsched_fork(void);
+long rsched_syscall(long, ...);
 void rsched_process_exit(void);
 int rsched_execv(const char *, char *const []);
 int rsched_execve(const char *, char *const [], char *const []);
@@ -65,6 +66,7 @@ pid_t rsched_waitpid(pid_t, int *, int);
 #define pthread_barrier_wait    rsched_pthread_barrier_wait
 #define sched_yield             rsched_sched_yield
 #define fork                    rsched_fork
+#define syscall                 rsched_syscall
 #define execv                   rsched_execv
 #define execve                  rsched_execve
 #define waitpid                 rsched_waitpid

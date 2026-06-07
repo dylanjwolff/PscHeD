@@ -41,7 +41,7 @@ unsafe extern "C" {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-unsafe fn raw_syscall6(
+pub(crate) unsafe fn raw_syscall6(
     nr: libc::c_long,
     a0: libc::c_long,
     a1: libc::c_long,
@@ -51,6 +51,19 @@ unsafe fn raw_syscall6(
     a5: libc::c_long,
 ) -> libc::c_long {
     rsched_internal_syscall6(nr, a0, a1, a2, a3, a4, a5)
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+pub(crate) unsafe fn raw_syscall6(
+    nr: libc::c_long,
+    a0: libc::c_long,
+    a1: libc::c_long,
+    a2: libc::c_long,
+    a3: libc::c_long,
+    a4: libc::c_long,
+    a5: libc::c_long,
+) -> libc::c_long {
+    libc::syscall(nr, a0, a1, a2, a3, a4, a5)
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

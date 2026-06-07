@@ -639,6 +639,43 @@ pub unsafe extern "C" fn rsched_fork() -> libc::pid_t {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_syscall(
+    number: libc::c_long,
+    a0: libc::c_long,
+    a1: libc::c_long,
+    a2: libc::c_long,
+    a3: libc::c_long,
+    a4: libc::c_long,
+    a5: libc::c_long,
+) -> libc::c_long {
+    if number == libc::SYS_clone {
+        ensure_init();
+        return st().task_provider.clone_process(a0, a1, a2, a3, a4).into();
+    }
+
+    libc::syscall(number, a0, a1, a2, a3, a4, a5)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_raw_syscall(
+    number: libc::c_long,
+    a0: libc::c_long,
+    a1: libc::c_long,
+    a2: libc::c_long,
+    a3: libc::c_long,
+    a4: libc::c_long,
+    a5: libc::c_long,
+) -> libc::c_long {
+    let result = seccomp::raw_syscall6(number, a0, a1, a2, a3, a4, a5);
+    if (-4095..0).contains(&result) {
+        *libc::__errno_location() = -result as libc::c_int;
+        -1
+    } else {
+        result
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_execv(
     path: *const libc::c_char,
     argv: *const *const libc::c_char,

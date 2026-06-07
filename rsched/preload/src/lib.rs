@@ -34,11 +34,11 @@ use rsched::{
     rsched_after_fork_child, rsched_after_fork_parent, rsched_before_fork, rsched_execv,
     rsched_execve, rsched_exit, rsched_note_pthread_mutex_destroy, rsched_note_pthread_mutex_init,
     rsched_note_pthread_mutexattr_destroy, rsched_note_pthread_mutexattr_init,
-    rsched_note_pthread_mutexattr_settype, rsched_pthread_barrier_init,
+    rsched_note_pthread_mutexattr_settype, rsched_process_exit, rsched_pthread_barrier_init,
     rsched_pthread_barrier_wait, rsched_pthread_cond_broadcast, rsched_pthread_cond_signal,
     rsched_pthread_cond_wait, rsched_pthread_create, rsched_pthread_exit, rsched_pthread_join,
     rsched_pthread_mutex_lock, rsched_pthread_mutex_trylock, rsched_pthread_mutex_unlock,
-    rsched_sched_yield, rsched_try_enter, rsched_waitpid,
+    rsched_raw_syscall, rsched_sched_yield, rsched_syscall, rsched_try_enter, rsched_waitpid,
 };
 
 #[cfg(feature = "tsan")]
@@ -122,6 +122,7 @@ static NEXT_FORK: AtomicUsize = AtomicUsize::new(0);
 static NEXT_EXECV: AtomicUsize = AtomicUsize::new(0);
 static NEXT_EXECVE: AtomicUsize = AtomicUsize::new(0);
 static NEXT_WAITPID: AtomicUsize = AtomicUsize::new(0);
+static NEXT_SYSCALL: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "tsan")]
 static TSAN_PTHREAD_CREATE_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -695,6 +696,53 @@ pub unsafe extern "C" fn fork() -> libc::pid_t {
         rsched_after_fork_parent(pid);
     }
     pid
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn syscall(
+    number: libc::c_long,
+    a0: libc::c_long,
+    a1: libc::c_long,
+    a2: libc::c_long,
+    a3: libc::c_long,
+    a4: libc::c_long,
+    a5: libc::c_long,
+) -> libc::c_long {
+    let outermost = rsched_try_enter();
+    defer!(rsched_exit());
+    if !outermost {
+        return rsched_raw_syscall(number, a0, a1, a2, a3, a4, a5);
+    }
+    if number == libc::SYS_clone {
+        return rsched_syscall(number, a0, a1, a2, a3, a4, a5);
+    }
+
+    let f: unsafe extern "C" fn(
+        libc::c_long,
+        libc::c_long,
+        libc::c_long,
+        libc::c_long,
+        libc::c_long,
+        libc::c_long,
+        libc::c_long,
+    ) -> libc::c_long = load_next(&NEXT_SYSCALL, b"syscall\0");
+    f(number, a0, a1, a2, a3, a4, a5)
+}
+
+unsafe fn exit_process(status: c_int) -> ! {
+    rsched_process_exit();
+    rsched_raw_syscall(libc::SYS_exit_group, status.into(), 0, 0, 0, 0, 0);
+    core::hint::unreachable_unchecked()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _exit(status: c_int) -> ! {
+    exit_process(status)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _Exit(status: c_int) -> ! {
+    exit_process(status)
 }
 
 #[unsafe(no_mangle)]

@@ -1,17 +1,28 @@
+#define _GNU_SOURCE
+
 #ifdef RSCHED
 #  include "rsched_atomic.h"
 #else
+#  include <stddef.h>
 #  include <pthread.h>
 #  include <sched.h>
 #  include <stdatomic.h>
 #  include <stdint.h>
+
+void rsched_reinit(unsigned long long seed);
+void rsched_dfs_reset(void);
+int rsched_dfs_has_next(void);
+void rsched_dfs_finish_current(void);
+size_t rsched_dfs_completed_schedules(void);
 #endif
 
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -256,7 +267,39 @@ int run_dfs_count(void) {
 
 // Standalone variants used by tests that need a separately linked binary.
 
-#if defined(STANDALONE_COUNTER)
+#if defined(STANDALONE_CLONE_SMOKE)
+
+int main(void) {
+    errno = 0;
+    pid_t unsupported = syscall(SYS_clone, CLONE_VM | SIGCHLD, 0, 0, 0, 0);
+    if (unsupported != -1 || errno != ENOTSUP) {
+        fprintf(stderr, "thread-style clone should fail with ENOTSUP\n");
+        return 1;
+    }
+
+    pid_t child = syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0);
+    if (child < 0) {
+        perror("clone");
+        return 2;
+    }
+    if (child == 0) {
+        sched_yield();
+#ifdef RSCHED
+        rsched_process_exit();
+#endif
+        _exit(0);
+    }
+
+    sched_yield();
+    int status = 0;
+    if (waitpid(child, &status, 0) != child) {
+        perror("waitpid");
+        return 2;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
+}
+
+#elif defined(STANDALONE_COUNTER)
 
 #define COUNTER_OPS 10
 
@@ -291,7 +334,7 @@ int main(void) {
 
 #elif defined(STANDALONE_DFS_COUNT)
 
-#if defined(TASK_BACKEND_FORK)
+#if defined(TASK_BACKEND_CLONE)
 
 #define PROCESS_DFS_OPS 1
 
@@ -321,7 +364,7 @@ static int run_process_dfs_once(char out[PROCESS_DFS_OPS * 2 + 1]) {
     for (int i = 0; i < PROCESS_DFS_OPS * 2 + 1; i++)
         shared->trace[i] = 0;
 
-    pid_t child = fork();
+    pid_t child = syscall(SYS_clone, SIGCHLD, 0, 0, 0, 0);
     if (child < 0) {
         perror("fork");
         return 2;
