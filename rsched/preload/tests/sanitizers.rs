@@ -68,7 +68,7 @@ fn build_example(name: &str, sanitizer: &str) -> PathBuf {
         sanitizer,
         std::env::consts::EXE_SUFFIX
     ));
-    let src = root.join("c-examples").join(format!("{name}.c"));
+    let src = root.join("c-examples").join("sanitizer_cases.c");
     let lib_path = preload_lib();
     let lib_dir = lib_path
         .parent()
@@ -85,6 +85,7 @@ fn build_example(name: &str, sanitizer: &str) -> PathBuf {
     let status = compiler
         .arg(format!("-fsanitize={sanitizer}"))
         .args(["-g", "-Wall", "-Wextra"])
+        .arg(format!("-D{}", sanitizer_case_define(name)))
         .arg("-o")
         .arg(&out)
         .arg(&src)
@@ -100,6 +101,18 @@ fn build_example(name: &str, sanitizer: &str) -> PathBuf {
     );
 
     out
+}
+
+fn sanitizer_case_define(name: &str) -> &'static str {
+    match name {
+        "asan_no_uaf" => "CASE_ASAN_CLEAN",
+        "asan_uaf" => "CASE_ASAN_UAF",
+        "ubsan_no_ub" => "CASE_UBSAN_CLEAN",
+        "ubsan_ub" => "CASE_UBSAN_UB",
+        "tsan_no_race" => "CASE_TSAN_CLEAN",
+        "tsan_race" => "CASE_TSAN_RACE",
+        other => panic!("unknown sanitizer example: {other}"),
+    }
 }
 
 fn host_target() -> &'static str {
@@ -197,7 +210,7 @@ fn asan_preload_compatibility() {
             &[],
             &[
                 ("ASAN_OPTIONS", asan_options),
-                ("RANDOM_SEED", OsString::from("2")),
+                ("RSCHED_SCHEDULER", OsString::from("dfs")),
             ],
             TIMEOUT,
         ),
