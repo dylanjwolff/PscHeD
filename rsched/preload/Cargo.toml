@@ -13,6 +13,7 @@ test = false
 # Propagate TSAN annotation support to the rsched crate.
 tsan = ["rsched/tsan"]
 asan = ["rsched/asan"]
+coro = ["rsched/coro"]
 
 [dependencies]
 rsched = { path = ".." }
