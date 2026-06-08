@@ -1,5 +1,5 @@
 use crate::scheduler::SharedDfsState;
-use crate::{AttrT, CondT, PthreadT, StartArg};
+use crate::{AttrT, CloneStart, CondT, PthreadT, StartArg};
 use std::ffi::{CStr, CString};
 use std::ptr::addr_of_mut;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
@@ -98,6 +98,24 @@ pub(crate) enum SwitchResult {
     },
 }
 
+#[allow(dead_code)]
+pub(crate) struct CloneTask {
+    pub(crate) pthread: PthreadT,
+    pub(crate) tid: libc::pid_t,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub(crate) struct CloneArgs {
+    pub(crate) func: CloneStart,
+    pub(crate) stack: *mut libc::c_void,
+    pub(crate) flags: libc::c_int,
+    pub(crate) arg: *mut libc::c_void,
+    pub(crate) ptid: *mut libc::pid_t,
+    pub(crate) tls: *mut libc::c_void,
+    pub(crate) ctid: *mut libc::c_void,
+}
+
 pub(crate) trait LocalTaskProvider {
     unsafe fn create(
         &mut self,
@@ -107,6 +125,11 @@ pub(crate) trait LocalTaskProvider {
     ) -> libc::c_int;
 
     unsafe fn join(&mut self, thread: PthreadT, retval: *mut *mut libc::c_void) -> libc::c_int;
+
+    #[allow(dead_code)]
+    unsafe fn clone_thread(&mut self, _args: CloneArgs) -> Result<CloneTask, libc::c_int> {
+        Err(libc::ENOSYS)
+    }
 
     unsafe fn wake(&mut self, handle: ParkingHandle) -> libc::c_int;
 
@@ -188,13 +211,16 @@ impl LocalTaskProvider for ThreadTaskProvider {
 }
 
 mod coro {
-    use super::{LocalTaskProvider, ParkingHandle, SwitchMode, SwitchResult, TaskChoice};
+    use super::{
+        CloneArgs, CloneTask, LocalTaskProvider, ParkingHandle, SwitchMode, SwitchResult,
+        TaskChoice,
+    };
     use crate::{AttrT, PthreadT, StartArg};
     use corosensei::{Coroutine, CoroutineResult, stack::DefaultStack};
     use std::cell::Cell;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap as HashMap;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
     enum CoroYield {
         Yielded,
@@ -227,40 +253,7 @@ mod coro {
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     unsafe fn set_fs_base(_base: usize) {}
 
-    #[cfg(target_os = "linux")]
-    unsafe fn futex_wait(addr: *const AtomicI32, expected: i32) {
-        const FUTEX_WAIT_PRIVATE: libc::c_int = 128;
-        loop {
-            let r = libc::syscall(
-                libc::SYS_futex,
-                addr as *const i32,
-                FUTEX_WAIT_PRIVATE,
-                expected,
-                core::ptr::null::<libc::timespec>(),
-            );
-            if r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN) {
-                return;
-            }
-            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                return;
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    unsafe fn futex_wake(addr: *const AtomicI32) {
-        const FUTEX_WAKE_PRIVATE: libc::c_int = 129;
-        libc::syscall(libc::SYS_futex, addr as *const i32, FUTEX_WAKE_PRIVATE, 1);
-    }
-
-    unsafe extern "C" {
-        fn pthread_attr_getdetachstate(attr: *const AttrT, state: *mut libc::c_int) -> libc::c_int;
-    }
-
-    thread_local! {
-        static CORO_CONTEXT: Cell<*const CoroContext> =
-            const { Cell::new(core::ptr::null()) };
-    }
+    static CORO_CONTEXT: AtomicPtr<CoroContext> = AtomicPtr::new(core::ptr::null_mut());
 
     struct CoroContext {
         yielder: Cell<*const corosensei::Yielder<(), CoroYield>>,
@@ -278,61 +271,9 @@ mod coro {
         }
     }
 
-    struct ShadowThread {
-        state: AtomicI32,
-        pthread: PthreadT,
-        tid: libc::pid_t,
-        fs_base: usize,
-    }
-
-    impl ShadowThread {
-        unsafe fn new() -> *mut Self {
-            Box::into_raw(Box::new(Self {
-                state: AtomicI32::new(0),
-                pthread: core::mem::zeroed(),
-                tid: 0,
-                fs_base: 0,
-            }))
-        }
-
-        unsafe fn shutdown(shadow: *mut Self) {
-            if shadow.is_null() {
-                return;
-            }
-
-            (*shadow).state.store(2, Ordering::Release);
-            futex_wake(std::ptr::addr_of!((*shadow).state));
-
-            crate::with_internal_depth(|| {
-                (crate::rpt().join)((*shadow).pthread, core::ptr::null_mut())
-            });
-
-            drop(Box::from_raw(shadow));
-        }
-    }
-
-    extern "C" fn shadow_thread_main(raw: *mut libc::c_void) -> *mut libc::c_void {
-        unsafe {
-            let shadow = raw as *mut ShadowThread;
-
-            (*shadow).pthread = libc::pthread_self();
-            (*shadow).tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
-            (*shadow).fs_base = get_fs_base();
-            (*shadow).state.store(1, Ordering::Release);
-            futex_wake(std::ptr::addr_of!((*shadow).state));
-
-            while (*shadow).state.load(Ordering::Acquire) != 2 {
-                futex_wait(std::ptr::addr_of!((*shadow).state), 1);
-            }
-
-            core::ptr::null_mut()
-        }
-    }
-
     struct CoroTask {
         coroutine: Coroutine<(), CoroYield, *mut libc::c_void>,
         context: Rc<CoroContext>,
-        shadow: *mut ShadowThread,
         retval: Option<*mut libc::c_void>,
         tid: libc::pid_t,
     }
@@ -350,67 +291,6 @@ mod coro {
             }
         }
 
-        unsafe fn create_shadow(
-            &mut self,
-            attr: *const AttrT,
-        ) -> Result<(*mut ShadowThread, PthreadT, libc::pid_t, usize), libc::c_int> {
-            let mut detached = false;
-            if !attr.is_null() {
-                let mut detach_state = 0;
-                let r = crate::with_internal_depth(|| {
-                    pthread_attr_getdetachstate(attr, &mut detach_state)
-                });
-                if r == 0 {
-                    detached = detach_state == libc::PTHREAD_CREATE_DETACHED;
-                }
-            }
-
-            let shadow = ShadowThread::new();
-            let mut shadow_pt: PthreadT = core::mem::zeroed();
-            let mut attr_copy = core::mem::MaybeUninit::<AttrT>::uninit();
-            let create_attr = if detached && !attr.is_null() {
-                attr_copy.write(core::ptr::read(attr));
-                let attr_copy_ptr = attr_copy.as_mut_ptr();
-                crate::with_internal_depth(|| {
-                    libc::pthread_attr_setdetachstate(attr_copy_ptr, libc::PTHREAD_CREATE_JOINABLE)
-                });
-                attr_copy_ptr as *const AttrT
-            } else {
-                attr
-            };
-            #[cfg(feature = "asan")]
-            let r = crate::with_internal_depth(|| {
-                libc::pthread_create(
-                    &mut shadow_pt,
-                    create_attr,
-                    shadow_thread_main,
-                    shadow.cast(),
-                )
-            });
-            #[cfg(not(feature = "asan"))]
-            let r = crate::with_internal_depth(|| {
-                (crate::rpt().create)(
-                    &mut shadow_pt,
-                    create_attr,
-                    shadow_thread_main,
-                    shadow.cast(),
-                )
-            });
-            if r != 0 {
-                drop(Box::from_raw(shadow));
-                return Err(r);
-            }
-
-            while (*shadow).state.load(Ordering::Acquire) == 0 {
-                futex_wait(std::ptr::addr_of!((*shadow).state), 0);
-            }
-            let pt = (*shadow).pthread;
-            let tid = (*shadow).tid;
-            let fs_base = (*shadow).fs_base;
-
-            Ok((shadow, pt, tid, fs_base))
-        }
-
         unsafe fn resume_task(&mut self, pt: PthreadT) {
             let Some(mut task) = self.tasks.remove(&pt) else {
                 return;
@@ -419,6 +299,7 @@ mod coro {
                 self.tasks.insert(pt, task);
                 return;
             }
+            #[cfg(not(feature = "instrumented-libc"))]
             let previous_pt = crate::MY_PT.with(|c| {
                 let previous = *c.borrow();
                 *c.borrow_mut() = pt;
@@ -434,12 +315,13 @@ mod coro {
                 }
             }
             set_fs_base(host_fs_base);
+            #[cfg(not(feature = "instrumented-libc"))]
             crate::MY_PT.with(|c| *c.borrow_mut() = previous_pt);
             self.tasks.insert(pt, task);
         }
 
         pub(crate) unsafe fn suspend_current() {
-            let ctx = CORO_CONTEXT.with(|cell| cell.get());
+            let ctx = CORO_CONTEXT.load(Ordering::Acquire);
             if ctx.is_null() {
                 return;
             }
@@ -453,21 +335,15 @@ mod coro {
             (&*yielder).suspend(CoroYield::Yielded);
         }
 
-        unsafe fn finish_task(&mut self, mut task: CoroTask) {
-            ShadowThread::shutdown(task.shadow);
-            task.shadow = core::ptr::null_mut();
+        unsafe fn finish_task(&mut self, task: CoroTask) {
             core::mem::forget(task);
         }
     }
 
     impl Drop for CoroTaskProvider {
         fn drop(&mut self) {
-            for (_, mut task) in self.tasks.drain() {
-                unsafe {
-                    ShadowThread::shutdown(task.shadow);
-                    task.shadow = core::ptr::null_mut();
-                    core::mem::forget(task);
-                }
+            for (_, task) in std::mem::take(&mut self.tasks) {
+                core::mem::forget(task);
             }
         }
     }
@@ -479,29 +355,52 @@ mod coro {
             attr: *const AttrT,
             start_arg: *mut StartArg,
         ) -> libc::c_int {
-            let (shadow, pt, tid, fs_base) = match self.create_shadow(attr) {
-                Ok(shadow) => shadow,
-                Err(r) => return r,
-            };
-            *thread = pt;
-            let routine = (*start_arg).routine;
-            let arg = (*start_arg).arg;
-            (*start_arg).ready = true;
-            let context = Rc::new(CoroContext::new(fs_base));
+            let mut native: PthreadT = core::mem::zeroed();
+            let r = crate::with_internal_depth(|| {
+                (crate::rpt().create)(&mut native, attr, crate::trampoline, start_arg.cast())
+            });
+            if r == 0 {
+                *thread = native;
+            }
+            r
+        }
+
+        unsafe fn clone_thread(&mut self, args: CloneArgs) -> Result<CloneTask, libc::c_int> {
+            let CloneArgs {
+                func,
+                stack: _stack,
+                flags: _flags,
+                arg,
+                ptid,
+                tls,
+                ctid: _ctid,
+            } = args;
+            if tls.is_null() {
+                return Err(libc::EINVAL);
+            }
+
+            let pt = tls as PthreadT;
+            static NEXT_FAKE_TID: AtomicI32 = AtomicI32::new(100_000);
+            let tid = NEXT_FAKE_TID.fetch_add(1, Ordering::Relaxed);
+            if !ptid.is_null() {
+                *ptid = tid;
+            }
+            let context = Rc::new(CoroContext::new(tls as usize));
             let context_for_coro = context.clone();
 
             let coroutine = Coroutine::with_stack(
                 DefaultStack::new(2 * 1024 * 1024).unwrap(),
                 move |yielder, ()| {
                     context_for_coro.yielder.set(yielder as *const _);
-                    CORO_CONTEXT.with(|cell| cell.set(Rc::as_ptr(&context_for_coro)));
+                    CORO_CONTEXT.store(Rc::as_ptr(&context_for_coro).cast_mut(), Ordering::Release);
+                    #[cfg(not(feature = "instrumented-libc"))]
                     crate::MY_PT.with(|c| *c.borrow_mut() = pt);
-                    let retval = routine(arg);
+                    let _ = func(arg);
                     crate::do_thread_exit(pt);
                     context_for_coro.fs_base.set(get_fs_base());
-                    CORO_CONTEXT.with(|cell| cell.set(core::ptr::null()));
+                    CORO_CONTEXT.store(core::ptr::null_mut(), Ordering::Release);
                     set_fs_base(context_for_coro.host_fs_base.get());
-                    retval
+                    core::ptr::null_mut()
                 },
             );
             self.tasks.insert(
@@ -509,12 +408,11 @@ mod coro {
                 CoroTask {
                     coroutine,
                     context,
-                    shadow,
                     retval: None,
                     tid,
                 },
             );
-            0
+            Ok(CloneTask { pthread: pt, tid })
         }
 
         unsafe fn join(&mut self, thread: PthreadT, retval: *mut *mut libc::c_void) -> libc::c_int {
@@ -557,7 +455,7 @@ mod coro {
                 };
             }
 
-            let in_coro = CORO_CONTEXT.with(|cell| !cell.get().is_null());
+            let in_coro = !CORO_CONTEXT.load(Ordering::Acquire).is_null();
             if in_coro {
                 self.requested_next = Some(next);
                 Self::suspend_current();
@@ -1269,6 +1167,14 @@ impl ProcessTaskProvider {
         self.prepare_exec();
         let (_owned_env, merged_envp) = envp_with_rsched_vars(envp);
         crate::with_internal_depth(|| libc::execve(path, argv, merged_envp.as_ptr()))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) unsafe fn clone_thread(
+        &mut self,
+        args: CloneArgs,
+    ) -> Result<CloneTask, libc::c_int> {
+        self.inner.clone_thread(args)
     }
 }
 

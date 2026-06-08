@@ -64,6 +64,7 @@ impl LlvmModulePass for RschedAtomicsPass {
         changed |= instrument_atomics(module);
         if self.musl_libc {
             changed |= wrap_musl_pthread_implementations(module);
+            changed |= rewrite_clone_calls(module);
         }
         if self.direct_pthread {
             changed |= rewrite_pthread_calls(module);
@@ -321,13 +322,19 @@ fn rewrite_function_uses(
             let mut inst = bb.get_first_instruction();
             while let Some(i) = inst {
                 inst = i.get_next_instruction();
-                let Ok(call) = CallSiteValue::try_from(i) else {
-                    continue;
-                };
-                if call.get_called_fn_value() != from {
+                if CallSiteValue::try_from(i).is_err() {
                     continue;
                 }
                 let callee_operand = i.get_num_operands() - 1;
+                let Some(callee) = i
+                    .get_operand(callee_operand)
+                    .and_then(|operand| operand.left())
+                else {
+                    continue;
+                };
+                if callee.as_value_ref() != from.as_value_ref() {
+                    continue;
+                }
                 unsafe {
                     LLVMSetOperand(i.as_value_ref(), callee_operand, to.as_value_ref());
                 }
@@ -338,6 +345,16 @@ fn rewrite_function_uses(
         function = func.get_next_function();
     }
     changed
+}
+
+fn rewrite_clone_calls(module: &mut Module<'_>) -> bool {
+    let Some(old) = module.get_function("__clone") else {
+        return false;
+    };
+    let new = module
+        .get_function("rsched_clone")
+        .unwrap_or_else(|| module.add_function("rsched_clone", old.get_type(), None));
+    rewrite_function_uses(module, old, new)
 }
 
 const PTHREAD_REWRITES: &[(&str, &str)] = &[

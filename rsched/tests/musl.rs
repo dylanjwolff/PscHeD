@@ -326,7 +326,6 @@ fn musl_libc_test_with_preload() {
 }
 
 #[test]
-#[cfg(not(feature = "coro"))]
 fn musl_libc_test_with_instrumented_libc() {
     require_program("clang-17");
     require_program("opt-17");

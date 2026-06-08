@@ -197,6 +197,12 @@ int __pthread_mutex_lock(pthread_mutex_t *mutex) {
 
 extern __typeof(__pthread_mutex_lock) pthread_mutex_lock
     __attribute__((weak, alias("__pthread_mutex_lock")));
+
+int __clone(int (*func)(void *), void *stack, int flags, void *arg, int *ptid, void *tls, int *ctid);
+
+int create_with_clone(int (*func)(void *), void *stack, void *arg, int *ptid, void *tls, int *ctid) {
+    return __clone(func, stack, 0, arg, ptid, tls, ctid);
+}
 "#
 }
 
@@ -420,6 +426,10 @@ fn musl_libc_mode_wraps_pthread_implementation_and_weak_alias() {
     assert!(
         ir.contains("call void @rsched_atomic_instrument"),
         "original musl atomics were not instrumented:\n{ir}"
+    );
+    assert!(
+        ir.contains("@rsched_clone"),
+        "musl mode did not rewrite __clone calls:\n{ir}"
     );
 }
 

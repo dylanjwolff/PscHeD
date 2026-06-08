@@ -25,6 +25,8 @@ mod fuzzing;
 mod seccomp;
 mod task_provider;
 mod tsan;
+#[cfg(all(feature = "instrumented-libc", feature = "coro"))]
+use task_provider::CloneArgs;
 use task_provider::{
     ParkingHandle, ProcessTaskProvider, SwitchMode, SwitchResult, TaskChoice, TaskHandle,
     deactivate_current_domain_tasks, default_task_provider, exit_current_domain,
@@ -39,6 +41,7 @@ type BarrierT = libc::pthread_barrier_t;
 type AttrT = libc::pthread_attr_t;
 type MutexAttrT = libc::pthread_mutexattr_t;
 type StartRoutine = unsafe extern "C" fn(*mut libc::c_void) -> *mut libc::c_void;
+type CloneStart = unsafe extern "C" fn(*mut libc::c_void) -> libc::c_int;
 
 // ── Thread descriptor ─────────────────────────────────────────────────────
 
@@ -568,7 +571,7 @@ struct RealPt {
     create: unsafe extern "C" fn(
         *mut PthreadT,
         *const AttrT,
-        unsafe extern "C" fn(*mut libc::c_void) -> *mut libc::c_void,
+        StartRoutine,
         *mut libc::c_void,
     ) -> libc::c_int,
     join: unsafe extern "C" fn(PthreadT, *mut *mut libc::c_void) -> libc::c_int,
@@ -590,11 +593,57 @@ unsafe extern "C" {
     fn instrumented_libc_create(
         thread: *mut PthreadT,
         attr: *const AttrT,
-        start: unsafe extern "C" fn(*mut libc::c_void) -> *mut libc::c_void,
+        start: StartRoutine,
         arg: *mut libc::c_void,
     ) -> libc::c_int;
     #[link_name = "__rsched_real_pthread_join"]
     fn instrumented_libc_join(thread: PthreadT, retval: *mut *mut libc::c_void) -> libc::c_int;
+    #[cfg(not(feature = "coro"))]
+    #[link_name = "__clone"]
+    fn real_clone(
+        func: CloneStart,
+        stack: *mut libc::c_void,
+        flags: libc::c_int,
+        arg: *mut libc::c_void,
+        ptid: *mut libc::pid_t,
+        tls: *mut libc::c_void,
+        ctid: *mut libc::c_void,
+    ) -> libc::c_int;
+}
+
+#[cfg(all(feature = "instrumented-libc", not(feature = "coro")))]
+struct RealCloneStart {
+    state: AtomicI32,
+    func: CloneStart,
+    arg: *mut libc::c_void,
+    tls: *mut libc::c_void,
+}
+
+#[cfg(all(feature = "instrumented-libc", not(feature = "coro")))]
+unsafe extern "C" fn real_clone_trampoline(raw: *mut libc::c_void) -> libc::c_int {
+    while (*raw.cast::<RealCloneStart>())
+        .state
+        .load(Ordering::Acquire)
+        == 0
+    {
+        std::hint::spin_loop();
+    }
+    let start = Box::from_raw(raw.cast::<RealCloneStart>());
+    (start.func)(start.arg)
+}
+
+#[cfg(all(feature = "instrumented-libc", not(feature = "coro")))]
+unsafe fn register_real_cloned_thread(tls: *mut libc::c_void, tid: libc::pid_t) {
+    if tls.is_null() {
+        return;
+    }
+    let pt = tls as PthreadT;
+    rsched_glock();
+    if !st().info.contains_key(&pt) {
+        st().add(Thread::new_with_tid(pt, tid));
+        st().task(pt).set_startup_done(true);
+    }
+    rsched_gunlock();
 }
 
 unsafe fn rpt() -> &'static RealPt {
@@ -1205,12 +1254,19 @@ pub(crate) extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void
 // ── rsched_pthread_create ─────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
+#[allow(unreachable_code)]
 pub unsafe extern "C" fn rsched_pthread_create(
     thread: *mut PthreadT,
     attr: *const AttrT,
     start_routine: StartRoutine,
     arg: *mut libc::c_void,
 ) -> libc::c_int {
+    #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
+    {
+        rsched_activate_instrumented_libc();
+        return with_internal_depth(|| (rpt().create)(thread, attr, start_routine, arg));
+    }
+
     ensure_init();
 
     #[cfg(feature = "tsan")]
@@ -1274,6 +1330,87 @@ pub unsafe extern "C" fn rsched_pthread_create(
     st().pending_child = Some((sa, *thread));
     rsched_gunlock();
     r
+}
+
+#[cfg(feature = "instrumented-libc")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_clone(
+    func: CloneStart,
+    stack: *mut libc::c_void,
+    flags: libc::c_int,
+    arg: *mut libc::c_void,
+    ptid: *mut libc::pid_t,
+    tls: *mut libc::c_void,
+    ctid: *mut libc::c_void,
+) -> libc::c_int {
+    rsched_activate_instrumented_libc();
+
+    #[cfg(not(feature = "coro"))]
+    {
+        if is_in_rsched() {
+            return with_internal_depth(|| real_clone(func, stack, flags, arg, ptid, tls, ctid));
+        }
+        ensure_init();
+        let start = Box::into_raw(Box::new(RealCloneStart {
+            state: AtomicI32::new(0),
+            func,
+            arg,
+            tls,
+        }));
+        let ret = with_internal_depth(|| {
+            real_clone(
+                real_clone_trampoline,
+                stack,
+                flags,
+                start.cast(),
+                ptid,
+                tls,
+                ctid,
+            )
+        });
+        if ret < 0 {
+            drop(Box::from_raw(start));
+        } else {
+            register_real_cloned_thread(tls, ret);
+            (*start).state.store(1, Ordering::Release);
+        }
+        return ret;
+    }
+
+    #[cfg(feature = "coro")]
+    {
+        ensure_init();
+        rsched_glock();
+        let result = st().task_provider.clone_thread(CloneArgs {
+            func,
+            stack,
+            flags,
+            arg,
+            ptid,
+            tls,
+            ctid,
+        });
+        let ret = match result {
+            Ok(task) => {
+                st().add(Thread::new_with_tid(task.pthread, task.tid));
+                st().task(task.pthread).set_startup_done(true);
+                if st().task_provider.starts_waiting() {
+                    st().task(task.pthread).set_waiting(true);
+                }
+                st().set_event(
+                    my_pt(),
+                    Event {
+                        instr_addr: return_address(),
+                        kind: EventKind::ThreadCreate,
+                    },
+                );
+                task.tid
+            }
+            Err(errno) => -errno,
+        };
+        rsched_gunlock();
+        ret
+    }
 }
 
 // ── rsched_pthread_join ───────────────────────────────────────────────────
