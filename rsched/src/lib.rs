@@ -118,6 +118,8 @@ struct State {
     /// signal (if not already fired), frees the StartArg, and marks the child's
     /// startup_done = true.
     pending_child: Option<(*mut StartArg, PthreadT)>,
+    #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
+    pending_pthread_clones: Vec<PthreadT>,
 }
 
 impl State {
@@ -135,6 +137,8 @@ impl State {
             conds: HashMap::new(),
             barriers: HashMap::new(),
             pending_child: None,
+            #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
+            pending_pthread_clones: Vec::new(),
         }
     }
 
@@ -320,6 +324,31 @@ impl State {
 
     fn clear_event(&mut self, pt: PthreadT) {
         self.t(pt).next_event = None;
+    }
+
+    #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
+    unsafe fn attach_pthread_to_latest_clone(&mut self, pthread: PthreadT) {
+        let Some(task_key) = self.pending_pthread_clones.pop().or_else(|| {
+            self.threads
+                .iter()
+                .copied()
+                .filter(|key| (*key as usize) >= 1_000_000)
+                .max_by_key(|key| *key as usize)
+        }) else {
+            return;
+        };
+        if task_key == pthread {
+            return;
+        }
+        let Some(mut thread) = self.info.remove(&task_key) else {
+            return;
+        };
+        self.threads.retain(|&x| x != task_key);
+        thread.pthread = pthread;
+        self.threads.push(pthread);
+        self.info.insert(pthread, thread);
+        self.task_provider
+            .attach_pthread(task_key as usize, pthread);
     }
 
     // ── mutex helpers ─────────────────────────────────────────────────
@@ -611,41 +640,6 @@ unsafe extern "C" {
     ) -> libc::c_int;
 }
 
-#[cfg(all(feature = "instrumented-libc", not(feature = "coro")))]
-struct RealCloneStart {
-    state: AtomicI32,
-    func: CloneStart,
-    arg: *mut libc::c_void,
-    tls: *mut libc::c_void,
-}
-
-#[cfg(all(feature = "instrumented-libc", not(feature = "coro")))]
-unsafe extern "C" fn real_clone_trampoline(raw: *mut libc::c_void) -> libc::c_int {
-    while (*raw.cast::<RealCloneStart>())
-        .state
-        .load(Ordering::Acquire)
-        == 0
-    {
-        std::hint::spin_loop();
-    }
-    let start = Box::from_raw(raw.cast::<RealCloneStart>());
-    (start.func)(start.arg)
-}
-
-#[cfg(all(feature = "instrumented-libc", not(feature = "coro")))]
-unsafe fn register_real_cloned_thread(tls: *mut libc::c_void, tid: libc::pid_t) {
-    if tls.is_null() {
-        return;
-    }
-    let pt = tls as PthreadT;
-    rsched_glock();
-    if !st().info.contains_key(&pt) {
-        st().add(Thread::new_with_tid(pt, tid));
-        st().task(pt).set_startup_done(true);
-    }
-    rsched_gunlock();
-}
-
 unsafe fn rpt() -> &'static RealPt {
     REAL_PT.get_or_init(|| {
         #[cfg(feature = "instrumented-libc")]
@@ -883,6 +877,8 @@ static INSTRUMENTED_LIBC_READY: AtomicBool = AtomicBool::new(false);
 static INSTRUMENTED_DEPTH_TIDS: [AtomicI32; 128] = [const { AtomicI32::new(0) }; 128];
 #[cfg(feature = "instrumented-libc")]
 static INSTRUMENTED_DEPTHS: [AtomicU32; 128] = [const { AtomicU32::new(0) }; 128];
+#[cfg(all(feature = "instrumented-libc", feature = "coro"))]
+static PTHREAD_CREATE_DEPTH: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(feature = "instrumented-libc")]
 #[unsafe(no_mangle)]
@@ -1264,7 +1260,16 @@ pub unsafe extern "C" fn rsched_pthread_create(
     #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
     {
         rsched_activate_instrumented_libc();
-        return with_internal_depth(|| (rpt().create)(thread, attr, start_routine, arg));
+        PTHREAD_CREATE_DEPTH.fetch_add(1, Ordering::AcqRel);
+        let r = with_internal_depth(|| (rpt().create)(thread, attr, start_routine, arg));
+        PTHREAD_CREATE_DEPTH.fetch_sub(1, Ordering::AcqRel);
+        if r == 0 {
+            ensure_init();
+            rsched_glock();
+            st().attach_pthread_to_latest_clone(*thread);
+            rsched_gunlock();
+        }
+        return r;
     }
 
     ensure_init();
@@ -1347,34 +1352,7 @@ pub unsafe extern "C" fn rsched_clone(
 
     #[cfg(not(feature = "coro"))]
     {
-        if is_in_rsched() {
-            return with_internal_depth(|| real_clone(func, stack, flags, arg, ptid, tls, ctid));
-        }
-        ensure_init();
-        let start = Box::into_raw(Box::new(RealCloneStart {
-            state: AtomicI32::new(0),
-            func,
-            arg,
-            tls,
-        }));
-        let ret = with_internal_depth(|| {
-            real_clone(
-                real_clone_trampoline,
-                stack,
-                flags,
-                start.cast(),
-                ptid,
-                tls,
-                ctid,
-            )
-        });
-        if ret < 0 {
-            drop(Box::from_raw(start));
-        } else {
-            register_real_cloned_thread(tls, ret);
-            (*start).state.store(1, Ordering::Release);
-        }
-        return ret;
+        return with_internal_depth(|| real_clone(func, stack, flags, arg, ptid, tls, ctid));
     }
 
     #[cfg(feature = "coro")]
@@ -1392,10 +1370,14 @@ pub unsafe extern "C" fn rsched_clone(
         });
         let ret = match result {
             Ok(task) => {
-                st().add(Thread::new_with_tid(task.pthread, task.tid));
-                st().task(task.pthread).set_startup_done(true);
+                let task_key = task.task_key as PthreadT;
+                st().add(Thread::new_with_tid(task_key, task.tid));
+                if PTHREAD_CREATE_DEPTH.load(Ordering::Acquire) != 0 {
+                    st().pending_pthread_clones.push(task_key);
+                }
+                st().task(task_key).set_startup_done(true);
                 if st().task_provider.starts_waiting() {
-                    st().task(task.pthread).set_waiting(true);
+                    st().task(task_key).set_waiting(true);
                 }
                 st().set_event(
                     my_pt(),

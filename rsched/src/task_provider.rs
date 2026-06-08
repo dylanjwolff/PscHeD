@@ -100,7 +100,7 @@ pub(crate) enum SwitchResult {
 
 #[allow(dead_code)]
 pub(crate) struct CloneTask {
-    pub(crate) pthread: PthreadT,
+    pub(crate) task_key: usize,
     pub(crate) tid: libc::pid_t,
 }
 
@@ -130,6 +130,9 @@ pub(crate) trait LocalTaskProvider {
     unsafe fn clone_thread(&mut self, _args: CloneArgs) -> Result<CloneTask, libc::c_int> {
         Err(libc::ENOSYS)
     }
+
+    #[allow(dead_code)]
+    unsafe fn attach_pthread(&mut self, _task_key: usize, _pthread: PthreadT) {}
 
     unsafe fn wake(&mut self, handle: ParkingHandle) -> libc::c_int;
 
@@ -220,7 +223,7 @@ mod coro {
     use std::cell::Cell;
     use std::collections::BTreeMap as HashMap;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
+    use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 
     enum CoroYield {
         Yielded,
@@ -259,14 +262,16 @@ mod coro {
         yielder: Cell<*const corosensei::Yielder<(), CoroYield>>,
         fs_base: Cell<usize>,
         host_fs_base: Cell<usize>,
+        task_key: Cell<usize>,
     }
 
     impl CoroContext {
-        fn new(fs_base: usize) -> Self {
+        fn new(fs_base: usize, task_key: usize) -> Self {
             Self {
                 yielder: Cell::new(core::ptr::null()),
                 fs_base: Cell::new(fs_base),
                 host_fs_base: Cell::new(0),
+                task_key: Cell::new(task_key),
             }
         }
     }
@@ -279,8 +284,8 @@ mod coro {
     }
 
     pub(crate) struct CoroTaskProvider {
-        tasks: HashMap<PthreadT, CoroTask>,
-        requested_next: Option<PthreadT>,
+        tasks: HashMap<usize, CoroTask>,
+        requested_next: Option<usize>,
     }
 
     impl CoroTaskProvider {
@@ -291,18 +296,18 @@ mod coro {
             }
         }
 
-        unsafe fn resume_task(&mut self, pt: PthreadT) {
-            let Some(mut task) = self.tasks.remove(&pt) else {
+        unsafe fn resume_task(&mut self, task_key: usize) {
+            let Some(mut task) = self.tasks.remove(&task_key) else {
                 return;
             };
             if task.retval.is_some() {
-                self.tasks.insert(pt, task);
+                self.tasks.insert(task_key, task);
                 return;
             }
             #[cfg(not(feature = "instrumented-libc"))]
             let previous_pt = crate::MY_PT.with(|c| {
                 let previous = *c.borrow();
-                *c.borrow_mut() = pt;
+                *c.borrow_mut() = task_key as PthreadT;
                 previous
             });
             let host_fs_base = get_fs_base();
@@ -317,7 +322,7 @@ mod coro {
             set_fs_base(host_fs_base);
             #[cfg(not(feature = "instrumented-libc"))]
             crate::MY_PT.with(|c| *c.borrow_mut() = previous_pt);
-            self.tasks.insert(pt, task);
+            self.tasks.insert(task_key, task);
         }
 
         pub(crate) unsafe fn suspend_current() {
@@ -379,13 +384,14 @@ mod coro {
                 return Err(libc::EINVAL);
             }
 
-            let pt = tls as PthreadT;
+            static NEXT_TASK_KEY: AtomicUsize = AtomicUsize::new(1_000_000);
             static NEXT_FAKE_TID: AtomicI32 = AtomicI32::new(100_000);
+            let task_key = NEXT_TASK_KEY.fetch_add(1, Ordering::Relaxed);
             let tid = NEXT_FAKE_TID.fetch_add(1, Ordering::Relaxed);
             if !ptid.is_null() {
                 *ptid = tid;
             }
-            let context = Rc::new(CoroContext::new(tls as usize));
+            let context = Rc::new(CoroContext::new(tls as usize, task_key));
             let context_for_coro = context.clone();
 
             let coroutine = Coroutine::with_stack(
@@ -394,9 +400,10 @@ mod coro {
                     context_for_coro.yielder.set(yielder as *const _);
                     CORO_CONTEXT.store(Rc::as_ptr(&context_for_coro).cast_mut(), Ordering::Release);
                     #[cfg(not(feature = "instrumented-libc"))]
-                    crate::MY_PT.with(|c| *c.borrow_mut() = pt);
+                    crate::MY_PT
+                        .with(|c| *c.borrow_mut() = context_for_coro.task_key.get() as PthreadT);
                     let _ = func(arg);
-                    crate::do_thread_exit(pt);
+                    crate::do_thread_exit(context_for_coro.task_key.get() as PthreadT);
                     context_for_coro.fs_base.set(get_fs_base());
                     CORO_CONTEXT.store(core::ptr::null_mut(), Ordering::Release);
                     set_fs_base(context_for_coro.host_fs_base.get());
@@ -404,7 +411,7 @@ mod coro {
                 },
             );
             self.tasks.insert(
-                pt,
+                task_key,
                 CoroTask {
                     coroutine,
                     context,
@@ -412,11 +419,22 @@ mod coro {
                     tid,
                 },
             );
-            Ok(CloneTask { pthread: pt, tid })
+            Ok(CloneTask { task_key, tid })
+        }
+
+        unsafe fn attach_pthread(&mut self, task_key: usize, pthread: PthreadT) {
+            let Some(task) = self.tasks.remove(&task_key) else {
+                return;
+            };
+            task.context.task_key.set(pthread as usize);
+            self.tasks.insert(pthread as usize, task);
+            if self.requested_next == Some(task_key) {
+                self.requested_next = Some(pthread as usize);
+            }
         }
 
         unsafe fn join(&mut self, thread: PthreadT, retval: *mut *mut libc::c_void) -> libc::c_int {
-            let Some(task) = self.tasks.remove(&thread) else {
+            let Some(task) = self.tasks.remove(&(thread as usize)) else {
                 return 0;
             };
             if !retval.is_null() {
@@ -448,7 +466,8 @@ mod coro {
             if next == caller {
                 return SwitchResult::Done;
             }
-            if !self.tasks.contains_key(&next) {
+            let next_key = next as usize;
+            if !self.tasks.contains_key(&next_key) {
                 return SwitchResult::WakeLocal {
                     pthread: next,
                     suspend_caller: _mode == SwitchMode::SuspendCurrent,
@@ -457,17 +476,17 @@ mod coro {
 
             let in_coro = !CORO_CONTEXT.load(Ordering::Acquire).is_null();
             if in_coro {
-                self.requested_next = Some(next);
+                self.requested_next = Some(next_key);
                 Self::suspend_current();
                 return SwitchResult::Done;
             }
 
-            let mut selected = next;
+            let mut selected = next_key;
             loop {
                 self.resume_task(selected);
                 match self.requested_next.take() {
-                    Some(pt) if pt != caller && self.tasks.contains_key(&pt) => {
-                        selected = pt;
+                    Some(key) if key != caller as usize && self.tasks.contains_key(&key) => {
+                        selected = key;
                     }
                     _ => break,
                 }
@@ -480,7 +499,9 @@ mod coro {
         }
 
         fn task_tid(&self, thread: PthreadT) -> libc::pid_t {
-            self.tasks.get(&thread).map_or(0, |task| task.tid)
+            self.tasks
+                .get(&(thread as usize))
+                .map_or(0, |task| task.tid)
         }
     }
 }
@@ -1175,6 +1196,19 @@ impl ProcessTaskProvider {
         args: CloneArgs,
     ) -> Result<CloneTask, libc::c_int> {
         self.inner.clone_thread(args)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) unsafe fn attach_pthread(&mut self, task_key: usize, pthread: PthreadT) {
+        let ps = PROCESS_SHARED.load(Ordering::Acquire);
+        if !ps.is_null() {
+            for id in 0..(*ps).task_count.min(MAX_TASKS) {
+                if (*ps).tasks[id].pthread == task_key {
+                    (*ps).tasks[id].pthread = pthread as usize;
+                }
+            }
+        }
+        self.inner.attach_pthread(task_key, pthread);
     }
 }
 
