@@ -244,8 +244,8 @@ pub enum SchedulerImpl {
 
 impl SchedulerImpl {
     pub fn new(seed: u64) -> Self {
-        let logging = std::env::var("RSCHED_LOG").is_ok_and(|v| v == "1");
-        let use_dfs = std::env::var("RSCHED_SCHEDULER").is_ok_and(|v| v == "dfs");
+        let logging = env_is("RSCHED_LOG", "1");
+        let use_dfs = env_is("RSCHED_SCHEDULER", "dfs");
         match (use_dfs, logging) {
             (true, true) => Self::LoggingDfs(LoggingScheduler::new(DfsScheduler::new())),
             (true, false) => Self::Dfs(DfsScheduler::new()),
@@ -253,6 +253,25 @@ impl SchedulerImpl {
             (false, false) => Self::Random(RandomWalk::new(seed)),
         }
     }
+}
+
+#[cfg(feature = "instrumented-libc")]
+fn env_is(name: &str, value: &str) -> bool {
+    let Ok(name) = std::ffi::CString::new(name) else {
+        return false;
+    };
+    let ptr = unsafe { libc::getenv(name.as_ptr()) };
+    if ptr.is_null() {
+        return false;
+    }
+
+    let bytes = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_bytes();
+    bytes == value.as_bytes()
+}
+
+#[cfg(not(feature = "instrumented-libc"))]
+fn env_is(name: &str, value: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| v == value)
 }
 
 impl Scheduler for SchedulerImpl {

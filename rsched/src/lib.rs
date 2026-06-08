@@ -11,7 +11,7 @@
 #![feature(link_llvm_intrinsics)]
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
 use std::ptr::addr_of_mut;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
@@ -119,9 +119,11 @@ struct State {
 
 impl State {
     fn new(seed: u64) -> Self {
+        let scheduler = SchedulerImpl::new(seed);
+        let task_provider = default_task_provider();
         State {
-            scheduler: SchedulerImpl::new(seed),
-            task_provider: default_task_provider(),
+            scheduler,
+            task_provider,
             threads: Vec::new(),
             info: HashMap::new(),
             mutexes: HashMap::new(),
@@ -453,6 +455,57 @@ pub unsafe extern "C" fn rsched_note_pthread_mutex_destroy(lock: *mut MutexT) {
     rsched_gunlock();
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_mutexattr_init(attr: *mut MutexAttrT) -> libc::c_int {
+    let r = with_internal_depth(|| libc::pthread_mutexattr_init(attr));
+    if r == 0 {
+        rsched_note_pthread_mutexattr_init(attr);
+    }
+    r
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_mutexattr_settype(
+    attr: *mut MutexAttrT,
+    kind: libc::c_int,
+) -> libc::c_int {
+    let r = with_internal_depth(|| libc::pthread_mutexattr_settype(attr, kind));
+    if r == 0 {
+        rsched_note_pthread_mutexattr_settype(attr, kind);
+    }
+    r
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_mutexattr_destroy(attr: *mut MutexAttrT) -> libc::c_int {
+    let r = with_internal_depth(|| libc::pthread_mutexattr_destroy(attr));
+    if r == 0 {
+        rsched_note_pthread_mutexattr_destroy(attr);
+    }
+    r
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_mutex_init(
+    lock: *mut MutexT,
+    attr: *const MutexAttrT,
+) -> libc::c_int {
+    let r = with_internal_depth(|| libc::pthread_mutex_init(lock, attr));
+    if r == 0 {
+        rsched_note_pthread_mutex_init(lock, attr);
+    }
+    r
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_mutex_destroy(lock: *mut MutexT) -> libc::c_int {
+    let r = with_internal_depth(|| libc::pthread_mutex_destroy(lock));
+    if r == 0 {
+        rsched_note_pthread_mutex_destroy(lock);
+    }
+    r
+}
+
 // ── Globals ───────────────────────────────────────────────────────────────
 
 static mut GMTX: MutexT = libc::PTHREAD_MUTEX_INITIALIZER;
@@ -464,7 +517,14 @@ thread_local! {
 }
 
 fn my_pt() -> PthreadT {
-    MY_PT.with(|c| *c.borrow())
+    #[cfg(feature = "instrumented-libc")]
+    {
+        unsafe { libc::pthread_self() }
+    }
+    #[cfg(not(feature = "instrumented-libc"))]
+    {
+        MY_PT.with(|c| *c.borrow())
+    }
 }
 
 // ── Return-address intrinsic ──────────────────────────────────────────────
@@ -516,39 +576,75 @@ struct RealPt {
 
 static REAL_PT: std::sync::OnceLock<RealPt> = std::sync::OnceLock::new();
 
+#[cfg(feature = "instrumented-libc")]
+unsafe extern "C" {
+    #[link_name = "__rsched_real_pthread_mutex_lock"]
+    fn instrumented_libc_mutex_lock(mutex: *mut MutexT) -> libc::c_int;
+    #[link_name = "__rsched_real_pthread_mutex_unlock"]
+    fn instrumented_libc_mutex_unlock(mutex: *mut MutexT) -> libc::c_int;
+    #[link_name = "__rsched_real_pthread_cond_wait"]
+    fn instrumented_libc_cond_wait(cond: *mut CondT, mutex: *mut MutexT) -> libc::c_int;
+    #[link_name = "__rsched_real_pthread_cond_signal"]
+    fn instrumented_libc_cond_signal(cond: *mut CondT) -> libc::c_int;
+    #[link_name = "__rsched_real_pthread_create"]
+    fn instrumented_libc_create(
+        thread: *mut PthreadT,
+        attr: *const AttrT,
+        start: unsafe extern "C" fn(*mut libc::c_void) -> *mut libc::c_void,
+        arg: *mut libc::c_void,
+    ) -> libc::c_int;
+    #[link_name = "__rsched_real_pthread_join"]
+    fn instrumented_libc_join(thread: PthreadT, retval: *mut *mut libc::c_void) -> libc::c_int;
+}
+
 unsafe fn rpt() -> &'static RealPt {
     REAL_PT.get_or_init(|| {
-        // Try the traditional stub first; on glibc >= 2.34 the symbols live in
-        // libc.so.6 and libpthread.so.0 is a forwarding stub that still responds
-        // to dlsym correctly.  RTLD_NOLOAD avoids loading anything new.
-        let mut lib = libc::dlopen(
-            c"libpthread.so.0".as_ptr(),
-            libc::RTLD_LAZY | libc::RTLD_NOLOAD,
-        );
-        if lib.is_null() {
-            lib = libc::dlopen(c"libc.so.6".as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
-        }
-        assert!(
-            !lib.is_null(),
-            "rsched: cannot resolve libpthread/libc via dlopen"
-        );
-
-        // Helper: look up one symbol and transmute to the target function-pointer
-        // type.  Function pointers and data pointers share the same width on every
-        // platform rsched targets, so the transmute is sound.
-        unsafe fn sym<T: Copy>(lib: *mut libc::c_void, name: &[u8]) -> T {
-            let p = libc::dlsym(lib, name.as_ptr() as *const _);
-            assert!(!p.is_null(), "rsched: dlsym returned null");
-            std::mem::transmute_copy::<*mut libc::c_void, T>(&p)
+        #[cfg(feature = "instrumented-libc")]
+        {
+            RealPt {
+                mutex_lock: instrumented_libc_mutex_lock,
+                mutex_unlock: instrumented_libc_mutex_unlock,
+                cond_wait: instrumented_libc_cond_wait,
+                cond_signal: instrumented_libc_cond_signal,
+                create: instrumented_libc_create,
+                join: instrumented_libc_join,
+            }
         }
 
-        RealPt {
-            mutex_lock: sym(lib, b"pthread_mutex_lock\0"),
-            mutex_unlock: sym(lib, b"pthread_mutex_unlock\0"),
-            cond_wait: sym(lib, b"pthread_cond_wait\0"),
-            cond_signal: sym(lib, b"pthread_cond_signal\0"),
-            create: sym(lib, b"pthread_create\0"),
-            join: sym(lib, b"pthread_join\0"),
+        #[cfg(not(feature = "instrumented-libc"))]
+        {
+            // Try the traditional stub first; on glibc >= 2.34 the symbols live in
+            // libc.so.6 and libpthread.so.0 is a forwarding stub that still responds
+            // to dlsym correctly.  RTLD_NOLOAD avoids loading anything new.
+            let mut lib = libc::dlopen(
+                c"libpthread.so.0".as_ptr(),
+                libc::RTLD_LAZY | libc::RTLD_NOLOAD,
+            );
+            if lib.is_null() {
+                lib = libc::dlopen(c"libc.so.6".as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
+            }
+            assert!(
+                !lib.is_null(),
+                "rsched: cannot resolve libpthread/libc via dlopen"
+            );
+
+            // Helper: look up one symbol and transmute to the target function-pointer
+            // type.  Function pointers and data pointers share the same width on every
+            // platform rsched targets, so the transmute is sound.
+            unsafe fn sym<T: Copy>(lib: *mut libc::c_void, name: &[u8]) -> T {
+                let p = libc::dlsym(lib, name.as_ptr() as *const _);
+                assert!(!p.is_null(), "rsched: dlsym returned null");
+                std::mem::transmute_copy::<*mut libc::c_void, T>(&p)
+            }
+
+            RealPt {
+                mutex_lock: sym(lib, b"pthread_mutex_lock\0"),
+                mutex_unlock: sym(lib, b"pthread_mutex_unlock\0"),
+                cond_wait: sym(lib, b"pthread_cond_wait\0"),
+                cond_signal: sym(lib, b"pthread_cond_signal\0"),
+                create: sym(lib, b"pthread_create\0"),
+                join: sym(lib, b"pthread_join\0"),
+            }
         }
     })
 }
@@ -576,6 +672,7 @@ pub(crate) unsafe fn thread_cond_wait(cond: *mut CondT) {
     tsan::sync_acquire();
 }
 
+#[cfg(not(feature = "instrumented-libc"))]
 extern "C" fn process_atexit() {
     unsafe {
         rsched_process_exit();
@@ -731,22 +828,113 @@ thread_local! {
     static CALL_DEPTH: AtomicU32 = const { AtomicU32::new(0) };
 }
 
+#[cfg(feature = "instrumented-libc")]
+static INSTRUMENTED_LIBC_READY: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "instrumented-libc")]
+static INSTRUMENTED_DEPTH_TIDS: [AtomicI32; 128] = [const { AtomicI32::new(0) }; 128];
+#[cfg(feature = "instrumented-libc")]
+static INSTRUMENTED_DEPTHS: [AtomicU32; 128] = [const { AtomicU32::new(0) }; 128];
+
+#[cfg(feature = "instrumented-libc")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rsched_activate_instrumented_libc() {
+    INSTRUMENTED_LIBC_READY.store(true, Ordering::Release);
+}
+
+#[cfg(feature = "instrumented-libc")]
+fn instrumented_depth_slot() -> usize {
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) as i32 };
+    for (idx, seen) in INSTRUMENTED_DEPTH_TIDS.iter().enumerate() {
+        let value = seen.load(Ordering::Acquire);
+        if value == tid {
+            return idx;
+        }
+        if value == 0
+            && seen
+                .compare_exchange(0, tid, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            return idx;
+        }
+    }
+    0
+}
+
+#[cfg(feature = "instrumented-libc")]
+fn instrumented_depth_fetch_add(delta: u32) -> u32 {
+    INSTRUMENTED_DEPTHS[instrumented_depth_slot()].fetch_add(delta, Ordering::Acquire)
+}
+
+#[cfg(feature = "instrumented-libc")]
+fn instrumented_depth_fetch_sub(delta: u32) -> u32 {
+    INSTRUMENTED_DEPTHS[instrumented_depth_slot()].fetch_sub(delta, Ordering::Release)
+}
+
+#[cfg(feature = "instrumented-libc")]
+fn instrumented_depth_load() -> u32 {
+    INSTRUMENTED_DEPTHS[instrumented_depth_slot()].load(Ordering::Relaxed)
+}
+
+#[inline]
+fn instrumented_libc_ready() -> bool {
+    #[cfg(feature = "instrumented-libc")]
+    {
+        INSTRUMENTED_LIBC_READY.load(Ordering::Acquire)
+    }
+    #[cfg(not(feature = "instrumented-libc"))]
+    {
+        true
+    }
+}
+
 /// Increment depth; return true iff this is the outermost (non-reentrant) call.
 /// Called by the preload interceptors on every entry.
+#[unsafe(no_mangle)]
 pub fn rsched_try_enter() -> bool {
-    CALL_DEPTH.with(|d| d.fetch_add(1, Ordering::Acquire) == 0)
+    if !instrumented_libc_ready() {
+        return false;
+    }
+    #[cfg(feature = "instrumented-libc")]
+    {
+        instrumented_depth_fetch_add(1) == 0
+    }
+    #[cfg(not(feature = "instrumented-libc"))]
+    {
+        CALL_DEPTH.with(|d| d.fetch_add(1, Ordering::Acquire) == 0)
+    }
 }
 
 /// Decrement depth. Called by the preload interceptors on every exit.
+#[unsafe(no_mangle)]
 pub fn rsched_exit() {
+    if !instrumented_libc_ready() {
+        return;
+    }
+    #[cfg(feature = "instrumented-libc")]
+    instrumented_depth_fetch_sub(1);
+    #[cfg(not(feature = "instrumented-libc"))]
     CALL_DEPTH.with(|d| {
         d.fetch_sub(1, Ordering::Release);
     });
 }
 
+// Ubuntu's static libgcc_eh references this glibc loader helper. Instrumented
+// musl builds use panic=abort, so stack unwinding never reaches this fallback.
+#[cfg(feature = "instrumented-libc")]
+#[unsafe(no_mangle)]
+pub extern "C" fn _dl_find_object(
+    _address: *const libc::c_void,
+    _result: *mut libc::c_void,
+) -> libc::c_int {
+    -1
+}
+
 /// Increment depth without checking. Used internally by trampoline/do_thread_exit.
 #[inline]
 fn depth_enter() {
+    #[cfg(feature = "instrumented-libc")]
+    instrumented_depth_fetch_add(1);
+    #[cfg(not(feature = "instrumented-libc"))]
     CALL_DEPTH.with(|d| {
         d.fetch_add(1, Ordering::Acquire);
     });
@@ -755,6 +943,9 @@ fn depth_enter() {
 /// Decrement depth. Paired with depth_enter().
 #[inline]
 fn depth_exit() {
+    #[cfg(feature = "instrumented-libc")]
+    instrumented_depth_fetch_sub(1);
+    #[cfg(not(feature = "instrumented-libc"))]
     CALL_DEPTH.with(|d| {
         d.fetch_sub(1, Ordering::Release);
     });
@@ -762,7 +953,14 @@ fn depth_exit() {
 
 #[inline]
 fn is_in_rsched() -> bool {
-    CALL_DEPTH.with(|d| d.load(Ordering::Relaxed) > 0)
+    #[cfg(feature = "instrumented-libc")]
+    {
+        instrumented_depth_load() > 0
+    }
+    #[cfg(not(feature = "instrumented-libc"))]
+    {
+        CALL_DEPTH.with(|d| d.load(Ordering::Relaxed) > 0)
+    }
 }
 
 #[inline]
@@ -779,6 +977,32 @@ unsafe fn st() -> &'static mut State {
         .expect("rsched not initialised")
 }
 
+#[cfg(feature = "instrumented-libc")]
+unsafe fn seed_from_env() -> u64 {
+    let ptr = libc::getenv(c"RANDOM_SEED".as_ptr());
+    if ptr.is_null() {
+        return 0x12345678abcdu64;
+    }
+
+    let mut seed = 0u64;
+    let mut cursor = ptr.cast::<u8>();
+    while cursor.read().is_ascii_digit() {
+        seed = seed
+            .saturating_mul(10)
+            .saturating_add(u64::from(cursor.read() - b'0'));
+        cursor = cursor.add(1);
+    }
+    seed
+}
+
+#[cfg(not(feature = "instrumented-libc"))]
+fn seed_from_env() -> u64 {
+    std::env::var("RANDOM_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0x12345678abcdu64)
+}
+
 // ── rsched_init ───────────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -789,18 +1013,17 @@ pub unsafe extern "C" fn rsched_init() {
     {
         return;
     }
-    let seed: u64 = std::env::var("RANDOM_SEED")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0x12345678abcdu64);
+    let seed = seed_from_env();
     STATE = Some(State::new(seed));
     let first_process = st().task_provider.current_domain() < 0;
     st().task_provider.register_current_domain(first_process);
+    #[cfg(not(feature = "instrumented-libc"))]
     if first_process {
         with_internal_depth(|| libc::atexit(process_atexit));
     }
 
     let self_pt = libc::pthread_self();
+    #[cfg(not(feature = "instrumented-libc"))]
     MY_PT.with(|c| *c.borrow_mut() = self_pt);
     rsched_glock();
     st().add(Thread::new(self_pt));
@@ -838,6 +1061,7 @@ pub unsafe extern "C" fn rsched_reinit(seed: u64) {
     }
 
     let self_pt = libc::pthread_self();
+    #[cfg(not(feature = "instrumented-libc"))]
     MY_PT.with(|c| *c.borrow_mut() = self_pt);
     rsched_glock();
     st().add(Thread::new(self_pt));
@@ -926,6 +1150,7 @@ pub(crate) extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void
         let arg = sa.arg;
 
         let self_pt = libc::pthread_self();
+        #[cfg(not(feature = "instrumented-libc"))]
         MY_PT.with(|c| *c.borrow_mut() = self_pt);
 
         // Raise CALL_DEPTH before calling any rpt() primitive so that any
@@ -1398,7 +1623,7 @@ unsafe fn schedule_memop(
     size: usize,
     access: AccessKind,
 ) {
-    if is_in_rsched() {
+    if !instrumented_libc_ready() || is_in_rsched() {
         return;
     }
     ensure_init();

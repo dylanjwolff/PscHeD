@@ -5,6 +5,16 @@ use std::process::{Command, Output};
 use std::sync::OnceLock;
 
 static PRELOAD_LIB: OnceLock<PathBuf> = OnceLock::new();
+#[cfg_attr(feature = "coro", allow(dead_code))]
+static INSTRUMENTED_MUSL: OnceLock<InstrumentedMusl> = OnceLock::new();
+
+#[derive(Clone)]
+#[cfg_attr(feature = "coro", allow(dead_code))]
+struct InstrumentedMusl {
+    compiler: PathBuf,
+    plugin: PathBuf,
+    bin_dir: PathBuf,
+}
 
 // Tests that use native sem_wait to coordinate emulated pthreads cannot run
 // until the preload layer also intercepts POSIX semaphores: a native sem_wait
@@ -114,6 +124,105 @@ exec musl-gcc "${args[@]}"
         .clone()
 }
 
+#[cfg_attr(feature = "coro", allow(dead_code))]
+fn build_instrumented_musl() -> InstrumentedMusl {
+    INSTRUMENTED_MUSL
+        .get_or_init(|| {
+            let root = repo_root();
+            let temp = temp_dir();
+            let plugin_target = temp.join("llvm-pass-target");
+            let rsched_target = temp.join("instrumented-rsched-target");
+            let build_dir = temp.join("instrumented-musl-build");
+            let install_dir = temp.join("instrumented-musl-install");
+            std::fs::create_dir_all(&build_dir).expect("create instrumented musl build dir");
+
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+            let mut command = Command::new(&cargo);
+            command
+                .current_dir(&root)
+                .env("CARGO_TARGET_DIR", &plugin_target)
+                .args(["build", "-p", "rsched-llvm-pass"]);
+            run(command, "build the rsched LLVM pass");
+            let plugin = plugin_target.join("debug/librsched_llvm_pass.so");
+            assert!(
+                plugin.exists(),
+                "expected rsched LLVM pass at {}",
+                plugin.display()
+            );
+
+            let mut command = Command::new(&cargo);
+            command
+                .current_dir(&root)
+                .env("CARGO_TARGET_DIR", &rsched_target)
+                .env("CC_x86_64_unknown_linux_musl", "musl-gcc")
+                .env(
+                    "RUSTFLAGS",
+                    append_env_flag(std::env::var_os("RUSTFLAGS"), "-C panic=abort"),
+                )
+                .args([
+                    "build",
+                    "-p",
+                    "rsched",
+                    "--target",
+                    "x86_64-unknown-linux-musl",
+                    "--features",
+                    if cfg!(feature = "coro") {
+                        "instrumented-libc,coro"
+                    } else {
+                        "instrumented-libc"
+                    },
+                ]);
+            run(command, "build rsched for the instrumented musl");
+            let rsched = rsched_target.join("x86_64-unknown-linux-musl/debug/librsched.a");
+
+            let compiler_driver = root.join("musl/instrument-clang.sh");
+            let configure = root.join("musl/musl/configure");
+            let mut command = Command::new(configure);
+            command
+                .current_dir(&build_dir)
+                .env("RSCHED_LLVM_PLUGIN", &plugin)
+                .arg(format!("--prefix={}", install_dir.display()))
+                .arg(format!("--syslibdir={}/lib", install_dir.display()))
+                .arg("--disable-static")
+                .env("CC", &compiler_driver);
+            run(command, "configure instrumented musl");
+
+            let libcc = format!("{} -lgcc -lgcc_eh", rsched.display());
+            let jobs = std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(2)
+                .to_string();
+            let mut command = Command::new("make");
+            command
+                .current_dir(&build_dir)
+                .env("RSCHED_LLVM_PLUGIN", &plugin)
+                .arg(format!("-j{jobs}"))
+                .arg(format!("LIBCC={libcc}"));
+            run(command, "build instrumented musl");
+
+            let mut command = Command::new("make");
+            command
+                .current_dir(&build_dir)
+                .env("RSCHED_LLVM_PLUGIN", &plugin)
+                .arg("install");
+            run(command, "install instrumented musl");
+
+            let bin_dir = install_dir.join("bin");
+            let compiler = bin_dir.join("musl-clang");
+            assert!(
+                compiler.exists(),
+                "expected instrumented musl compiler at {}",
+                compiler.display()
+            );
+            InstrumentedMusl {
+                compiler,
+                plugin,
+                bin_dir,
+            }
+        })
+        .clone()
+}
+
 fn append_env_flag(current: Option<OsString>, extra: &str) -> OsString {
     let mut value = current.unwrap_or_default();
     if !value.is_empty() {
@@ -123,8 +232,15 @@ fn append_env_flag(current: Option<OsString>, extra: &str) -> OsString {
     value
 }
 
-fn build_libc_test(suite: &Path, group: &str, name: &str) -> PathBuf {
-    let output = temp_dir().join(format!("{group}-{name}"));
+fn build_libc_test(
+    suite: &Path,
+    group: &str,
+    name: &str,
+    compiler: &Path,
+    variant: &str,
+    instrumented_musl: Option<&InstrumentedMusl>,
+) -> PathBuf {
+    let output = temp_dir().join(format!("{variant}-{group}-{name}"));
     let source = suite.join("src").join(group).join(format!("{name}.c"));
     let print = suite.join("src/common/print.c");
     assert!(
@@ -133,7 +249,12 @@ fn build_libc_test(suite: &Path, group: &str, name: &str) -> PathBuf {
         source.display()
     );
 
-    let mut command = Command::new("musl-gcc");
+    let mut command = Command::new(compiler);
+    if let Some(musl) = instrumented_musl {
+        command
+            .env("RSCHED_LLVM_PLUGIN", &musl.plugin)
+            .env("PATH", prepend_path(&musl.bin_dir));
+    }
     command
         .args([
             "-std=c99",
@@ -148,6 +269,14 @@ fn build_libc_test(suite: &Path, group: &str, name: &str) -> PathBuf {
         .arg(&print);
     run(command, &format!("compile libc-test {group}/{name}"));
     output
+}
+
+fn prepend_path(dir: &Path) -> OsString {
+    let mut paths = vec![dir.to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    std::env::join_paths(paths).expect("construct PATH for instrumented musl")
 }
 
 fn run_preloaded(binary: &Path, preload: &Path, name: &str) {
@@ -191,7 +320,41 @@ fn musl_libc_test_with_preload() {
 
     let preload = build_musl_preload();
     for &(group, name) in LIBC_TEST_CASES {
-        let binary = build_libc_test(&suite, group, name);
+        let binary = build_libc_test(&suite, group, name, Path::new("musl-gcc"), "preload", None);
         run_preloaded(&binary, &preload, &format!("{group}/{name}"));
+    }
+}
+
+#[test]
+#[cfg(not(feature = "coro"))]
+fn musl_libc_test_with_instrumented_libc() {
+    require_program("clang-17");
+    require_program("opt-17");
+    require_program("make");
+    require_program("musl-gcc");
+    require_program("timeout");
+
+    let suite = repo_root().join("musl/libc-test");
+    assert!(
+        suite.join("src/common/test.h").exists(),
+        "libc-test submodule is missing; run git submodule update --init --recursive"
+    );
+
+    let musl = build_instrumented_musl();
+    for &(group, name) in LIBC_TEST_CASES {
+        let binary = build_libc_test(
+            &suite,
+            group,
+            name,
+            &musl.compiler,
+            "instrumented",
+            Some(&musl),
+        );
+        let mut command = Command::new("timeout");
+        command.args(["--signal=KILL", "20s"]).arg(&binary);
+        run(
+            command,
+            &format!("run libc-test {group}/{name} with instrumented musl"),
+        );
     }
 }

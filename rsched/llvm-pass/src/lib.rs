@@ -1,4 +1,6 @@
-use llvm_plugin::inkwell::llvm_sys::core::{LLVMSetOperand, LLVMSetValueName2};
+use llvm_plugin::inkwell::llvm_sys::core::{
+    LLVMGetNamedGlobalAlias, LLVMSetOperand, LLVMSetValueName2,
+};
 use llvm_plugin::inkwell::module::Module;
 use llvm_plugin::inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicTypeEnum};
 use llvm_plugin::inkwell::values::{
@@ -15,6 +17,7 @@ const PASS_NAME: &str = "rsched-atomics";
 #[derive(Clone, Copy, Debug)]
 struct RschedAtomicsPass {
     direct_pthread: bool,
+    musl_libc: bool,
 }
 
 #[llvm_plugin::plugin(name = "rsched_llvm_pass", version = "0.1.0")]
@@ -32,11 +35,19 @@ fn parse_pass_name(name: &str) -> Option<RschedAtomicsPass> {
     if name == PASS_NAME {
         return Some(RschedAtomicsPass {
             direct_pthread: false,
+            musl_libc: false,
         });
     }
     if name == "rsched-atomics<direct-pthread>" {
         return Some(RschedAtomicsPass {
             direct_pthread: true,
+            musl_libc: false,
+        });
+    }
+    if name == "rsched-atomics<musl-libc>" {
+        return Some(RschedAtomicsPass {
+            direct_pthread: false,
+            musl_libc: true,
         });
     }
     None
@@ -51,6 +62,9 @@ impl LlvmModulePass for RschedAtomicsPass {
         let mut changed = false;
         changed |= wrap_fuzzer_entrypoint(module);
         changed |= instrument_atomics(module);
+        if self.musl_libc {
+            changed |= wrap_musl_pthread_implementations(module);
+        }
         if self.direct_pthread {
             changed |= rewrite_pthread_calls(module);
         }
@@ -339,4 +353,261 @@ const PTHREAD_REWRITES: &[(&str, &str)] = &[
     ("pthread_barrier_init", "rsched_pthread_barrier_init"),
     ("pthread_barrier_wait", "rsched_pthread_barrier_wait"),
     ("sched_yield", "rsched_sched_yield"),
+];
+
+#[derive(Clone, Copy)]
+struct MuslRewrite {
+    implementation: &'static str,
+    public: &'static str,
+    real: &'static str,
+    rsched: &'static str,
+    diverges: bool,
+}
+
+fn wrap_musl_pthread_implementations(module: &mut Module<'_>) -> bool {
+    let mut changed = false;
+    for rewrite in MUSL_REWRITES {
+        let Some(original) = module.get_function(rewrite.implementation) else {
+            continue;
+        };
+        if original.count_basic_blocks() == 0 {
+            continue;
+        }
+
+        set_value_name(original.as_value_ref(), rewrite.real);
+        rename_global_alias(module, rewrite.public);
+
+        let real = module
+            .get_function(rewrite.real)
+            .expect("renamed musl implementation");
+        build_guarded_wrapper(module, rewrite.implementation, real, rewrite);
+        if rewrite.public != rewrite.implementation {
+            build_guarded_wrapper(module, rewrite.public, real, rewrite);
+        }
+        changed = true;
+    }
+    changed
+}
+
+fn rename_global_alias(module: &Module<'_>, name: &str) {
+    let alias =
+        unsafe { LLVMGetNamedGlobalAlias(module.as_mut_ptr(), name.as_ptr().cast(), name.len()) };
+    if !alias.is_null() {
+        set_value_name(alias, &format!("__rsched_real_alias_{name}"));
+    }
+}
+
+fn set_value_name(value: llvm_plugin::inkwell::llvm_sys::prelude::LLVMValueRef, name: &str) {
+    unsafe {
+        LLVMSetValueName2(value, name.as_ptr().cast(), name.len());
+    }
+}
+
+fn build_guarded_wrapper<'ctx>(
+    module: &mut Module<'ctx>,
+    name: &str,
+    real: FunctionValue<'ctx>,
+    rewrite: &MuslRewrite,
+) {
+    let context = module.get_context();
+    let function_type = real.get_type();
+    let wrapper = module.add_function(name, function_type, Some(real.get_linkage()));
+    let rsched = module
+        .get_function(rewrite.rsched)
+        .unwrap_or_else(|| module.add_function(rewrite.rsched, function_type, None));
+    let try_enter_type = context.bool_type().fn_type(&[], false);
+    let try_enter = module
+        .get_function("rsched_try_enter")
+        .unwrap_or_else(|| module.add_function("rsched_try_enter", try_enter_type, None));
+    let exit_type = context.void_type().fn_type(&[], false);
+    let exit = module
+        .get_function("rsched_exit")
+        .unwrap_or_else(|| module.add_function("rsched_exit", exit_type, None));
+
+    let entry = context.append_basic_block(wrapper, "entry");
+    let outer = context.append_basic_block(wrapper, "rsched.outer");
+    let nested = context.append_basic_block(wrapper, "rsched.nested");
+    let builder = context.create_builder();
+    builder.position_at_end(entry);
+    let activate_type = context.void_type().fn_type(&[], false);
+    let activate = module
+        .get_function("rsched_activate_instrumented_libc")
+        .unwrap_or_else(|| {
+            module.add_function("rsched_activate_instrumented_libc", activate_type, None)
+        });
+    builder
+        .build_call(activate, &[], "")
+        .expect("activate instrumented libc hooks");
+    let is_outer = builder
+        .build_call(try_enter, &[], "rsched.is_outer")
+        .expect("build rsched recursion guard")
+        .try_as_basic_value()
+        .left()
+        .expect("rsched_try_enter returns bool")
+        .into_int_value();
+    builder
+        .build_conditional_branch(is_outer, outer, nested)
+        .expect("build rsched wrapper branch");
+
+    let args: Vec<BasicMetadataValueEnum<'ctx>> = wrapper
+        .get_params()
+        .into_iter()
+        .map(BasicMetadataValueEnum::from)
+        .collect();
+    build_guarded_call(&builder, outer, rsched, exit, &args, rewrite.diverges);
+    build_guarded_call(&builder, nested, real, exit, &args, rewrite.diverges);
+}
+
+fn build_guarded_call<'ctx>(
+    builder: &llvm_plugin::inkwell::builder::Builder<'ctx>,
+    block: llvm_plugin::inkwell::basic_block::BasicBlock<'ctx>,
+    target: FunctionValue<'ctx>,
+    exit: FunctionValue<'ctx>,
+    args: &[BasicMetadataValueEnum<'ctx>],
+    diverges: bool,
+) {
+    builder.position_at_end(block);
+    let call = builder
+        .build_call(target, args, "rsched.result")
+        .expect("build guarded musl call");
+    if diverges {
+        builder
+            .build_unreachable()
+            .expect("build diverging musl wrapper");
+        return;
+    }
+
+    builder
+        .build_call(exit, &[], "")
+        .expect("build rsched recursion guard exit");
+    match call.try_as_basic_value().left() {
+        Some(value) => builder
+            .build_return(Some(&value))
+            .expect("return guarded musl call value"),
+        None => builder
+            .build_return(None)
+            .expect("return from guarded musl call"),
+    };
+}
+
+const MUSL_REWRITES: &[MuslRewrite] = &[
+    MuslRewrite {
+        implementation: "__pthread_create",
+        public: "pthread_create",
+        real: "__rsched_real_pthread_create",
+        rsched: "rsched_pthread_create",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "__pthread_join",
+        public: "pthread_join",
+        real: "__rsched_real_pthread_join",
+        rsched: "rsched_pthread_join",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "__pthread_exit",
+        public: "pthread_exit",
+        real: "__rsched_real_pthread_exit",
+        rsched: "rsched_pthread_exit",
+        diverges: true,
+    },
+    MuslRewrite {
+        implementation: "pthread_mutexattr_init",
+        public: "pthread_mutexattr_init",
+        real: "__rsched_real_pthread_mutexattr_init",
+        rsched: "rsched_pthread_mutexattr_init",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "pthread_mutexattr_settype",
+        public: "pthread_mutexattr_settype",
+        real: "__rsched_real_pthread_mutexattr_settype",
+        rsched: "rsched_pthread_mutexattr_settype",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "pthread_mutexattr_destroy",
+        public: "pthread_mutexattr_destroy",
+        real: "__rsched_real_pthread_mutexattr_destroy",
+        rsched: "rsched_pthread_mutexattr_destroy",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "__pthread_mutex_init",
+        public: "pthread_mutex_init",
+        real: "__rsched_real_pthread_mutex_init",
+        rsched: "rsched_pthread_mutex_init",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "pthread_mutex_destroy",
+        public: "pthread_mutex_destroy",
+        real: "__rsched_real_pthread_mutex_destroy",
+        rsched: "rsched_pthread_mutex_destroy",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "__pthread_mutex_lock",
+        public: "pthread_mutex_lock",
+        real: "__rsched_real_pthread_mutex_lock",
+        rsched: "rsched_pthread_mutex_lock",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "__pthread_mutex_trylock",
+        public: "pthread_mutex_trylock",
+        real: "__rsched_real_pthread_mutex_trylock",
+        rsched: "rsched_pthread_mutex_trylock",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "__pthread_mutex_unlock",
+        public: "pthread_mutex_unlock",
+        real: "__rsched_real_pthread_mutex_unlock",
+        rsched: "rsched_pthread_mutex_unlock",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "pthread_cond_wait",
+        public: "pthread_cond_wait",
+        real: "__rsched_real_pthread_cond_wait",
+        rsched: "rsched_pthread_cond_wait",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "pthread_cond_signal",
+        public: "pthread_cond_signal",
+        real: "__rsched_real_pthread_cond_signal",
+        rsched: "rsched_pthread_cond_signal",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "pthread_cond_broadcast",
+        public: "pthread_cond_broadcast",
+        real: "__rsched_real_pthread_cond_broadcast",
+        rsched: "rsched_pthread_cond_broadcast",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "pthread_barrier_init",
+        public: "pthread_barrier_init",
+        real: "__rsched_real_pthread_barrier_init",
+        rsched: "rsched_pthread_barrier_init",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "pthread_barrier_wait",
+        public: "pthread_barrier_wait",
+        real: "__rsched_real_pthread_barrier_wait",
+        rsched: "rsched_pthread_barrier_wait",
+        diverges: false,
+    },
+    MuslRewrite {
+        implementation: "sched_yield",
+        public: "sched_yield",
+        real: "__rsched_real_sched_yield",
+        rsched: "rsched_sched_yield",
+        diverges: false,
+    },
 ];
