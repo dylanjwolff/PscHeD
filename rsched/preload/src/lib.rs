@@ -44,6 +44,16 @@ use rsched::{
 #[cfg(feature = "tsan")]
 use rsched::{rsched_is_tsan_background_start, rsched_is_tsan_thread_start};
 
+// Musl preload builds link libgcc_eh statically because the Rust cdylib link
+// still asks for libgcc_s. On some toolchains that archive references this
+// glibc loader helper even with panic=abort. The path should never be reached
+// in the musl preload tests, but the dynamic loader still needs the relocation
+// to resolve when loading librsched_preload.so.
+#[unsafe(no_mangle)]
+pub extern "C" fn _dl_find_object(_address: *const c_void, _result: *mut c_void) -> c_int {
+    -1
+}
+
 // ── Reentrancy depth tracking ─────────────────────────────────────────────────
 //
 // CALL_DEPTH lives in rsched (the rlib linked into this DSO).  Each interceptor
