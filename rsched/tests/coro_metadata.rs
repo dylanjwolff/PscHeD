@@ -1,46 +1,40 @@
-// Integration test for the locked uniform interleaving fixture.
+#![cfg(feature = "coro")]
 
-use std::collections::HashSet;
-use std::os::raw::c_int;
 use std::sync::Mutex;
 
 unsafe extern "C" {
-    fn run_uniform_lock_dfs() -> c_int;
+    fn run_coro_metadata(seed: u64) -> i32;
 }
 
-// Force rsched_* symbols into this binary (see tests/uniform.rs for details).
 #[used]
 static _RSCHED_ANCHOR: unsafe extern "C" fn() = rsched::rsched_init;
 
-// Serialize tests to avoid races on global rsched state.
 static RSCHED_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
-fn uniform_lock_dfs_explores_multiple_interleavings() {
+fn coroutine_threads_preserve_pthread_metadata_and_tls() {
     let _g = RSCHED_LOCK.lock().unwrap();
     unsafe {
         std::env::set_var("RSCHED_SCHEDULER", "dfs");
         rsched::rsched_dfs_reset();
     }
 
-    let mut outcomes = HashSet::new();
     let mut runs = 0usize;
     while unsafe { rsched::rsched_dfs_has_next() } {
-        outcomes.insert(unsafe { run_uniform_lock_dfs() });
+        let failures = unsafe { run_coro_metadata(0) };
+        assert_eq!(
+            failures, 0,
+            "DFS run {runs} failed with bitmask {failures:#x}"
+        );
         unsafe {
             rsched::rsched_dfs_finish_current();
         }
         runs += 1;
     }
+
     unsafe {
         std::env::remove_var("RSCHED_SCHEDULER");
     }
-
-    assert!(
-        outcomes.len() > 1,
-        "expected >1 distinct outcome under DFS, got {} across {runs} runs: {:?}",
-        outcomes.len(),
-        outcomes,
-    );
+    assert!(runs > 0, "DFS did not run the coroutine metadata fixture");
     assert_eq!(runs, unsafe { rsched::rsched_dfs_completed_schedules() });
 }

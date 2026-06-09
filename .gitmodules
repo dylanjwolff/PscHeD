@@ -1,3 +1,9 @@
 [submodule "rsched/binary-instrumentation/e9patch"]
 	path = rsched/binary-instrumentation/e9patch
 	url = https://github.com/GJDuck/e9patch.git
+[submodule "rsched/musl/musl"]
+	path = rsched/musl/musl
+	url = https://git.musl-libc.org/git/musl
+[submodule "rsched/musl/libc-test"]
+	path = rsched/musl/libc-test
+	url = https://repo.or.cz/libc-test.git
