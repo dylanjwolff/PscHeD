@@ -49,9 +49,10 @@ use rsched::{rsched_is_tsan_background_start, rsched_is_tsan_thread_start};
 // glibc loader helper even with panic=abort. The path should never be reached
 // in the musl preload tests, but the dynamic loader still needs the relocation
 // to resolve when loading librsched_preload.so.
+#[cfg(target_env = "musl")]
 #[unsafe(no_mangle)]
-pub extern "C" fn _dl_find_object(_address: *const c_void, _result: *mut c_void) -> c_int {
-    -1
+pub unsafe extern "C" fn _dl_find_object(address: *const c_void, result: *mut c_void) -> c_int {
+    rsched::rsched_musl_dl_find_object(address, result)
 }
 
 // ── Reentrancy depth tracking ─────────────────────────────────────────────────

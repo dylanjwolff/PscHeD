@@ -7,3 +7,7 @@
 [submodule "rsched/musl/libc-test"]
 	path = rsched/musl/libc-test
 	url = https://repo.or.cz/libc-test.git
+[submodule "rsched/glibc/glibc"]
+	path = rsched/glibc/glibc
+	url = https://sourceware.org/git/glibc.git
+	branch = release/2.35/master

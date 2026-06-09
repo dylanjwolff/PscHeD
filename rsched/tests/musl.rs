@@ -308,6 +308,55 @@ fn require_program(name: &str) {
 }
 
 #[test]
+fn musl_preload_supports_dl_find_object() {
+    require_program("musl-gcc");
+    require_program("timeout");
+
+    let source = temp_dir().join("unwind.c");
+    let binary = temp_dir().join("unwind");
+    std::fs::write(
+        &source,
+        r#"
+#include <stdint.h>
+
+struct dl_find_object {
+    uint64_t flags;
+    void *map_start;
+    void *map_end;
+    void *link_map;
+    void *eh_frame;
+    uint64_t reserved[7];
+};
+
+extern int _dl_find_object(void *, struct dl_find_object *);
+extern void rsched_diagnose_rtld_next(void);
+
+int main(void)
+{
+    struct dl_find_object result;
+    void *address = (void *)rsched_diagnose_rtld_next;
+    if (_dl_find_object(address, &result) != 0) return 1;
+    if (!result.eh_frame) return 2;
+    if (address < result.map_start || address >= result.map_end) return 3;
+    return 0;
+}
+"#,
+    )
+    .expect("write musl unwind test");
+
+    let preload = build_musl_preload();
+    let mut command = Command::new("musl-gcc");
+    command
+        .arg("-o")
+        .arg(&binary)
+        .arg(&source)
+        .arg("-Wl,--no-as-needed")
+        .arg(&preload);
+    run(command, "compile musl dl_find_object test");
+    run_preloaded(&binary, &preload, "dl_find_object");
+}
+
+#[test]
 fn musl_libc_test_with_preload() {
     require_program("musl-gcc");
     require_program("timeout");

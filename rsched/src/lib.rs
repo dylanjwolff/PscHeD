@@ -43,6 +43,22 @@ type MutexAttrT = libc::pthread_mutexattr_t;
 type StartRoutine = unsafe extern "C" fn(*mut libc::c_void) -> *mut libc::c_void;
 type CloneStart = unsafe extern "C" fn(*mut libc::c_void) -> libc::c_int;
 
+#[cfg(feature = "instrumented-libc")]
+#[repr(C)]
+struct LinuxCloneArgs {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+    set_tid: u64,
+    set_tid_size: u64,
+    cgroup: u64,
+}
+
 // ── Thread descriptor ─────────────────────────────────────────────────────
 
 struct Thread {
@@ -907,16 +923,28 @@ fn instrumented_depth_slot() -> usize {
 
 #[cfg(feature = "instrumented-libc")]
 fn instrumented_depth_fetch_add(delta: u32) -> u32 {
+    #[cfg(feature = "coro")]
+    if let Some(previous) = task_provider::coro_depth_fetch_add(delta) {
+        return previous;
+    }
     INSTRUMENTED_DEPTHS[instrumented_depth_slot()].fetch_add(delta, Ordering::Acquire)
 }
 
 #[cfg(feature = "instrumented-libc")]
 fn instrumented_depth_fetch_sub(delta: u32) -> u32 {
+    #[cfg(feature = "coro")]
+    if let Some(previous) = task_provider::coro_depth_fetch_sub(delta) {
+        return previous;
+    }
     INSTRUMENTED_DEPTHS[instrumented_depth_slot()].fetch_sub(delta, Ordering::Release)
 }
 
 #[cfg(feature = "instrumented-libc")]
 fn instrumented_depth_load() -> u32 {
+    #[cfg(feature = "coro")]
+    if let Some(depth) = task_provider::coro_depth_load() {
+        return depth;
+    }
     INSTRUMENTED_DEPTHS[instrumented_depth_slot()].load(Ordering::Relaxed)
 }
 
@@ -963,15 +991,95 @@ pub fn rsched_exit() {
     });
 }
 
-// Ubuntu's static libgcc_eh references this glibc loader helper. Instrumented
-// musl builds use panic=abort, so stack unwinding never reaches this fallback.
-#[cfg(feature = "instrumented-libc")]
+#[cfg(all(feature = "instrumented-libc", target_env = "musl"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn _dl_find_object(
-    _address: *const libc::c_void,
-    _result: *mut libc::c_void,
+    address: *const libc::c_void,
+    result: *mut libc::c_void,
 ) -> libc::c_int {
-    -1
+    unsafe { rsched_musl_dl_find_object(address, result) }
+}
+
+#[cfg(target_env = "musl")]
+#[repr(C)]
+struct DlFindObject {
+    flags: u64,
+    map_start: *mut libc::c_void,
+    map_end: *mut libc::c_void,
+    link_map: *mut libc::c_void,
+    eh_frame: *mut libc::c_void,
+    reserved: [u64; 7],
+}
+
+#[cfg(target_env = "musl")]
+struct DlFindContext {
+    address: usize,
+    result: *mut DlFindObject,
+    found: bool,
+}
+
+#[cfg(target_env = "musl")]
+unsafe extern "C" fn find_dl_object(
+    info: *mut libc::dl_phdr_info,
+    _size: libc::size_t,
+    data: *mut libc::c_void,
+) -> libc::c_int {
+    let context = &mut *data.cast::<DlFindContext>();
+    let info = &*info;
+    let headers = core::slice::from_raw_parts(info.dlpi_phdr, info.dlpi_phnum as usize);
+    let base = info.dlpi_addr as usize;
+    let mut map_start = usize::MAX;
+    let mut map_end = 0usize;
+    let mut eh_frame = 0usize;
+    let mut contains_address = false;
+
+    for header in headers {
+        let start = base.saturating_add(header.p_vaddr as usize);
+        if header.p_type == libc::PT_LOAD {
+            let end = start.saturating_add(header.p_memsz as usize);
+            map_start = map_start.min(start);
+            map_end = map_end.max(end);
+            contains_address |= context.address >= start && context.address < end;
+        } else if header.p_type == libc::PT_GNU_EH_FRAME {
+            eh_frame = start;
+        }
+    }
+
+    if !contains_address || eh_frame == 0 {
+        return 0;
+    }
+
+    context.result.write(DlFindObject {
+        flags: 0,
+        map_start: map_start as *mut libc::c_void,
+        map_end: map_end as *mut libc::c_void,
+        link_map: core::ptr::null_mut(),
+        eh_frame: eh_frame as *mut libc::c_void,
+        reserved: [0; 7],
+    });
+    context.found = true;
+    1
+}
+
+#[cfg(target_env = "musl")]
+#[doc(hidden)]
+pub unsafe fn rsched_musl_dl_find_object(
+    address: *const libc::c_void,
+    result: *mut libc::c_void,
+) -> libc::c_int {
+    if address.is_null() || result.is_null() {
+        return -1;
+    }
+    let mut context = DlFindContext {
+        address: address as usize,
+        result: result.cast(),
+        found: false,
+    };
+    libc::dl_iterate_phdr(
+        Some(find_dl_object),
+        (&mut context as *mut DlFindContext).cast(),
+    );
+    if context.found { 0 } else { -1 }
 }
 
 /// Increment depth without checking. Used internally by trampoline/do_thread_exit.
@@ -1395,6 +1503,37 @@ pub unsafe extern "C" fn rsched_clone(
     }
 }
 
+#[cfg(feature = "instrumented-libc")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_clone_internal(
+    args: *mut libc::c_void,
+    func: CloneStart,
+    arg: *mut libc::c_void,
+) -> libc::c_int {
+    if args.is_null() {
+        *libc::__errno_location() = libc::EINVAL;
+        return -1;
+    }
+    let args = &*args.cast::<LinuxCloneArgs>();
+    let flags = (args.flags | args.exit_signal) as libc::c_int;
+    let stack = (args.stack as usize).saturating_add(args.stack_size as usize) as *mut libc::c_void;
+    let result = rsched_clone(
+        func,
+        stack,
+        flags,
+        arg,
+        args.parent_tid as usize as *mut libc::pid_t,
+        args.tls as usize as *mut libc::c_void,
+        args.child_tid as usize as *mut libc::c_void,
+    );
+    if result < 0 {
+        *libc::__errno_location() = -result;
+        -1
+    } else {
+        result
+    }
+}
+
 // ── rsched_pthread_join ───────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
@@ -1625,12 +1764,16 @@ pub unsafe extern "C" fn rsched_pthread_barrier_init(
     attr: *const libc::pthread_barrierattr_t,
     count: libc::c_uint,
 ) -> libc::c_int {
+    let result = with_internal_depth(|| libc::pthread_barrier_init(barrier, attr, count));
+    if result != 0 {
+        return result;
+    }
+
     ensure_init();
     let key = barrier as usize;
     rsched_glock();
     let caller = my_pt();
     st().context_switch(caller);
-    let _ = attr;
     st().barriers.insert(
         key,
         SBarrier {
@@ -1639,7 +1782,7 @@ pub unsafe extern "C" fn rsched_pthread_barrier_init(
         },
     );
     rsched_gunlock();
-    0
+    result
 }
 
 // ── rsched_pthread_barrier_wait ───────────────────────────────────────────

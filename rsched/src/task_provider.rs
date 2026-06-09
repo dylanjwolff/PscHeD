@@ -263,6 +263,8 @@ mod coro {
         fs_base: Cell<usize>,
         host_fs_base: Cell<usize>,
         task_key: Cell<usize>,
+        #[cfg(feature = "instrumented-libc")]
+        call_depth: Cell<u32>,
     }
 
     impl CoroContext {
@@ -272,7 +274,45 @@ mod coro {
                 fs_base: Cell::new(fs_base),
                 host_fs_base: Cell::new(0),
                 task_key: Cell::new(task_key),
+                #[cfg(feature = "instrumented-libc")]
+                call_depth: Cell::new(0),
             }
+        }
+    }
+
+    #[cfg(feature = "instrumented-libc")]
+    pub(crate) fn depth_fetch_add(delta: u32) -> Option<u32> {
+        let context = CORO_CONTEXT.load(Ordering::Acquire);
+        if context.is_null() {
+            return None;
+        }
+        unsafe {
+            let previous = (*context).call_depth.get();
+            (*context).call_depth.set(previous + delta);
+            Some(previous)
+        }
+    }
+
+    #[cfg(feature = "instrumented-libc")]
+    pub(crate) fn depth_fetch_sub(delta: u32) -> Option<u32> {
+        let context = CORO_CONTEXT.load(Ordering::Acquire);
+        if context.is_null() {
+            return None;
+        }
+        unsafe {
+            let previous = (*context).call_depth.get();
+            (*context).call_depth.set(previous - delta);
+            Some(previous)
+        }
+    }
+
+    #[cfg(feature = "instrumented-libc")]
+    pub(crate) fn depth_load() -> Option<u32> {
+        let context = CORO_CONTEXT.load(Ordering::Acquire);
+        if context.is_null() {
+            None
+        } else {
+            Some(unsafe { (*context).call_depth.get() })
         }
     }
 
@@ -337,7 +377,9 @@ mod coro {
 
             (*ctx).fs_base.set(get_fs_base());
             set_fs_base((*ctx).host_fs_base.get());
+            CORO_CONTEXT.store(core::ptr::null_mut(), Ordering::Release);
             (&*yielder).suspend(CoroYield::Yielded);
+            CORO_CONTEXT.store(ctx, Ordering::Release);
         }
 
         unsafe fn finish_task(&mut self, task: CoroTask) {
@@ -505,6 +547,13 @@ mod coro {
         }
     }
 }
+
+#[cfg(all(feature = "coro", feature = "instrumented-libc"))]
+pub(crate) use coro::depth_load as coro_depth_load;
+#[cfg(all(feature = "coro", feature = "instrumented-libc"))]
+pub(crate) use coro::{
+    depth_fetch_add as coro_depth_fetch_add, depth_fetch_sub as coro_depth_fetch_sub,
+};
 
 pub(crate) use coro::CoroTaskProvider;
 
