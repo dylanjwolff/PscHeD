@@ -34,13 +34,23 @@ fn run(mut command: Command, description: &str) -> Output {
     let output = command
         .output()
         .unwrap_or_else(|error| panic!("failed to {description}: {error}"));
-    assert!(
-        output.status.success(),
-        "{description} failed with {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+    if !output.status.success() {
+        const MAX_FAILURE_LINES: usize = 200;
+
+        fn tail(bytes: &[u8]) -> String {
+            let text = String::from_utf8_lossy(bytes);
+            let lines: Vec<_> = text.lines().collect();
+            lines[lines.len().saturating_sub(MAX_FAILURE_LINES)..].join("\n")
+        }
+
+        panic!(
+            "{description} failed with {}\nlast {MAX_FAILURE_LINES} stdout lines:\n{}\n\
+             last {MAX_FAILURE_LINES} stderr lines:\n{}",
+            output.status,
+            tail(&output.stdout),
+            tail(&output.stderr),
+        );
+    }
     output
 }
 
@@ -130,19 +140,35 @@ fn build_instrumented_glibc() -> InstrumentedGlibc {
             let jobs = std::thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(2)
+                .min(4)
                 .to_string();
             let shared_gnulib = format!("{} -lgcc_s -lgcc", rsched.display());
             let mut command = Command::new("make");
             command
                 .current_dir(&build_dir)
                 .env("RSCHED_LLVM_PLUGIN", &plugin)
+                .arg("--silent")
                 .arg(format!("-j{jobs}"))
                 .arg(format!("libc.so-gnulib={shared_gnulib}"))
                 .arg(format!("gnulib={shared_gnulib}"))
                 .arg(format!("gnulib-tests={shared_gnulib}"))
                 .arg("static-gnulib=-lgcc -lgcc_eh")
-                .arg("static-gnulib-tests=-lgcc -lgcc_eh");
-            run(command, "build instrumented glibc");
+                .arg("static-gnulib-tests=-lgcc -lgcc_eh")
+                .arg("lib");
+            run(command, "build instrumented glibc libraries");
+
+            let support_archive = build_dir.join("support/libsupport_nonshared.a");
+            let mut command = Command::new("make");
+            command
+                .current_dir(root.join("glibc/glibc/support"))
+                .env("RSCHED_LLVM_PLUGIN", &plugin)
+                .arg("--silent")
+                .arg(format!("-j{jobs}"))
+                .arg("subdir=support")
+                .arg("..=../")
+                .arg(format!("objdir={}", build_dir.display()))
+                .arg(&support_archive);
+            run(command, "build the glibc test support library");
 
             let mut command = Command::new("gcc");
             command.arg("--print-file-name=libgcc_s.so.1");
@@ -180,6 +206,7 @@ fn glibc_nptl_tests_with_instrumented_libc() {
         command
             .current_dir(&glibc.build_dir)
             .env("RSCHED_LLVM_PLUGIN", &glibc.plugin)
+            .arg("--silent")
             .arg(format!("libc.so-gnulib={shared_gnulib}"))
             .arg(format!("gnulib={shared_gnulib}"))
             .arg(format!("gnulib-tests={shared_gnulib}"))
