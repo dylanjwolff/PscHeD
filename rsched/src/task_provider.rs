@@ -316,6 +316,19 @@ mod coro {
         }
     }
 
+    #[cfg(feature = "instrumented-libc")]
+    pub(crate) fn depth_store(depth: u32) -> bool {
+        let context = CORO_CONTEXT.load(Ordering::Acquire);
+        if context.is_null() {
+            false
+        } else {
+            unsafe {
+                (*context).call_depth.set(depth);
+            }
+            true
+        }
+    }
+
     struct CoroTask {
         coroutine: Coroutine<(), CoroYield, *mut libc::c_void>,
         context: Rc<CoroContext>,
@@ -585,6 +598,7 @@ pub(crate) use coro::depth_load as coro_depth_load;
 #[cfg(all(feature = "coro", feature = "instrumented-libc"))]
 pub(crate) use coro::{
     depth_fetch_add as coro_depth_fetch_add, depth_fetch_sub as coro_depth_fetch_sub,
+    depth_store as coro_depth_store,
 };
 
 pub(crate) use coro::CoroTaskProvider;

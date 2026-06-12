@@ -593,15 +593,15 @@ fn return_address() -> u64 {
     unsafe { llvm_returnaddress(0) as u64 }
 }
 
-// ── Direct libpthread bindings (bypass PLT / TSAN / preload shim) ─────────
+// ── Direct libpthread bindings (bypass instrumented public wrappers) ──────
 //
 // rsched uses its own internal synchronisation primitives (GMTX, suspend_cond,
-// ready_cond) that must NOT go through the preload shim.  When the preload
-// cdylib exports `pthread_mutex_lock`, rsched's ordinary PLT calls route:
+// ready_cond) that must NOT go through instrumented libc's public wrappers.
+// Otherwise rsched's ordinary PLT calls can route:
 //
-//   rsched glock() → PLT → TSAN interceptor → preload pthread_mutex_lock
-//                                              → rsched_pthread_mutex_lock
-//                                              → glock() …  (deadlock / depth-2 panic)
+//   rsched glock() → PLT → pthread_mutex_lock wrapper
+//                       → rsched_pthread_mutex_lock
+//                       → glock() …  (deadlock / depth-2 panic)
 //
 // Fetching the real libpthread symbols via dlopen/dlsym breaks the cycle:
 // those raw function-pointer calls bypass both the PLT and the TSAN
@@ -789,6 +789,13 @@ pub unsafe extern "C" fn rsched_process_exit() {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_process_exit_status(status: libc::c_int) -> ! {
+    rsched_process_exit();
+    seccomp::raw_syscall6(libc::SYS_exit_group, status.into(), 0, 0, 0, 0, 0);
+    core::hint::unreachable_unchecked()
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_fork() -> libc::pid_t {
     ensure_init();
     st().task_provider.fork()
@@ -810,6 +817,31 @@ pub unsafe extern "C" fn rsched_syscall(
     }
 
     libc::syscall(number, a0, a1, a2, a3, a4, a5)
+}
+
+#[cfg(feature = "instrumented-libc")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_libc_syscall(
+    number: libc::c_long,
+    a0: libc::c_long,
+    a1: libc::c_long,
+    a2: libc::c_long,
+    a3: libc::c_long,
+    a4: libc::c_long,
+    a5: libc::c_long,
+) -> libc::c_long {
+    rsched_activate_instrumented_libc();
+    let outermost = rsched_try_enter();
+    let result = if outermost && number == libc::SYS_clone {
+        rsched_syscall(number, a0, a1, a2, a3, a4, a5)
+    } else {
+        rsched_raw_syscall(number, a0, a1, a2, a3, a4, a5)
+    };
+    if outermost && number == libc::SYS_clone && result == 0 {
+        instrumented_depth_store(1);
+    }
+    rsched_exit();
+    result
 }
 
 #[unsafe(no_mangle)]
@@ -872,16 +904,14 @@ pub unsafe extern "C" fn rsched_waitpid(
 
 // ── Reentrancy depth tracking ─────────────────────────────────────────────────
 //
-// CALL_DEPTH lives here so that both the preload interceptors and rsched's own
-// trampoline/do_thread_exit share a single counter per thread.  The preload
-// cdylib links rsched as an rlib, so all code ends up in the same DSO and
-// shares this TLS slot.
+// CALL_DEPTH is shared by instrumented libc's wrappers and rsched's own
+// trampoline/do_thread_exit.
 //
 // trampoline() and do_thread_exit() run in freshly created OS threads where
 // CALL_DEPTH=0.  They call depth_enter() before any rpt() primitive so that
-// any libc-internal PLT re-entry through the preload interceptors is treated as
-// non-outermost and forwarded to RTLD_NEXT instead of looping back into rsched
-// (which would deadlock on GMTX).
+// any libc-internal re-entry through the instrumented wrappers is treated as
+// non-outermost and forwarded to the preserved libc implementation instead of
+// looping back into rsched (which would deadlock on GMTX).
 
 thread_local! {
     static CALL_DEPTH: AtomicU32 = const { AtomicU32::new(0) };
@@ -904,7 +934,7 @@ pub extern "C" fn rsched_activate_instrumented_libc() {
 
 #[cfg(feature = "instrumented-libc")]
 fn instrumented_depth_slot() -> usize {
-    let tid = unsafe { libc::syscall(libc::SYS_gettid) as i32 };
+    let tid = unsafe { seccomp::raw_syscall6(libc::SYS_gettid, 0, 0, 0, 0, 0, 0) as libc::pid_t };
     for (idx, seen) in INSTRUMENTED_DEPTH_TIDS.iter().enumerate() {
         let value = seen.load(Ordering::Acquire);
         if value == tid {
@@ -948,6 +978,15 @@ fn instrumented_depth_load() -> u32 {
     INSTRUMENTED_DEPTHS[instrumented_depth_slot()].load(Ordering::Relaxed)
 }
 
+#[cfg(feature = "instrumented-libc")]
+fn instrumented_depth_store(depth: u32) {
+    #[cfg(feature = "coro")]
+    if task_provider::coro_depth_store(depth) {
+        return;
+    }
+    INSTRUMENTED_DEPTHS[instrumented_depth_slot()].store(depth, Ordering::Relaxed);
+}
+
 #[inline]
 fn instrumented_libc_ready() -> bool {
     #[cfg(feature = "instrumented-libc")]
@@ -961,7 +1000,7 @@ fn instrumented_libc_ready() -> bool {
 }
 
 /// Increment depth; return true iff this is the outermost (non-reentrant) call.
-/// Called by the preload interceptors on every entry.
+/// Called by instrumented libc wrappers on every entry.
 #[unsafe(no_mangle)]
 pub fn rsched_try_enter() -> bool {
     if !instrumented_libc_ready() {
@@ -977,7 +1016,7 @@ pub fn rsched_try_enter() -> bool {
     }
 }
 
-/// Decrement depth. Called by the preload interceptors on every exit.
+/// Decrement depth. Called by instrumented libc wrappers on every exit.
 #[unsafe(no_mangle)]
 pub fn rsched_exit() {
     if !instrumented_libc_ready() {
@@ -1258,7 +1297,7 @@ unsafe impl Send for StartArg {}
 /// Shared cleanup logic for thread exit.  Must be called with GMTX *not* held.
 pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
     // Raise CALL_DEPTH before acquiring GMTX so that any libc-internal PLT
-    // re-entry through our preload interceptors is treated as non-outermost.
+    // re-entry through instrumented libc wrappers is treated as non-outermost.
     depth_enter();
     rsched_glock();
     let joiner_opt = st().info.get(&caller).and_then(|t| t.joiner);
@@ -1308,9 +1347,9 @@ pub(crate) extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void
 
         // Raise CALL_DEPTH before calling any rpt() primitive so that any
         // libc-internal PLT re-entry (e.g. cond_wait releasing GMTX via
-        // pthread_mutex_unlock through our preload's interceptor) is seen as
-        // non-outermost and forwarded to RTLD_NEXT instead of routing back
-        // into rsched (which would try to re-acquire GMTX → deadlock).
+        // pthread_mutex_unlock through an instrumented wrapper) is seen as
+        // non-outermost and forwarded to the preserved libc implementation
+        // instead of routing back into rsched (which would re-acquire GMTX).
         depth_enter();
 
         // Acquire GMTX (creator released it via pthread_cond_wait below).
@@ -1345,7 +1384,7 @@ pub(crate) extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void
         depth_exit();
 
         // Run the user's thread function with CALL_DEPTH back to 0 so that
-        // user calls to pthread_* are correctly intercepted by the preload.
+        // user calls to pthread_* are correctly intercepted by instrumented libc.
         let retval = routine(arg);
         // Scheduler cleanup then return naturally from the thread routine.
         // We intentionally do NOT call libc::pthread_exit here: doing so from

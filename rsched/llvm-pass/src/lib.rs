@@ -79,7 +79,14 @@ impl LlvmModulePass for RschedAtomicsPass {
         }
         if self.glibc_libc {
             changed |= wrap_libc_pthread_implementations(module, GLIBC_REWRITES, false);
-            changed |= wrap_glibc_hidden_pthread_implementations(module);
+            changed |= wrap_libc_pthread_implementations(module, GLIBC_PUBLIC_REWRITES, true);
+            changed |=
+                wrap_glibc_hidden_implementations(module, GLIBC_REWRITES, GLIBC_HIDDEN_NAMES);
+            changed |= wrap_glibc_hidden_implementations(
+                module,
+                GLIBC_PUBLIC_REWRITES,
+                GLIBC_PUBLIC_HIDDEN_NAMES,
+            );
             changed |= restore_glibc_hidden_helpers(module);
             changed |= rewrite_glibc_hidden_calls(module);
             changed |= rewrite_clone_internal_calls(module);
@@ -432,23 +439,27 @@ fn wrap_libc_pthread_implementations(
         let real = module
             .get_function(rewrite.real)
             .expect("renamed musl implementation");
-        build_guarded_wrapper(module, rewrite.implementation, real, rewrite);
+        build_guarded_wrapper(module, rewrite.implementation, real, rewrite, true);
         if wrap_public && rewrite.public != rewrite.implementation {
-            build_guarded_wrapper(module, rewrite.public, real, rewrite);
+            build_guarded_wrapper(module, rewrite.public, real, rewrite, true);
         }
         changed = true;
     }
     changed
 }
 
-fn wrap_glibc_hidden_pthread_implementations(module: &mut Module<'_>) -> bool {
+fn wrap_glibc_hidden_implementations(
+    module: &mut Module<'_>,
+    rewrites: &[LibcRewrite],
+    hidden_names: &[&str],
+) -> bool {
     let mut changed = false;
-    for (rewrite, hidden) in GLIBC_REWRITES.iter().zip(GLIBC_HIDDEN_NAMES) {
+    for (rewrite, hidden) in rewrites.iter().zip(hidden_names) {
         let Some(real) = module.get_function(rewrite.real) else {
             continue;
         };
         rename_global_alias(module, hidden);
-        build_guarded_wrapper(module, hidden, real, rewrite);
+        build_guarded_wrapper(module, hidden, real, rewrite, false);
         changed = true;
     }
     changed
@@ -561,6 +572,7 @@ fn build_guarded_wrapper<'ctx>(
     name: &str,
     real: FunctionValue<'ctx>,
     rewrite: &LibcRewrite,
+    activate_hooks: bool,
 ) {
     let context = module.get_context();
     let function_type = real.get_type();
@@ -582,15 +594,17 @@ fn build_guarded_wrapper<'ctx>(
     let nested = context.append_basic_block(wrapper, "rsched.nested");
     let builder = context.create_builder();
     builder.position_at_end(entry);
-    let activate_type = context.void_type().fn_type(&[], false);
-    let activate = module
-        .get_function("rsched_activate_instrumented_libc")
-        .unwrap_or_else(|| {
-            module.add_function("rsched_activate_instrumented_libc", activate_type, None)
-        });
-    builder
-        .build_call(activate, &[], "")
-        .expect("activate instrumented libc hooks");
+    if activate_hooks {
+        let activate_type = context.void_type().fn_type(&[], false);
+        let activate = module
+            .get_function("rsched_activate_instrumented_libc")
+            .unwrap_or_else(|| {
+                module.add_function("rsched_activate_instrumented_libc", activate_type, None)
+            });
+        builder
+            .build_call(activate, &[], "")
+            .expect("activate instrumented libc hooks");
+    }
     let is_outer = builder
         .build_call(try_enter, &[], "rsched.is_outer")
         .expect("build rsched recursion guard")
@@ -763,6 +777,20 @@ const MUSL_REWRITES: &[LibcRewrite] = &[
         rsched: "rsched_sched_yield",
         diverges: false,
     },
+    LibcRewrite {
+        implementation: "waitpid",
+        public: "waitpid",
+        real: "__rsched_real_waitpid",
+        rsched: "rsched_waitpid",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "_exit",
+        public: "_exit",
+        real: "__rsched_real_process_exit",
+        rsched: "rsched_process_exit_status",
+        diverges: true,
+    },
 ];
 
 const GLIBC_REWRITES: &[LibcRewrite] = &[
@@ -885,9 +913,26 @@ const GLIBC_REWRITES: &[LibcRewrite] = &[
         rsched: "rsched_sched_yield",
         diverges: false,
     },
+    LibcRewrite {
+        implementation: "_exit",
+        public: "_exit",
+        real: "__rsched_real_process_exit",
+        rsched: "rsched_process_exit_status",
+        diverges: true,
+    },
 ];
 
-const GLIBC_HIDDEN_NAMES: [&str; GLIBC_REWRITES.len()] = [
+const GLIBC_PUBLIC_REWRITES: &[LibcRewrite] = &[LibcRewrite {
+    implementation: "__waitpid",
+    public: "waitpid",
+    real: "__rsched_real_waitpid",
+    rsched: "rsched_waitpid",
+    diverges: false,
+}];
+
+const GLIBC_PUBLIC_HIDDEN_NAMES: &[&str] = &["__GI___waitpid"];
+
+const GLIBC_HIDDEN_NAMES: &[&str] = &[
     "__GI___pthread_create",
     "__GI___pthread_join",
     "__GI___pthread_exit",
@@ -905,4 +950,5 @@ const GLIBC_HIDDEN_NAMES: [&str; GLIBC_REWRITES.len()] = [
     "__GI___pthread_barrier_init",
     "__GI___pthread_barrier_wait",
     "__GI___sched_yield",
+    "__GI__exit",
 ];

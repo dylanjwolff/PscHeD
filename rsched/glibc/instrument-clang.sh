@@ -17,11 +17,35 @@ for ((i = 0; i < ${#args[@]}; i++)); do
             output_file=${args[i + 1]}
             ((i += 1))
             ;;
-        *.c)
+        *.c|*.S|*.s)
             source_file=${args[i]}
             ;;
     esac
 done
+
+if $compile && [[ "$(basename "${source_file:-}")" == "syscall.S" ]] &&
+        [[ -n "$output_file" && "$output_file" == *.os ]]; then
+    mkdir -p "$(dirname "$output_file")"
+    work_dir=$(mktemp -d)
+    trap 'rm -rf "$work_dir"' EXIT
+    original="$work_dir/original.o"
+    wrapper="$work_dir/wrapper.o"
+    original_args=()
+    for ((i = 0; i < ${#args[@]}; i++)); do
+        if [[ "${args[i]}" == "-o" ]]; then
+            original_args+=(-o "$original")
+            ((i += 1))
+        else
+            original_args+=("${args[i]}")
+        fi
+    done
+    "$RSCHED_GLIBC_CC" "${original_args[@]}"
+    objcopy --redefine-sym syscall=__rsched_real_syscall "$original"
+    printf '.text\n.globl syscall\n.type syscall,@function\nsyscall:\n\tjmp rsched_libc_syscall\n' |
+        "$RSCHED_GLIBC_CC" -x assembler -c -fPIC -o "$wrapper" -
+    ld -r -o "$output_file" "$original" "$wrapper"
+    exit 0
+fi
 
 instrument=false
 if [[ -n "$source_file" ]]; then
@@ -31,10 +55,13 @@ if [[ -n "$source_file" ]]; then
         pthread_mutex_init.c|pthread_mutex_destroy.c|pthread_mutex_lock.c|\
         pthread_mutex_trylock.c|pthread_mutex_unlock.c|pthread_cond_wait.c|\
         pthread_cond_signal.c|pthread_cond_broadcast.c|pthread_barrier_init.c|\
-        pthread_barrier_wait.c|sched_yield.c)
+        pthread_barrier_wait.c|sched_yield.c|waitpid.c|_exit.c)
             instrument=true
             ;;
     esac
+fi
+if [[ "$(basename "${output_file:-}")" == rtld-* ]]; then
+    instrument=false
 fi
 
 if ! $compile || ! $instrument || [[ -z "$output_file" || "$output_file" != *.os ]]; then

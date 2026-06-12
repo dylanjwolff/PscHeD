@@ -50,3 +50,13 @@ opt-17 \
     "$input_bc" \
     -o "$instrumented_bc"
 clang-17 -c "$instrumented_bc" -o "$output_file"
+
+if [[ "$(basename "$source_file")" == "syscall.c" ]]; then
+    original="$work_dir/syscall.o"
+    wrapper="$work_dir/syscall-wrapper.o"
+    mv "$output_file" "$original"
+    objcopy --redefine-sym syscall=__rsched_real_syscall "$original"
+    printf '.text\n.globl syscall\n.type syscall,@function\nsyscall:\n\tjmp rsched_libc_syscall\n' |
+        clang-17 -x assembler -c -fPIC -o "$wrapper" -
+    ld -r -o "$output_file" "$original" "$wrapper"
+fi

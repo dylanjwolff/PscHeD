@@ -1,24 +1,18 @@
-use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
-static PRELOAD_LIB: OnceLock<PathBuf> = OnceLock::new();
-#[cfg_attr(feature = "coro", allow(dead_code))]
 static INSTRUMENTED_MUSL: OnceLock<InstrumentedMusl> = OnceLock::new();
 
 #[derive(Clone)]
-#[cfg_attr(feature = "coro", allow(dead_code))]
 struct InstrumentedMusl {
-    compiler: PathBuf,
-    plugin: PathBuf,
-    bin_dir: PathBuf,
+    preload_runner: PathBuf,
 }
 
 // Tests that use native sem_wait to coordinate emulated pthreads cannot run
-// until the preload layer also intercepts POSIX semaphores: a native sem_wait
-// can block the kernel thread that rsched needs to run the semaphore's poster.
+// until libc instrumentation also wraps POSIX semaphores: a native sem_wait can
+// block the kernel thread that rsched needs to run the semaphore's poster.
 const LIBC_TEST_CASES: &[(&str, &str)] = &[
     ("functional", "pthread_cond"),
     ("functional", "pthread_tsd"),
@@ -51,80 +45,6 @@ fn run(mut command: Command, description: &str) -> Output {
     output
 }
 
-fn build_musl_preload() -> PathBuf {
-    PRELOAD_LIB
-        .get_or_init(|| {
-            let root = repo_root();
-            let target_dir = temp_dir().join("preload-target");
-            let linker = temp_dir().join("musl-linker");
-
-            // Rust requests libgcc_s for cdylibs, but musl-gcc only provides
-            // libgcc's unwinder as static archives. Substitute those archives
-            // while preserving every other linker argument exactly.
-            std::fs::write(
-                &linker,
-                r#"#!/usr/bin/env bash
-set -eu
-args=()
-for arg in "$@"; do
-    if [ "$arg" = "-lgcc_s" ]; then
-        args+=(-lgcc_eh -lgcc)
-    else
-        args+=("$arg")
-    fi
-done
-exec musl-gcc "${args[@]}"
-"#,
-            )
-            .expect("write musl linker wrapper");
-            let mut permissions = std::fs::metadata(&linker)
-                .expect("stat musl linker wrapper")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&linker, permissions)
-                .expect("make musl linker wrapper executable");
-
-            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
-            let mut command = Command::new(cargo);
-            command
-                .current_dir(&root)
-                .env("CARGO_TARGET_DIR", &target_dir)
-                .env("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER", &linker)
-                .env("CC_x86_64_unknown_linux_musl", "musl-gcc")
-                .env(
-                    "RUSTFLAGS",
-                    append_env_flag(
-                        std::env::var_os("RUSTFLAGS"),
-                        "-C target-feature=-crt-static -C panic=abort",
-                    ),
-                )
-                .args([
-                    "build",
-                    "-p",
-                    "rsched-preload",
-                    "--target",
-                    "x86_64-unknown-linux-musl",
-                ]);
-            // The preload path intercepts completed pthread APIs, after libc's
-            // clone setup opportunity has passed. Coroutine coverage belongs
-            // to the instrumented-libc variant, which intercepts clone itself.
-            run(command, "build the musl preload library");
-
-            let path = target_dir
-                .join("x86_64-unknown-linux-musl")
-                .join("debug")
-                .join("librsched_preload.so");
-            assert!(
-                path.exists(),
-                "expected musl preload library at {}",
-                path.display()
-            );
-            path
-        })
-        .clone()
-}
-
-#[cfg_attr(feature = "coro", allow(dead_code))]
 fn build_instrumented_musl() -> InstrumentedMusl {
     INSTRUMENTED_MUSL
         .get_or_init(|| {
@@ -136,7 +56,8 @@ fn build_instrumented_musl() -> InstrumentedMusl {
             let install_dir = temp.join("instrumented-musl-install");
             std::fs::create_dir_all(&build_dir).expect("create instrumented musl build dir");
 
-            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+            let cargo =
+                std::env::var_os("CARGO").unwrap_or_else(|| std::ffi::OsString::from("cargo"));
             let mut command = Command::new(&cargo);
             command
                 .current_dir(&root)
@@ -181,6 +102,12 @@ fn build_instrumented_musl() -> InstrumentedMusl {
             command
                 .current_dir(&build_dir)
                 .env("RSCHED_LLVM_PLUGIN", &plugin)
+                .env(
+                    "LDFLAGS",
+                    "-Wl,--export-dynamic-symbol=rsched_atomic_instrument \
+                     -Wl,--export-dynamic-symbol=rsched_atomic_instrument_ra \
+                     -Wl,--export-dynamic-symbol=rsched_fuzzer_test_one_input",
+                )
                 .arg(format!("--prefix={}", install_dir.display()))
                 .arg(format!("--syslibdir={}/lib", install_dir.display()))
                 .arg("--disable-static")
@@ -214,16 +141,32 @@ fn build_instrumented_musl() -> InstrumentedMusl {
                 "expected instrumented musl compiler at {}",
                 compiler.display()
             );
-            InstrumentedMusl {
-                compiler,
-                plugin,
-                bin_dir,
-            }
+            let libc = install_dir.join("lib/libc.so");
+            let loader = install_dir.join("lib/ld-musl-x86_64.so.1");
+            let preload_runner = temp.join("run-with-instrumented-musl");
+            std::fs::write(
+                &preload_runner,
+                format!(
+                    "#!/bin/sh\n\
+                     LD_PRELOAD='{libc}' exec '{loader}' --library-path '{library_path}' \"$@\"\n",
+                    libc = libc.display(),
+                    loader = loader.display(),
+                    library_path = install_dir.join("lib").display(),
+                ),
+            )
+            .expect("write instrumented musl preload runner");
+            let mut permissions = std::fs::metadata(&preload_runner)
+                .expect("stat instrumented musl preload runner")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&preload_runner, permissions)
+                .expect("make instrumented musl preload runner executable");
+            InstrumentedMusl { preload_runner }
         })
         .clone()
 }
 
-fn append_env_flag(current: Option<OsString>, extra: &str) -> OsString {
+fn append_env_flag(current: Option<std::ffi::OsString>, extra: &str) -> std::ffi::OsString {
     let mut value = current.unwrap_or_default();
     if !value.is_empty() {
         value.push(" ");
@@ -238,7 +181,6 @@ fn build_libc_test(
     name: &str,
     compiler: &Path,
     variant: &str,
-    instrumented_musl: Option<&InstrumentedMusl>,
 ) -> PathBuf {
     let output = temp_dir().join(format!("{variant}-{group}-{name}"));
     let source = suite.join("src").join(group).join(format!("{name}.c"));
@@ -250,11 +192,6 @@ fn build_libc_test(
     );
 
     let mut command = Command::new(compiler);
-    if let Some(musl) = instrumented_musl {
-        command
-            .env("RSCHED_LLVM_PLUGIN", &musl.plugin)
-            .env("PATH", prepend_path(&musl.bin_dir));
-    }
     command
         .args([
             "-std=c99",
@@ -271,32 +208,6 @@ fn build_libc_test(
     output
 }
 
-fn prepend_path(dir: &Path) -> OsString {
-    let mut paths = vec![dir.to_path_buf()];
-    paths.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
-    std::env::join_paths(paths).expect("construct PATH for instrumented musl")
-}
-
-fn run_preloaded(binary: &Path, preload: &Path, name: &str) {
-    let mut command = Command::new("timeout");
-    command
-        .args(["--signal=KILL", "20s", "env"])
-        .arg(preload_env(preload))
-        .arg(binary);
-    run(
-        command,
-        &format!("run libc-test {name} with rsched preloaded"),
-    );
-}
-
-fn preload_env(preload: &Path) -> OsString {
-    let mut value = OsString::from("LD_PRELOAD=");
-    value.push(preload.as_os_str());
-    value
-}
-
 fn require_program(name: &str) {
     let status = Command::new(name)
         .arg("--version")
@@ -305,73 +216,6 @@ fn require_program(name: &str) {
         .status()
         .unwrap_or_else(|error| panic!("{name} is required for the musl tests: {error}"));
     assert!(status.success(), "{name} --version failed");
-}
-
-#[test]
-fn musl_preload_supports_dl_find_object() {
-    require_program("musl-gcc");
-    require_program("timeout");
-
-    let source = temp_dir().join("unwind.c");
-    let binary = temp_dir().join("unwind");
-    std::fs::write(
-        &source,
-        r#"
-#include <stdint.h>
-
-struct dl_find_object {
-    uint64_t flags;
-    void *map_start;
-    void *map_end;
-    void *link_map;
-    void *eh_frame;
-    uint64_t reserved[7];
-};
-
-extern int _dl_find_object(void *, struct dl_find_object *);
-extern void rsched_diagnose_rtld_next(void);
-
-int main(void)
-{
-    struct dl_find_object result;
-    void *address = (void *)rsched_diagnose_rtld_next;
-    if (_dl_find_object(address, &result) != 0) return 1;
-    if (!result.eh_frame) return 2;
-    if (address < result.map_start || address >= result.map_end) return 3;
-    return 0;
-}
-"#,
-    )
-    .expect("write musl unwind test");
-
-    let preload = build_musl_preload();
-    let mut command = Command::new("musl-gcc");
-    command
-        .arg("-o")
-        .arg(&binary)
-        .arg(&source)
-        .arg("-Wl,--no-as-needed")
-        .arg(&preload);
-    run(command, "compile musl dl_find_object test");
-    run_preloaded(&binary, &preload, "dl_find_object");
-}
-
-#[test]
-fn musl_libc_test_with_preload() {
-    require_program("musl-gcc");
-    require_program("timeout");
-
-    let suite = repo_root().join("musl/libc-test");
-    assert!(
-        suite.join("src/common/test.h").exists(),
-        "libc-test submodule is missing; run git submodule update --init --recursive"
-    );
-
-    let preload = build_musl_preload();
-    for &(group, name) in LIBC_TEST_CASES {
-        let binary = build_libc_test(&suite, group, name, Path::new("musl-gcc"), "preload", None);
-        run_preloaded(&binary, &preload, &format!("{group}/{name}"));
-    }
 }
 
 #[test]
@@ -390,19 +234,15 @@ fn musl_libc_test_with_instrumented_libc() {
 
     let musl = build_instrumented_musl();
     for &(group, name) in LIBC_TEST_CASES {
-        let binary = build_libc_test(
-            &suite,
-            group,
-            name,
-            &musl.compiler,
-            "instrumented",
-            Some(&musl),
-        );
+        let binary = build_libc_test(&suite, group, name, Path::new("musl-gcc"), "preloaded");
         let mut command = Command::new("timeout");
-        command.args(["--signal=KILL", "20s"]).arg(&binary);
+        command
+            .args(["--signal=KILL", "20s"])
+            .arg(&musl.preload_runner)
+            .arg(&binary);
         run(
             command,
-            &format!("run libc-test {group}/{name} with instrumented musl"),
+            &format!("run libc-test {group}/{name} with instrumented musl preloaded"),
         );
     }
 }

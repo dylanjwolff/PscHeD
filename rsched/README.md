@@ -43,35 +43,31 @@ For atomic operations, use `rsched_atomic.h` instead of `<stdatomic.h>`. It prov
 #endif
 ```
 
-### 2. `LD_PRELOAD` (no recompilation, missing atomic instrumentation!)
-
-Build the preload shim and inject it into an unmodified binary at run time:
-
-```sh
-cargo build --release -p rsched-preload             # produces target/release/librsched_preload.so
-LD_PRELOAD=/path/to/librsched_preload.so RANDOM_SEED=42 ./my_program
-```
-
-Every `pthread_*` / `sched_yield` call in the target is silently redirected to rsched. Atomic operations are **not** intercepted by the preload shim (they require source-level instrumentation or the LLVM pass).
-
-### 3. LLVM pass (automatic atomic instrumentation)
+### 2. Instrumented libc and LLVM pass
 
 The `rsched-llvm-pass` crate builds an LLVM plugin that rewrites atomic instructions and optionally rewrites `pthread_*` calls at the IR level, so programs compiled with Clang can be instrumented without source changes.
 
 ```sh
 cargo build --release -p rsched-llvm-pass           # produces target/release/librsched_llvm_pass.so
 
-# Instrument atomics and use the preload shim for pthread interception:
+# Instrument application atomics. pthread interception is provided by an
+# LLVM-instrumented glibc or musl shared library:
 clang -fpass-plugin=/path/to/librsched_llvm_pass.so \
       -o my_prog my_prog.c
-LD_PRELOAD=/path/to/librsched_preload.so ./my_prog
 
-# Or rewrite pthread calls directly in IR (no preload needed):
-clang -fpass-plugin=".../librsched_llvm_pass.so=rsched-atomics<direct-pthread>" \
-      -o my_prog my_prog.c -L... -lrsched ...
+# Use the dynamic loader built with the instrumented libc. The test suites
+# generate equivalent runner scripts automatically.
+LD_PRELOAD=/path/to/instrumented/libc.so \
+  /path/to/instrumented/ld-linux-x86-64.so.2 \
+  --library-path /path/to/instrumented ./my_prog
 ```
 
-### 4. Binary Instrumentation (automatic atomic instrumentation)
+The libc itself is built with `rsched-atomics<glibc-libc>` or
+`rsched-atomics<musl-libc>`. These modes wrap libc's pthread implementations
+and intercept thread creation at libc's clone boundary, so applications retain
+their normal pthread ABI and TLS setup.
+
+### 3. Binary Instrumentation (automatic atomic instrumentation)
 
 An `e9patch` binary instrumentation pass is also included in this repository.
 
@@ -83,7 +79,10 @@ This will instrument your target binary and *all* dynamically linked dependencie
 From there you can run your program with:
 
 ```
-LD_PRELOAD=/path/to/librsched_preload.so LD_LIBRARY_PATH=./instrumented ./instrumented/my_prog.inst
+LD_PRELOAD=/path/to/instrumented/libc.so \
+  /path/to/instrumented/ld-linux-x86-64.so.2 \
+  --library-path /path/to/instrumented:./instrumented \
+  ./instrumented/my_prog.inst
 ```
 
 ## Environment variables
@@ -122,11 +121,10 @@ Linux x86\_64 is `glibc` the primary target. `musl` libc is intended to be suppo
 cargo test --workspace
 ```
 
-The workspace tests instrument glibc with the rsched LLVM pass and run a
-synchronization-focused subset of glibc's NPTL tests against the resulting
-libc. They also compile a subset of musl's official `libc-test` suite and run
-it with `librsched_preload.so` loaded into the musl processes. Initialize the
-repository's submodules before running the suites outside Docker.
+The workspace tests instrument glibc and musl with the rsched LLVM pass. They
+run synchronization-focused libc tests and ordinary application binaries with
+the resulting libc shared object in `LD_PRELOAD`. Initialize the repository's
+submodules before running the suites outside Docker.
 
 Or via Docker (runs the full test suite in an isolated environment):
 
