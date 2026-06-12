@@ -1,8 +1,4 @@
-// Integration test for uniform.c
-//
-// Runs run_uniform() with many different seeds and asserts that the scheduler
-// explores a diverse set of interleavings (i.e. produces multiple distinct
-// final values of x).
+// Integration test for the uniform interleaving fixture.
 
 use std::collections::HashSet;
 use std::os::raw::{c_int, c_ulonglong};
@@ -10,6 +6,7 @@ use std::sync::Mutex;
 
 unsafe extern "C" {
     fn run_uniform(seed: c_ulonglong) -> c_int;
+    fn run_uniform_dfs() -> c_int;
 }
 
 // Force the rsched_* CGU into this binary so that libcexamples.a can resolve
@@ -23,24 +20,37 @@ static _RSCHED_ANCHOR: unsafe extern "C" fn() = rsched::rsched_init;
 static RSCHED_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
-fn uniform_explores_multiple_interleavings() {
+fn uniform_dfs_explores_multiple_interleavings() {
     let _g = RSCHED_LOCK.lock().unwrap();
-    let mut outcomes = HashSet::new();
-    for seed in 0..30 {
-        let v = unsafe { run_uniform(seed) };
-        outcomes.insert(v);
+    unsafe {
+        std::env::set_var("RSCHED_SCHEDULER", "dfs");
+        rsched::rsched_dfs_reset();
     }
+
+    let mut outcomes = HashSet::new();
+    let mut runs = 0usize;
+    while unsafe { rsched::rsched_dfs_has_next() } {
+        outcomes.insert(unsafe { run_uniform_dfs() });
+        unsafe {
+            rsched::rsched_dfs_finish_current();
+        }
+        runs += 1;
+    }
+    unsafe {
+        std::env::remove_var("RSCHED_SCHEDULER");
+    }
+
     assert!(
         outcomes.len() > 3,
-        "expected >3 distinct outcomes across 30 seeds, got {}: {:?}",
+        "expected >3 distinct outcomes under DFS, got {} across {runs} runs: {:?}",
         outcomes.len(),
         outcomes,
     );
+    assert_eq!(runs, unsafe { rsched::rsched_dfs_completed_schedules() });
 }
 
-/// Determinism check: the same seed always produces the same value.
 #[test]
-fn uniform_is_deterministic_per_seed() {
+fn random_scheduler_is_deterministic_per_seed() {
     let _g = RSCHED_LOCK.lock().unwrap();
     for seed in 0..5 {
         let a = unsafe { run_uniform(seed) };

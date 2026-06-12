@@ -187,6 +187,42 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 "#
 }
 
+fn musl_pthread_input() -> &'static str {
+    r#"
+typedef struct { int value; } pthread_mutex_t;
+
+int __pthread_mutex_lock(pthread_mutex_t *mutex) {
+    return __atomic_exchange_n(&mutex->value, 1, __ATOMIC_SEQ_CST);
+}
+
+extern __typeof(__pthread_mutex_lock) pthread_mutex_lock
+    __attribute__((weak, alias("__pthread_mutex_lock")));
+
+int __clone(int (*func)(void *), void *stack, int flags, void *arg, int *ptid, void *tls, int *ctid);
+
+int create_with_clone(int (*func)(void *), void *stack, void *arg, int *ptid, void *tls, int *ctid) {
+    return __clone(func, stack, 0, arg, ptid, tls, ctid);
+}
+"#
+}
+
+fn glibc_pthread_input() -> &'static str {
+    r#"
+typedef struct { int value; } pthread_mutex_t;
+struct clone_args { unsigned long long fields[11]; };
+
+int ___pthread_mutex_lock(pthread_mutex_t *mutex) {
+    return __atomic_exchange_n(&mutex->value, 1, __ATOMIC_SEQ_CST);
+}
+
+int __clone_internal(struct clone_args *, int (*)(void *), void *);
+
+int create_with_clone(struct clone_args *args, int (*func)(void *), void *arg) {
+    return __clone_internal(args, func, arg);
+}
+"#
+}
+
 fn compile_to_ir(name: &str) -> PathBuf {
     compile_source_to_ir(name, atomic_pthread_input(), &[])
 }
@@ -370,6 +406,75 @@ fn instruments_llvm_atomic_operations() {
     assert!(
         ir.contains("atomicrmw") || ir.contains("load atomic"),
         "pass should leave original LLVM atomic operation in place:\n{ir}"
+    );
+}
+
+#[test]
+fn musl_libc_mode_wraps_pthread_implementation_and_weak_alias() {
+    let input = compile_source_to_ir("musl-pthread", musl_pthread_input(), &[]);
+    let ir = run_pass(
+        "rsched-atomics<musl-libc>",
+        &input,
+        "musl-pthread.instrumented.ll",
+    );
+
+    assert!(
+        ir.contains("define dso_local i32 @__rsched_real_pthread_mutex_lock"),
+        "pass did not preserve the original musl implementation:\n{ir}"
+    );
+    assert!(
+        ir.contains("@__rsched_real_alias_pthread_mutex_lock"),
+        "pass did not rename the musl weak alias:\n{ir}"
+    );
+    assert!(
+        ir.contains("define i32 @__pthread_mutex_lock")
+            && ir.contains("define i32 @pthread_mutex_lock"),
+        "pass did not create internal and public wrappers:\n{ir}"
+    );
+    assert!(
+        ir.matches("call i1 @rsched_try_enter").count() == 2,
+        "each wrapper should enter the recursion guard:\n{ir}"
+    );
+    assert!(
+        ir.contains("call i32 @rsched_pthread_mutex_lock")
+            && ir.contains("call i32 @__rsched_real_pthread_mutex_lock"),
+        "wrappers did not dispatch to rsched and the original musl body:\n{ir}"
+    );
+    assert!(
+        ir.contains("call void @rsched_atomic_instrument"),
+        "original musl atomics were not instrumented:\n{ir}"
+    );
+    assert!(
+        ir.contains("@rsched_clone"),
+        "musl mode did not rewrite __clone calls:\n{ir}"
+    );
+}
+
+#[test]
+fn glibc_libc_mode_wraps_pthread_implementation_and_clone_internal() {
+    let input = compile_source_to_ir("glibc-pthread", glibc_pthread_input(), &[]);
+    let ir = run_pass(
+        "rsched-atomics<glibc-libc>",
+        &input,
+        "glibc-pthread.instrumented.ll",
+    );
+
+    assert!(
+        ir.contains("define dso_local i32 @__rsched_real_pthread_mutex_lock"),
+        "pass did not preserve the original glibc implementation:\n{ir}"
+    );
+    assert!(
+        ir.contains("define i32 @___pthread_mutex_lock"),
+        "pass did not create the glibc implementation wrapper:\n{ir}"
+    );
+    assert!(
+        ir.contains("call i32 @rsched_pthread_mutex_lock")
+            && ir.contains("call i32 @__rsched_real_pthread_mutex_lock"),
+        "glibc wrappers did not dispatch through rsched recursion guards:\n{ir}"
+    );
+    assert!(
+        ir.contains("@rsched_clone_internal"),
+        "glibc mode did not rewrite __clone_internal calls:\n{ir}"
     );
 }
 

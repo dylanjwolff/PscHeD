@@ -9,9 +9,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 #                      (llvm-plugin crate, features = ["llvm17-0"] → llvm-sys 170.x)
 RUN apt-get update && apt-get install -y \
     build-essential \
+    bison \
     ca-certificates \
     clang-17 \
     curl \
+    gawk \
     llvm-17-dev \
     musl-tools \
     pkg-config \

@@ -117,9 +117,16 @@ Linux x86\_64 is `glibc` the primary target. `musl` libc is intended to be suppo
 ## Building and testing
 
 ```sh
-# Prerequisites: Rust nightly, clang-17, llvm-17-dev, musl-tools (see Dockerfile)
+# Prerequisites: Rust nightly, clang-17, llvm-17-dev, musl-tools,
+# gawk, bison, x86_64-unknown-linux-musl Rust target (see Dockerfile)
 cargo test --workspace
 ```
+
+The workspace tests instrument glibc with the rsched LLVM pass and run a
+synchronization-focused subset of glibc's NPTL tests against the resulting
+libc. They also compile a subset of musl's official `libc-test` suite and run
+it with `librsched_preload.so` loaded into the musl processes. Initialize the
+repository's submodules before running the suites outside Docker.
 
 Or via Docker (runs the full test suite in an isolated environment):
 

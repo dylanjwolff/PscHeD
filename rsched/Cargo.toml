@@ -15,6 +15,7 @@ crate-type = ["rlib", "staticlib"]
 bench = false
 
 [dependencies]
+corosensei = "0.3.4"
 libc = "0.2"
 
 [dev-dependencies]
@@ -23,6 +24,8 @@ criterion = { version = "0.8", features = ["html_reports"] }
 [features]
 tsan = []
 asan = []
+coro = []
+instrumented-libc = []
 
 [build-dependencies]
 cc = "1"
