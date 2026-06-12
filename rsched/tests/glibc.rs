@@ -11,6 +11,7 @@ const GLIBC_TEST_CASES: &[&str] = &[
     "nptl/tst-cond1",
     "nptl/tst-barrier1",
     "nptl/tst-tsd3",
+    "nptl/tst-pt-tls1",
 ];
 
 #[derive(Clone)]

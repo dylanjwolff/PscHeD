@@ -399,17 +399,49 @@ mod coro {
         unsafe fn create(
             &mut self,
             thread: *mut PthreadT,
-            attr: *const AttrT,
+            _attr: *const AttrT,
             start_arg: *mut StartArg,
         ) -> libc::c_int {
-            let mut native: PthreadT = core::mem::zeroed();
-            let r = crate::with_internal_depth(|| {
-                (crate::rpt().create)(&mut native, attr, crate::trampoline, start_arg.cast())
-            });
-            if r == 0 {
-                *thread = native;
-            }
-            r
+            static NEXT_TASK_KEY: AtomicUsize = AtomicUsize::new(1usize << (usize::BITS - 2));
+            static NEXT_FAKE_TID: AtomicI32 = AtomicI32::new(1);
+
+            let task_key = NEXT_TASK_KEY.fetch_add(1, Ordering::Relaxed);
+            let tid = NEXT_FAKE_TID.fetch_add(1, Ordering::Relaxed);
+            *thread = task_key as PthreadT;
+
+            let routine = (*start_arg).routine;
+            let arg = (*start_arg).arg;
+            (*start_arg).ready = true;
+
+            // Directly wrapped pthread_create calls do not have a libc-created
+            // TLS block. They remain on the host TLS while MY_PT supplies the
+            // scheduler-controlled task identity.
+            let context = Rc::new(CoroContext::new(get_fs_base(), task_key));
+            let context_for_coro = context.clone();
+            let coroutine = Coroutine::with_stack(
+                DefaultStack::new(2 * 1024 * 1024).unwrap(),
+                move |yielder, ()| {
+                    context_for_coro.yielder.set(yielder as *const _);
+                    CORO_CONTEXT.store(Rc::as_ptr(&context_for_coro).cast_mut(), Ordering::Release);
+                    crate::MY_PT.with(|c| *c.borrow_mut() = task_key as PthreadT);
+                    let retval = routine(arg);
+                    crate::do_thread_exit(task_key as PthreadT);
+                    context_for_coro.fs_base.set(get_fs_base());
+                    CORO_CONTEXT.store(core::ptr::null_mut(), Ordering::Release);
+                    set_fs_base(context_for_coro.host_fs_base.get());
+                    retval
+                },
+            );
+            self.tasks.insert(
+                task_key,
+                CoroTask {
+                    coroutine,
+                    context,
+                    retval: None,
+                    tid,
+                },
+            );
+            0
         }
 
         unsafe fn clone_thread(&mut self, args: CloneArgs) -> Result<CloneTask, libc::c_int> {
@@ -477,7 +509,7 @@ mod coro {
 
         unsafe fn join(&mut self, thread: PthreadT, retval: *mut *mut libc::c_void) -> libc::c_int {
             let Some(task) = self.tasks.remove(&(thread as usize)) else {
-                return 0;
+                return crate::with_internal_depth(|| (crate::rpt().join)(thread, retval));
             };
             if !retval.is_null() {
                 *retval = task.retval.unwrap_or(core::ptr::null_mut());

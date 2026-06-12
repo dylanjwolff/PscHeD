@@ -5,7 +5,6 @@ fn main() {
     cc::Build::new()
         .file("c-examples/interleavings.c")
         .file("c-examples/benchmarks.c")
-        .file("c-examples/coro_metadata.c")
         .include("include")
         .define("RSCHED", None)
         .compile("cexamples");
@@ -25,11 +24,7 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let compiler = cc::Build::new().include("include").get_compiler();
 
-    let c_files = [
-        "c-examples/interleavings.c",
-        "c-examples/benchmarks.c",
-        "c-examples/coro_metadata.c",
-    ];
+    let c_files = ["c-examples/interleavings.c", "c-examples/benchmarks.c"];
     for (i, file) in c_files.iter().enumerate() {
         let obj = format!("{}/stdatomic_check_{}.o", out_dir, i);
         let status = compiler

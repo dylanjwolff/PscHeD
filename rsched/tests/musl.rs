@@ -105,9 +105,9 @@ exec musl-gcc "${args[@]}"
                     "--target",
                     "x86_64-unknown-linux-musl",
                 ]);
-            if cfg!(feature = "coro") {
-                command.args(["--features", "coro"]);
-            }
+            // The preload path intercepts completed pthread APIs, after libc's
+            // clone setup opportunity has passed. Coroutine coverage belongs
+            // to the instrumented-libc variant, which intercepts clone itself.
             run(command, "build the musl preload library");
 
             let path = target_dir
