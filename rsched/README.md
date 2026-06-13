@@ -111,7 +111,44 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
 ## Platform and libc
 
-Linux x86\_64 is `glibc` the primary target. `musl` libc is intended to be supported as well via static linking against a `x86_64-unknown-linux-musl` build.
+Linux x86\_64 is the supported target. Both glibc and musl are built as
+instrumented shared-library bundles, and source-level annotations are
+available through the static `librsched.a` artifact.
+
+## Building release artifacts
+
+Instrumented libc builds are content-addressed and cached under
+`target/rsched-artifacts`. Repeating a command with the same rsched sources,
+LLVM pass, libc revision, provider, profile, and toolchain reuses the existing
+bundle.
+
+```sh
+# Build one artifact.
+cargo xtask build static --provider native
+cargo xtask build libc glibc --provider coro
+cargo xtask build libc musl --provider native
+
+# Build both native-thread and coroutine variants of every artifact.
+cargo xtask build all --provider all
+
+# Produce the six release archives in dist/.
+cargo xtask package all --provider all
+```
+
+The release archives are:
+
+```text
+rsched-static-native-x86_64-linux.tar.zst
+rsched-static-coro-x86_64-linux.tar.zst
+rsched-glibc-native-x86_64-linux.tar.zst
+rsched-glibc-coro-x86_64-linux.tar.zst
+rsched-musl-native-x86_64-linux.tar.zst
+rsched-musl-coro-x86_64-linux.tar.zst
+```
+
+The static archives contain `librsched.a`, headers, and the LLVM pass. Libc
+archives contain the instrumented libc, its matching dynamic loader and
+runtime libraries, the LLVM pass, and a relocatable `run` script.
 
 ## Building and testing
 
@@ -121,12 +158,27 @@ Linux x86\_64 is `glibc` the primary target. `musl` libc is intended to be suppo
 cargo test --workspace
 ```
 
-The workspace tests instrument glibc and musl with the rsched LLVM pass. They
-run synchronization-focused libc tests and ordinary application binaries with
-the resulting libc shared object in `LD_PRELOAD`. Initialize the repository's
-submodules before running the suites outside Docker.
+`cargo test --workspace` runs the source-annotation and LLVM-pass tests. The
+external libc suites are intentionally separate:
 
-Or via Docker (runs the full test suite in an isolated environment):
+```sh
+# Source-level annotations and librsched.a, both providers.
+cargo xtask test source --provider all
+
+# Upstream libc synchronization tests.
+cargo xtask test libc glibc --provider native
+cargo xtask test libc musl --provider coro
+
+# Ordinary unannotated applications using LD_PRELOAD with a cached bundle.
+cargo xtask test preload glibc --provider native
+cargo xtask test preload musl --provider coro
+```
+
+The `libc` and `preload` commands consume the same cached artifact. Tests do
+not compile glibc or musl themselves. Initialize the repository's submodules
+before running these suites outside Docker.
+
+Or run the source and LLVM-pass suites in an isolated environment:
 
 ```sh
 docker buildx build -t  rsched .

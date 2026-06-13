@@ -1,5 +1,6 @@
 [workspace]
-members = [".", "llvm-pass"]
+members = [".", "crates/rsched-libc-build", "llvm-pass", "xtask"]
+default-members = [".", "llvm-pass"]
 
 [package]
 name = "rsched"
@@ -19,12 +20,15 @@ libc = "0.2"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
+rsched-libc-build = { path = "crates/rsched-libc-build" }
 
 [features]
 tsan = []
 asan = []
 coro = []
 instrumented-libc = []
+libc-tests = []
+preload-tests = []
 
 [build-dependencies]
 cc = "1"
@@ -44,3 +48,51 @@ harness = false
 [[bench]]
 name = "buffer"
 harness = false
+
+[[test]]
+name = "benchmarks"
+path = "tests/source/benchmarks.rs"
+
+[[test]]
+name = "sanitizers_static"
+path = "tests/source/sanitizers_static.rs"
+
+[[test]]
+name = "seccomp"
+path = "tests/source/seccomp.rs"
+
+[[test]]
+name = "task_creation"
+path = "tests/source/task_creation.rs"
+
+[[test]]
+name = "uaf"
+path = "tests/source/uaf.rs"
+
+[[test]]
+name = "uniform"
+path = "tests/source/uniform.rs"
+
+[[test]]
+name = "uniform_lock"
+path = "tests/source/uniform_lock.rs"
+
+[[test]]
+name = "glibc_conformance"
+path = "tests/libc/glibc.rs"
+required-features = ["libc-tests"]
+
+[[test]]
+name = "musl_conformance"
+path = "tests/libc/musl.rs"
+required-features = ["libc-tests"]
+
+[[test]]
+name = "glibc_preload"
+path = "tests/preload/glibc.rs"
+required-features = ["preload-tests"]
+
+[[test]]
+name = "musl_preload"
+path = "tests/preload/musl.rs"
+required-features = ["preload-tests"]

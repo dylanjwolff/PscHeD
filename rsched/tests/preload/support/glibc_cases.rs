@@ -428,7 +428,7 @@ fn instrumented_glibc_preload_bash_client_server() {
     let glibc = build_instrumented_glibc();
     let ipc = temp_dir().join("glibc-preload-fifo");
     let output_file = temp_dir().join("glibc-preload-fifo.out");
-    let script = repo_root().join("tests/support/run_client_server.sh");
+    let script = repo_root().join("tests/preload/support/run_client_server.sh");
     let output = Command::new("timeout")
         .args(["--kill-after=5s", "30s", "bash"])
         .arg(&script)

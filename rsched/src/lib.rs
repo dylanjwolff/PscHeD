@@ -7,7 +7,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(internal_features)]
 #![allow(clippy::missing_safety_doc)]
-#![feature(linkage)]
+#![cfg_attr(feature = "tsan", feature(linkage))]
 #![feature(link_llvm_intrinsics)]
 
 use std::cell::RefCell;

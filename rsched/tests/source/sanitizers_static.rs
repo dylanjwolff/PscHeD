@@ -41,11 +41,17 @@ fn asan_static_lib() -> PathBuf {
 fn build_static_lib(target_name: &str, cargo_args: &[&str]) -> PathBuf {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let target_dir = temp_dir().join(target_name);
-    let status = Command::new(cargo)
+    let mut command = Command::new(cargo);
+    command
         .current_dir(repo_root())
         .env("CARGO_TARGET_DIR", &target_dir)
         .arg("build")
-        .args(cargo_args)
+        .args(["-p", "rsched"])
+        .args(cargo_args);
+    if cfg!(feature = "coro") {
+        command.args(["--features", "coro"]);
+    }
+    let status = command
         .status()
         .expect("spawn cargo build for rsched staticlib");
     assert!(status.success(), "cargo build for rsched staticlib failed");
