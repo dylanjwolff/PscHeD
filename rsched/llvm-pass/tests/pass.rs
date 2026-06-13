@@ -143,6 +143,64 @@ int create_with_clone(struct clone_args *args, int (*func)(void *), void *arg) {
 "#
 }
 
+fn glibc_hidden_input() -> &'static str {
+    r#"
+int internal_helper(int value);
+static const char __rsched_hidden_ref_7_internal_helper
+    __attribute__((used)) = 0;
+
+int caller(int value) {
+    return internal_helper(value);
+}
+"#
+}
+
+fn glibc_hidden_definition_input() -> &'static str {
+    r#"
+int internal_helper(int value) {
+    return value + 1;
+}
+
+extern __typeof(internal_helper) __GI_internal_helper
+    __attribute__((alias("internal_helper"), visibility("hidden")));
+"#
+}
+
+fn glibc_hidden_nolink_input() -> &'static str {
+    r#"
+#define VERSION_test_1 TEST_1
+
+int legacy_helper(int value) {
+    return value + 1;
+}
+
+hidden_nolink(legacy_helper, test, 1)
+"#
+}
+
+fn glibc_hidden_alias_chain_input() -> &'static str {
+    r#"
+int implementation(int value) {
+    return value + 1;
+}
+
+extern __typeof(implementation) public_name
+    __attribute__((alias("implementation")));
+extern __typeof(public_name) __GI_public_name
+    __attribute__((weak, alias("public_name"), visibility("hidden")));
+static const char __rsched_hidden_ref_9_public_name
+    __attribute__((used)) = 0;
+"#
+}
+
+fn syscall_input() -> &'static str {
+    r#"
+long syscall(long number, ...) {
+    return number;
+}
+"#
+}
+
 fn compile_to_ir(name: &str) -> PathBuf {
     compile_source_to_ir(name, atomic_pthread_input(), &[])
 }
@@ -282,6 +340,116 @@ fn glibc_libc_mode_wraps_pthread_implementation_and_clone_internal() {
         ir.contains("@rsched_clone_internal"),
         "glibc mode did not rewrite __clone_internal calls:\n{ir}"
     );
+}
+
+#[test]
+fn glibc_libc_mode_rewrites_generic_hidden_calls() {
+    let input = compile_source_to_ir("glibc-hidden", glibc_hidden_input(), &[]);
+    let ir = run_pass(
+        "rsched-atomics<glibc-libc>",
+        &input,
+        "glibc-hidden.instrumented.ll",
+    );
+
+    assert!(
+        ir.contains("call i32 @__GI_internal_helper"),
+        "glibc mode did not redirect a hidden internal call:\n{ir}"
+    );
+}
+
+#[test]
+fn glibc_libc_mode_normalizes_hidden_definitions() {
+    let input = compile_source_to_ir(
+        "glibc-hidden-definition",
+        glibc_hidden_definition_input(),
+        &[],
+    );
+    let ir = run_pass(
+        "rsched-atomics<glibc-libc>",
+        &input,
+        "glibc-hidden-definition.instrumented.ll",
+    );
+
+    assert!(
+        ir.contains("@internal_helper = alias") && ir.contains("ptr @__GI_internal_helper"),
+        "glibc mode did not create the public alias:\n{ir}"
+    );
+    assert!(
+        ir.contains("define hidden i32 @__GI_internal_helper"),
+        "glibc mode did not move the implementation to its hidden name:\n{ir}"
+    );
+}
+
+#[test]
+fn glibc_libc_mode_preserves_hidden_nolink_versions() {
+    let compat_header =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../libc-instrumentation/glibc-clang-compat.h");
+    let input = compile_source_to_ir(
+        "glibc-hidden-nolink",
+        glibc_hidden_nolink_input(),
+        &[
+            "-DNO_HIDDEN",
+            "-include",
+            compat_header
+                .to_str()
+                .expect("UTF-8 compatibility header path"),
+        ],
+    );
+    let ir = run_pass(
+        "rsched-atomics<glibc-libc>",
+        &input,
+        "glibc-hidden-nolink.instrumented.ll",
+    );
+
+    assert!(
+        ir.contains("@legacy_helper = alias") && ir.contains("ptr @__GI_legacy_helper"),
+        "glibc mode did not preserve the public versioned alias:\n{ir}"
+    );
+    assert!(
+        ir.contains(".symver __EI_legacy_helper, legacy_helper@TEST_1"),
+        "glibc mode dropped the hidden_nolink symbol version:\n{ir}"
+    );
+}
+
+#[test]
+fn glibc_libc_mode_preserves_hidden_alias_chains() {
+    let input = compile_source_to_ir(
+        "glibc-hidden-alias-chain",
+        glibc_hidden_alias_chain_input(),
+        &[],
+    );
+    let ir = run_pass(
+        "rsched-atomics<glibc-libc>",
+        &input,
+        "glibc-hidden-alias-chain.instrumented.ll",
+    );
+
+    assert!(
+        ir.contains("@__GI_public_name = weak hidden alias")
+            && !ir.contains("declare i32 @__GI_public_name"),
+        "glibc mode displaced an existing hidden alias:\n{ir}"
+    );
+}
+
+#[test]
+fn libc_modes_redirect_the_syscall_definition() {
+    for mode in ["musl-libc", "glibc-libc"] {
+        let input = compile_source_to_ir(&format!("{mode}-syscall"), syscall_input(), &[]);
+        let ir = run_pass(
+            &format!("rsched-atomics<{mode}>"),
+            &input,
+            &format!("{mode}-syscall.instrumented.ll"),
+        );
+
+        assert!(
+            ir.contains("@__rsched_replaced_syscall"),
+            "{mode} mode did not rename the original syscall definition:\n{ir}"
+        );
+        assert!(
+            ir.contains("jmp rsched_libc_syscall"),
+            "{mode} mode did not emit the x86_64 syscall trampoline:\n{ir}"
+        );
+    }
 }
 
 #[test]

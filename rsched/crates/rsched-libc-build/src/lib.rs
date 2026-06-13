@@ -354,6 +354,7 @@ fn build_glibc(
     command
         .current_dir(&build_dir)
         .env("RSCHED_LLVM_PLUGIN", plugin)
+        .env("RSCHED_WORKSPACE", &options.workspace_root)
         .env("CC", &compiler_driver)
         .env("CFLAGS", "-g -O2")
         .env("CXXFLAGS", "-g -O2")
@@ -368,6 +369,8 @@ fn build_glibc(
     let mut command = Command::new("make");
     command
         .current_dir(&build_dir)
+        .env("RSCHED_LLVM_PLUGIN", plugin)
+        .env("RSCHED_WORKSPACE", &options.workspace_root)
         .arg("--silent")
         .arg(format!("-j{jobs}"))
         .arg(build_dir.join("versions.stmp"));
@@ -378,6 +381,7 @@ fn build_glibc(
     command
         .current_dir(&build_dir)
         .env("RSCHED_LLVM_PLUGIN", plugin)
+        .env("RSCHED_WORKSPACE", &options.workspace_root)
         .arg("--silent")
         .arg(format!("-j{jobs}"));
     add_glibc_link_args(&mut command, &shared_gnulib);
@@ -393,6 +397,7 @@ fn build_glibc(
         command
             .current_dir(options.workspace_root.join("glibc/glibc").join(subdir))
             .env("RSCHED_LLVM_PLUGIN", plugin)
+            .env("RSCHED_WORKSPACE", &options.workspace_root)
             .arg("--silent")
             .arg(format!("-j{jobs}"));
         add_glibc_link_args(&mut command, &shared_gnulib);
@@ -416,6 +421,7 @@ fn build_glibc(
     command
         .current_dir(options.workspace_root.join("glibc/glibc/support"))
         .env("RSCHED_LLVM_PLUGIN", plugin)
+        .env("RSCHED_WORKSPACE", &options.workspace_root)
         .arg("--silent")
         .arg(format!("-j{jobs}"))
         .arg("subdir=support")
@@ -496,6 +502,7 @@ fn build_musl(
     command
         .current_dir(&build_dir)
         .env("RSCHED_LLVM_PLUGIN", plugin)
+        .env("RSCHED_WORKSPACE", &options.workspace_root)
         .env(
             "LDFLAGS",
             "-Wl,--export-dynamic-symbol=rsched_atomic_instrument \
@@ -513,6 +520,7 @@ fn build_musl(
     command
         .current_dir(&build_dir)
         .env("RSCHED_LLVM_PLUGIN", plugin)
+        .env("RSCHED_WORKSPACE", &options.workspace_root)
         .arg(format!("-j{}", jobs()))
         .arg(format!("LIBCC={libcc}"));
     run(command, "build instrumented musl")?;
@@ -521,6 +529,7 @@ fn build_musl(
     command
         .current_dir(&build_dir)
         .env("RSCHED_LLVM_PLUGIN", plugin)
+        .env("RSCHED_WORKSPACE", &options.workspace_root)
         .arg("install");
     run(command, "install instrumented musl")?;
 
@@ -663,6 +672,7 @@ fn fingerprint(options: &BuildOptions) -> Result<String> {
         "src",
         "include",
         "c-examples",
+        "libc-instrumentation",
         "crates/rsched-libc-build/Cargo.toml",
         "crates/rsched-libc-build/src",
         "llvm-pass/Cargo.toml",

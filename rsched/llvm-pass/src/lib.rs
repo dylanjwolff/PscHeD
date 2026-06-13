@@ -1,6 +1,10 @@
 use llvm_plugin::inkwell::llvm_sys::core::{
-    LLVMGetNamedGlobalAlias, LLVMSetOperand, LLVMSetValueName2,
+    LLVMAddAlias2, LLVMAliasGetAliasee, LLVMGetFirstGlobal, LLVMGetFirstGlobalAlias,
+    LLVMGetNamedGlobalAlias, LLVMGetNextGlobal, LLVMGetNextGlobalAlias, LLVMGetValueName2,
+    LLVMGlobalGetValueType, LLVMIsAGlobalAlias, LLVMSetLinkage, LLVMSetOperand, LLVMSetValueName2,
+    LLVMSetVisibility,
 };
+use llvm_plugin::inkwell::llvm_sys::{LLVMLinkage, LLVMVisibility};
 use llvm_plugin::inkwell::module::Module;
 use llvm_plugin::inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicTypeEnum};
 use llvm_plugin::inkwell::values::{
@@ -74,10 +78,14 @@ impl LlvmModulePass for RschedAtomicsPass {
         changed |= wrap_fuzzer_entrypoint(module);
         changed |= instrument_atomics(module);
         if self.musl_libc {
+            changed |= redirect_syscall_definition(module);
             changed |= wrap_libc_pthread_implementations(module, MUSL_REWRITES, true);
             changed |= rewrite_clone_calls(module);
         }
         if self.glibc_libc {
+            changed |= materialize_glibc_hidden_declarations(module);
+            changed |= normalize_glibc_hidden_aliases(module);
+            changed |= redirect_syscall_definition(module);
             changed |= wrap_libc_pthread_implementations(module, GLIBC_REWRITES, false);
             changed |= wrap_libc_pthread_implementations(module, GLIBC_PUBLIC_REWRITES, true);
             changed |=
@@ -89,6 +97,7 @@ impl LlvmModulePass for RschedAtomicsPass {
             );
             changed |= restore_glibc_hidden_helpers(module);
             changed |= rewrite_glibc_hidden_calls(module);
+            changed |= rewrite_glibc_hidden_declarations(module);
             changed |= rewrite_clone_internal_calls(module);
             changed |= rewrite_clone_calls(module);
         }
@@ -102,6 +111,92 @@ impl LlvmModulePass for RschedAtomicsPass {
             PreservedAnalyses::All
         }
     }
+}
+
+fn materialize_glibc_hidden_declarations(module: &mut Module<'_>) -> bool {
+    const PREFIX: &str = "__rsched_hidden_ref_";
+    let mut names = Vec::new();
+    let mut marker = unsafe { LLVMGetFirstGlobal(module.as_mut_ptr()) };
+    while !marker.is_null() {
+        if let Some(marker_name) = value_name(marker)
+            && let Some(rest) = marker_name.strip_prefix(PREFIX)
+            && let Some((_, original_name)) = rest.split_once('_')
+        {
+            names.push(original_name.to_owned());
+        }
+        marker = unsafe { LLVMGetNextGlobal(marker) };
+    }
+
+    let mut changed = false;
+    for original_name in names {
+        let Some(original) = module.get_function(&original_name) else {
+            continue;
+        };
+        let hidden_name = format!("__GI_{original_name}");
+        let hidden_alias = unsafe {
+            LLVMGetNamedGlobalAlias(
+                module.as_mut_ptr(),
+                hidden_name.as_ptr().cast(),
+                hidden_name.len(),
+            )
+        };
+        if module.get_function(&hidden_name).is_none() && hidden_alias.is_null() {
+            module.add_function(&hidden_name, original.get_type(), None);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn normalize_glibc_hidden_aliases(module: &mut Module<'_>) -> bool {
+    let mut aliases = Vec::new();
+    let mut alias = unsafe { LLVMGetFirstGlobalAlias(module.as_mut_ptr()) };
+    while !alias.is_null() {
+        let next = unsafe { LLVMGetNextGlobalAlias(alias) };
+        let Some(hidden_name) = value_name(alias) else {
+            alias = next;
+            continue;
+        };
+        let Some(original_name) = hidden_name.strip_prefix("__GI_").map(str::to_owned) else {
+            alias = next;
+            continue;
+        };
+        let aliasee = unsafe { LLVMAliasGetAliasee(alias) };
+        let aliasee_is_alias = unsafe { !LLVMIsAGlobalAlias(aliasee).is_null() };
+        if !aliasee_is_alias && value_name(aliasee).as_deref() == Some(original_name.as_str()) {
+            aliases.push((alias, aliasee, hidden_name, original_name));
+        }
+        alias = next;
+    }
+
+    for (alias, aliasee, hidden_name, original_name) in &aliases {
+        let public_name = std::ffi::CString::new(original_name.as_str())
+            .expect("glibc symbol name contains no NUL");
+        set_value_name(*alias, &format!("__rsched_hidden_alias_{original_name}"));
+        set_value_name(*aliasee, hidden_name);
+        unsafe {
+            LLVMSetLinkage(*alias, LLVMLinkage::LLVMPrivateLinkage);
+            LLVMSetVisibility(*aliasee, LLVMVisibility::LLVMHiddenVisibility);
+            LLVMAddAlias2(
+                module.as_mut_ptr(),
+                LLVMGlobalGetValueType(*aliasee),
+                0,
+                *aliasee,
+                public_name.as_ptr(),
+            );
+        }
+    }
+    !aliases.is_empty()
+}
+
+fn value_name(value: llvm_plugin::inkwell::llvm_sys::prelude::LLVMValueRef) -> Option<String> {
+    let mut len = 0;
+    let name = unsafe { LLVMGetValueName2(value, &mut len) };
+    if name.is_null() {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(name.cast(), len) };
+    std::str::from_utf8(bytes).ok().map(str::to_owned)
 }
 
 fn wrap_fuzzer_entrypoint(module: &mut Module<'_>) -> bool {
@@ -393,6 +488,26 @@ fn rewrite_clone_internal_calls(module: &mut Module<'_>) -> bool {
     rewrite_function_uses(module, old, new)
 }
 
+fn redirect_syscall_definition(module: &mut Module<'_>) -> bool {
+    let Some(syscall) = module.get_function("syscall") else {
+        return false;
+    };
+    if syscall.count_basic_blocks() == 0 {
+        return false;
+    }
+
+    set_value_name(syscall.as_value_ref(), "__rsched_replaced_syscall");
+    module.set_inline_assembly(
+        ".text\n\
+         .globl syscall\n\
+         .type syscall,@function\n\
+         syscall:\n\
+         \tjmp rsched_libc_syscall\n\
+         .size syscall, .-syscall\n",
+    );
+    true
+}
+
 const PTHREAD_REWRITES: &[(&str, &str)] = &[
     ("pthread_create", "rsched_pthread_create"),
     ("pthread_join", "rsched_pthread_join"),
@@ -484,6 +599,32 @@ fn rewrite_glibc_hidden_calls(module: &mut Module<'_>) -> bool {
         changed |= rewrite_function_uses(module, from, to);
     }
     changed
+}
+
+fn rewrite_glibc_hidden_declarations(module: &mut Module<'_>) -> bool {
+    let mut rewrites = Vec::new();
+    let mut hidden = module.get_first_function();
+    while let Some(function) = hidden {
+        hidden = function.get_next_function();
+        let Ok(name) = function.get_name().to_str() else {
+            continue;
+        };
+        let Some(original_name) = name.strip_prefix("__GI_") else {
+            continue;
+        };
+        let Some(original) = module.get_function(original_name) else {
+            continue;
+        };
+        if original.as_value_ref() != function.as_value_ref() {
+            rewrites.push((original, function));
+        }
+    }
+
+    rewrites
+        .into_iter()
+        .fold(false, |changed, (original, hidden)| {
+            rewrite_function_uses(module, original, hidden) || changed
+        })
 }
 
 fn restore_glibc_hidden_helpers(module: &mut Module<'_>) -> bool {
