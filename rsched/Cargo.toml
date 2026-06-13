@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "preload", "llvm-pass"]
+members = [".", "llvm-pass"]
 
 [package]
 name = "rsched"
@@ -10,11 +10,11 @@ edition = "2024"
 name = "rsched"
 # rlib      – used by integration tests (Rust calls into our no_mangle exports)
 # staticlib – C programs that statically link against librsched.a
-# (cdylib is in the preload/ sub-crate so pthread names stay out of this lib)
 crate-type = ["rlib", "staticlib"]
 bench = false
 
 [dependencies]
+corosensei = "0.3.4"
 libc = "0.2"
 
 [dev-dependencies]
@@ -23,6 +23,8 @@ criterion = { version = "0.8", features = ["html_reports"] }
 [features]
 tsan = []
 asan = []
+coro = []
+instrumented-libc = []
 
 [build-dependencies]
 cc = "1"
