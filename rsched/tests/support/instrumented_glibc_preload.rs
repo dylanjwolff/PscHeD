@@ -173,27 +173,9 @@ fn instrument_binary(original: &Path, name: &str) -> Option<(PathBuf, PathBuf, S
     Some((instrumented, output_dir, log))
 }
 
-fn clang_runtime(name: &str) -> Option<PathBuf> {
-    let output = Command::new("clang")
-        .arg(format!("-print-file-name={name}"))
-        .output()
-        .expect("locate clang runtime");
-    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    output
-        .status
-        .success()
-        .then_some(path)
-        .filter(|path| path.exists())
-}
-
 fn run_binary_instrumented(label: &str, binary: &Path, envs: &[(&str, OsString)]) -> RunOutput {
-    let Some((instrumented, _output_dir, _)) = instrument_binary(binary, label) else {
-        return RunOutput {
-            status: Command::new("true").status().expect("run true"),
-            stdout: String::new(),
-            stderr: String::new(),
-        };
-    };
+    let (instrumented, _output_dir, _) =
+        instrument_binary(binary, label).expect("binary instrumentation was checked");
     let mut combined = Vec::new();
     combined.extend(envs.iter().cloned());
     combined.push(("RSCHED_DIRECT_EXEC", OsString::from("1")));
@@ -211,7 +193,6 @@ fn build_llvm_instrumented_case(source: &str, name: &str, sanitizer: &str) -> Pa
     let output = Command::new("clang-17")
         .args(["-S", "-emit-llvm", "-g0", "-O0"])
         .arg(format!("-fsanitize={sanitizer}"))
-        .args((sanitizer == "address").then_some("-shared-libasan"))
         .arg("-o")
         .arg(&input)
         .arg(&c_path)
@@ -243,11 +224,11 @@ fn build_llvm_instrumented_case(source: &str, name: &str, sanitizer: &str) -> Pa
 
     let output = Command::new("clang-17")
         .arg(format!("-fsanitize={sanitizer}"))
-        .args((sanitizer == "address").then_some("-shared-libasan"))
+        .args(["-static-libsan", "-static-libgcc"])
         .args(["-g", "-O0", "-o"])
         .arg(&binary)
         .arg(&transformed)
-        .arg(&glibc.libc)
+        .arg(glibc.build_dir.join("libc.so"))
         .arg("-pthread")
         .output()
         .expect("link LLVM pass sanitizer subject");
@@ -298,32 +279,18 @@ fn instrumented_glibc_preload_asan_compatibility() {
         &source,
         "glibc-preload-asan-clean",
         &["CASE_ASAN_CLEAN"],
-        &["-fsanitize=address", "-shared-libasan"],
+        &["-fsanitize=address", "-static-libsan", "-static-libgcc"],
     );
     let buggy = build_c_case(
         &source,
         "glibc-preload-asan-buggy",
         &["CASE_ASAN_UAF"],
-        &["-fsanitize=address", "-shared-libasan"],
+        &["-fsanitize=address", "-static-libsan", "-static-libgcc"],
     );
     let options = OsString::from("halt_on_error=1:detect_leaks=0");
-    let runtime = clang_runtime("libclang_rt.asan-x86_64.so").expect("locate shared ASAN runtime");
-    let runtime_dir = runtime
-        .parent()
-        .expect("ASAN runtime directory")
-        .as_os_str()
-        .to_owned();
     assert_clean(
         "instrumented glibc preload ASAN clean",
-        run_preloaded(
-            &clean,
-            &[],
-            &[
-                ("ASAN_OPTIONS", options.clone()),
-                ("RSCHED_EXTRA_PRELOAD", runtime.as_os_str().to_owned()),
-                ("RSCHED_EXTRA_LIBRARY_PATH", runtime_dir.clone()),
-            ],
-        ),
+        run_preloaded(&clean, &[], &[("ASAN_OPTIONS", options.clone())]),
     );
     assert_report(
         "instrumented glibc preload ASAN buggy",
@@ -333,8 +300,6 @@ fn instrumented_glibc_preload_asan_compatibility() {
             &[
                 ("ASAN_OPTIONS", options),
                 ("RSCHED_SCHEDULER", OsString::from("dfs")),
-                ("RSCHED_EXTRA_PRELOAD", runtime.as_os_str().to_owned()),
-                ("RSCHED_EXTRA_LIBRARY_PATH", runtime_dir),
             ],
         ),
         "heap-use-after-free",
@@ -348,13 +313,13 @@ fn instrumented_glibc_preload_ubsan_compatibility() {
         &source,
         "glibc-preload-ubsan-clean",
         &["CASE_UBSAN_CLEAN"],
-        &["-fsanitize=undefined"],
+        &["-fsanitize=undefined", "-static-libsan", "-static-libgcc"],
     );
     let buggy = build_c_case(
         &source,
         "glibc-preload-ubsan-buggy",
         &["CASE_UBSAN_UB"],
-        &["-fsanitize=undefined"],
+        &["-fsanitize=undefined", "-static-libsan", "-static-libgcc"],
     );
     let options = OsString::from("halt_on_error=1");
     assert_clean(
@@ -558,7 +523,17 @@ int main(void)
 
 #[test]
 fn instrumented_glibc_preload_binary_sanitizers() {
+    if !repo_root()
+        .join("binary-instrumentation/e9patch/e9tool")
+        .exists()
+    {
+        eprintln!("skipping binary sanitizer tests; e9tool is missing");
+        return;
+    }
+
     let source = repo_root().join("c-examples/sanitizer_cases.c");
+    let asan_runtime = build_instrumented_glibc().asan_runtime;
+    let asan_preload = asan_runtime.as_os_str().to_owned();
     let asan_clean = build_binary_instrumentation_case(
         &source,
         "glibc-preload-bininst-asan-clean",
@@ -572,13 +547,6 @@ fn instrumented_glibc_preload_binary_sanitizers() {
         &["-fsanitize=address", "-shared-libasan"],
     );
     let asan_options = OsString::from("halt_on_error=1:detect_leaks=0");
-    let asan_runtime = clang_runtime("libclang_rt.asan-x86_64.so")
-        .expect("locate shared AddressSanitizer runtime");
-    let asan_runtime_dir = asan_runtime
-        .parent()
-        .expect("ASAN runtime directory")
-        .as_os_str()
-        .to_owned();
     assert_clean(
         "instrumented glibc preload binary ASAN clean",
         run_binary_instrumented(
@@ -586,8 +554,7 @@ fn instrumented_glibc_preload_binary_sanitizers() {
             &asan_clean,
             &[
                 ("ASAN_OPTIONS", asan_options.clone()),
-                ("RSCHED_EXTRA_PRELOAD", asan_runtime.as_os_str().to_owned()),
-                ("RSCHED_EXTRA_LIBRARY_PATH", asan_runtime_dir.clone()),
+                ("RSCHED_EXTRA_PRELOAD", asan_preload.clone()),
             ],
         ),
     );
@@ -598,8 +565,7 @@ fn instrumented_glibc_preload_binary_sanitizers() {
             &asan_buggy,
             &[
                 ("ASAN_OPTIONS", asan_options),
-                ("RSCHED_EXTRA_PRELOAD", asan_runtime.as_os_str().to_owned()),
-                ("RSCHED_EXTRA_LIBRARY_PATH", asan_runtime_dir),
+                ("RSCHED_EXTRA_PRELOAD", asan_preload),
             ],
         ),
         "heap-use-after-free",
@@ -609,13 +575,13 @@ fn instrumented_glibc_preload_binary_sanitizers() {
         &source,
         "glibc-preload-bininst-ubsan-clean",
         &["CASE_UBSAN_CLEAN"],
-        &["-fsanitize=undefined"],
+        &["-fsanitize=undefined", "-static-libsan", "-static-libgcc"],
     );
     let ubsan_buggy = build_binary_instrumentation_case(
         &source,
         "glibc-preload-bininst-ubsan-buggy",
         &["CASE_UBSAN_UB"],
-        &["-fsanitize=undefined"],
+        &["-fsanitize=undefined", "-static-libsan", "-static-libgcc"],
     );
     let ubsan_options = OsString::from("halt_on_error=1");
     assert_clean(
@@ -652,36 +618,13 @@ fn instrumented_glibc_preload_llvm_pass_sanitizers() {
         "address",
     );
     let asan_options = OsString::from("halt_on_error=1:detect_leaks=0");
-    let asan_runtime = clang_runtime("libclang_rt.asan-x86_64.so")
-        .expect("locate shared AddressSanitizer runtime");
-    let asan_runtime_dir = asan_runtime
-        .parent()
-        .expect("ASAN runtime directory")
-        .as_os_str()
-        .to_owned();
     assert_clean(
         "instrumented glibc preload LLVM ASAN clean",
-        run_preloaded(
-            &asan_clean,
-            &[],
-            &[
-                ("ASAN_OPTIONS", asan_options.clone()),
-                ("RSCHED_EXTRA_PRELOAD", asan_runtime.as_os_str().to_owned()),
-                ("RSCHED_EXTRA_LIBRARY_PATH", asan_runtime_dir.clone()),
-            ],
-        ),
+        run_preloaded(&asan_clean, &[], &[("ASAN_OPTIONS", asan_options.clone())]),
     );
     assert_report(
         "instrumented glibc preload LLVM ASAN buggy",
-        run_preloaded(
-            &asan_buggy,
-            &[],
-            &[
-                ("ASAN_OPTIONS", asan_options),
-                ("RSCHED_EXTRA_PRELOAD", asan_runtime.as_os_str().to_owned()),
-                ("RSCHED_EXTRA_LIBRARY_PATH", asan_runtime_dir),
-            ],
-        ),
+        run_preloaded(&asan_buggy, &[], &[("ASAN_OPTIONS", asan_options)]),
         "AddressSanitizer",
     );
 

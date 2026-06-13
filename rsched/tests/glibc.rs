@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
@@ -27,12 +28,12 @@ struct InstrumentedGlibc {
     plugin: PathBuf,
     rsched: PathBuf,
     #[cfg_attr(feature = "coro", allow(dead_code))]
-    libc: PathBuf,
-    #[cfg_attr(feature = "coro", allow(dead_code))]
     loader: PathBuf,
     #[cfg_attr(feature = "coro", allow(dead_code))]
     library_path: String,
     preload_runner: PathBuf,
+    #[cfg(not(feature = "coro"))]
+    asan_runtime: PathBuf,
 }
 
 fn repo_root() -> PathBuf {
@@ -205,6 +206,40 @@ fn build_instrumented_glibc() -> InstrumentedGlibc {
                 .arg("lib");
             run(command, "build instrumented glibc libraries");
 
+            for (subdir, library, soname) in [
+                ("math", "libm.so", "libm.so.6"),
+                ("resolv", "libresolv.so", "libresolv.so.2"),
+            ] {
+                let library = build_dir.join(subdir).join(library);
+                let mut command = Command::new("make");
+                command
+                    .current_dir(root.join("glibc/glibc").join(subdir))
+                    .env("RSCHED_LLVM_PLUGIN", &plugin)
+                    .arg("--silent")
+                    .arg(format!("-j{jobs}"))
+                    .arg(format!("libc.so-gnulib={shared_gnulib}"))
+                    .arg(format!("gnulib={shared_gnulib}"))
+                    .arg(format!("gnulib-tests={shared_gnulib}"))
+                    .arg("static-gnulib=-lgcc -lgcc_eh")
+                    .arg("static-gnulib-tests=-lgcc -lgcc_eh")
+                    .arg(format!("subdir={subdir}"))
+                    .arg("..=../")
+                    .arg(format!("objdir={}", build_dir.display()))
+                    .arg(&library);
+                run(command, &format!("build instrumented glibc {library:?}"));
+
+                let soname = build_dir.join(subdir).join(soname);
+                if !soname.exists() {
+                    symlink(
+                        library.file_name().expect("glibc library file name"),
+                        &soname,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("create glibc library symlink {}: {error}", soname.display())
+                    });
+                }
+            }
+
             let support_archive = build_dir.join("support/libsupport_nonshared.a");
             let mut command = Command::new("make");
             command
@@ -230,20 +265,84 @@ fn build_instrumented_glibc() -> InstrumentedGlibc {
             std::fs::copy(&libgcc, build_dir.join("libgcc_s.so.1"))
                 .expect("copy libgcc_s.so.1 into the glibc test library path");
 
+            #[cfg(not(feature = "coro"))]
+            let asan_runtime = {
+                let mut command = Command::new("clang");
+                command.arg("-print-file-name=libclang_rt.asan-x86_64.so");
+                let output = run(command, "locate the Clang ASAN runtime");
+                let libasan = PathBuf::from(
+                    String::from_utf8(output.stdout)
+                        .expect("clang returned a non-UTF-8 ASAN runtime path")
+                        .trim(),
+                );
+                assert!(
+                    libasan.is_file(),
+                    "clang did not locate its shared ASAN runtime"
+                );
+                let mut command = Command::new("objdump");
+                command.args(["-p"]).arg(&libasan);
+                let output = run(command, "read the Clang ASAN runtime SONAME");
+                let output =
+                    String::from_utf8(output.stdout).expect("objdump returned non-UTF-8 output");
+                let libasan_soname = output
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("SONAME").map(str::trim))
+                    .expect("find Clang ASAN runtime SONAME");
+                let asan_runtime = build_dir.join(libasan_soname);
+                std::fs::copy(&libasan, &asan_runtime)
+                    .expect("copy the ASAN runtime into the glibc test library path");
+
+                let mut command = Command::new("g++");
+                command.arg("--print-file-name=libsupc++.a");
+                let output = run(command, "locate libsupc++.a");
+                let libsupcxx = PathBuf::from(
+                    String::from_utf8(output.stdout)
+                        .expect("g++ returned a non-UTF-8 libsupc++ path")
+                        .trim(),
+                );
+                assert!(libsupcxx.is_file(), "g++ did not locate libsupc++.a");
+                let cxxabi_map = temp.join("asan-cxxabi.map");
+                std::fs::write(
+                    &cxxabi_map,
+                    "CXXABI_1.3 {\n\
+                     global:\n\
+                       __cxa_*;\n\
+                       __dynamic_cast;\n\
+                       _ZTIN10__cxxabiv1*;\n\
+                       _ZTSN10__cxxabiv1*;\n\
+                     };\n\
+                     GLIBCXX_3.4 {\n\
+                     global:\n\
+                       _ZTISt9type_info;\n\
+                       _ZTSSt9type_info;\n\
+                     local: *;\n\
+                     } CXXABI_1.3;\n",
+                )
+                .expect("write ASAN C++ ABI version map");
+                let mut command = Command::new("clang-17");
+                command
+                    .args(["-shared", "-static-libgcc"])
+                    .arg("-Wl,-soname,libstdc++.so.6")
+                    .arg(format!("-Wl,--version-script={}", cxxabi_map.display()))
+                    .arg("-Wl,--whole-archive")
+                    .arg(&libsupcxx)
+                    .arg("-Wl,--no-whole-archive")
+                    .arg("-o")
+                    .arg(build_dir.join("libstdc++.so.6"));
+                run(command, "build the minimal ASAN C++ ABI library");
+                asan_runtime
+            };
+
             let loader = build_dir.join("elf/ld-linux-x86-64.so.2");
             let libc = build_dir.join("libc.so");
             let preload_runner = temp.join("run-with-instrumented-glibc");
-            let mut library_paths = [
+            let library_paths = [
                 "", "math", "elf", "dlfcn", "nss", "nis", "rt", "resolv", "mathvec", "support",
                 "crypt", "nptl",
             ]
             .into_iter()
             .map(|dir| build_dir.join(dir))
             .collect::<Vec<_>>();
-            library_paths.extend([
-                PathBuf::from("/lib/x86_64-linux-gnu"),
-                PathBuf::from("/usr/lib/x86_64-linux-gnu"),
-            ]);
             let library_path = library_paths
                 .iter()
                 .map(|dir| dir.display().to_string())
@@ -283,10 +382,11 @@ fn build_instrumented_glibc() -> InstrumentedGlibc {
                 build_dir,
                 plugin,
                 rsched,
-                libc,
                 loader,
                 library_path,
                 preload_runner,
+                #[cfg(not(feature = "coro"))]
+                asan_runtime,
             }
         })
         .clone()
