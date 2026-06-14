@@ -119,6 +119,14 @@ work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 input_bc="$work_dir/input.bc"
 instrumented_bc="$work_dir/instrumented.bc"
+pass_mode="$RSCHED_LIBC_MODE-libc"
+
+# glibc's .oS objects are linked into applications through libc_nonshared.a.
+# They must keep public libc references; hidden __GI_* symbols are local to
+# libc.so. Atomic instrumentation still applies.
+if [[ "$RSCHED_LIBC_MODE" == glibc && "$output_file" == *.oS ]]; then
+    pass_mode=
+fi
 
 bc_args=()
 for ((i = 0; i < ${#args[@]}; i++)); do
@@ -148,7 +156,7 @@ fi
 clang-17 -emit-llvm "${bc_args[@]}"
 opt-17 \
     -load-pass-plugin "$RSCHED_LLVM_PLUGIN" \
-    "-passes=rsched-atomics<$RSCHED_LIBC_MODE-libc>" \
+    "-passes=rsched-atomics${pass_mode:+<$pass_mode>}" \
     "$input_bc" \
     -o "$instrumented_bc"
 clang-17 -c "$instrumented_bc" -o "$output_file"

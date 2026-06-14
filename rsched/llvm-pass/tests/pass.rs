@@ -305,8 +305,8 @@ fn musl_libc_mode_wraps_pthread_implementation_and_weak_alias() {
         "wrappers did not dispatch to rsched and the original musl body:\n{ir}"
     );
     assert!(
-        ir.contains("call void @rsched_atomic_instrument"),
-        "original musl atomics were not instrumented:\n{ir}"
+        !ir.contains("call void @rsched_atomic_instrument"),
+        "libc internals must not schedule at atomics around native futexes:\n{ir}"
     );
     assert!(
         ir.contains("@rsched_clone"),

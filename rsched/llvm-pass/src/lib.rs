@@ -76,7 +76,15 @@ impl LlvmModulePass for RschedAtomicsPass {
     ) -> PreservedAnalyses {
         let mut changed = false;
         changed |= wrap_fuzzer_entrypoint(module);
-        changed |= instrument_atomics(module);
+        // libc synchronization internals use futex syscalls that may be
+        // emitted as inline assembly. Scheduling at those internal atomics
+        // can run a waiter while its lock holder is parked, blocking the
+        // provider's only active kernel thread. The libc wrappers below are
+        // the semantic scheduling points; application mode still instruments
+        // every LLVM atomic operation.
+        if !self.musl_libc && !self.glibc_libc {
+            changed |= instrument_atomics(module);
+        }
         if self.musl_libc {
             changed |= redirect_syscall_definition(module);
             changed |= wrap_libc_pthread_implementations(module, MUSL_REWRITES, true);
