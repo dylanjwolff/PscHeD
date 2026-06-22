@@ -117,6 +117,8 @@ pub struct ArtifactManifest {
     pub root: PathBuf,
     pub static_library: Option<PathBuf>,
     pub llvm_plugin: PathBuf,
+    #[serde(default)]
+    pub gcc_plugin: Option<PathBuf>,
     pub libc: Option<PathBuf>,
     pub loader: Option<PathBuf>,
     pub library_path: Option<String>,
@@ -180,6 +182,7 @@ impl ArtifactManifest {
         let root = self.root.clone();
         for path in [
             &mut self.static_library,
+            &mut self.gcc_plugin,
             &mut self.libc,
             &mut self.loader,
             &mut self.runner,
@@ -204,6 +207,7 @@ impl ArtifactManifest {
     fn validate(&self) -> Result<()> {
         for path in [
             Some(&self.llvm_plugin),
+            self.gcc_plugin.as_ref(),
             self.static_library.as_ref(),
             self.libc.as_ref(),
             self.loader.as_ref(),
@@ -243,7 +247,10 @@ pub fn ensure_artifact(options: &BuildOptions) -> Result<ArtifactManifest> {
     let plugin = ensure_llvm_plugin(options, &fingerprint)?;
     let mut manifest = match options.kind {
         ArtifactKind::Static => build_static(options, &artifact_root, &plugin, &fingerprint)?,
-        ArtifactKind::Glibc => build_glibc(options, &artifact_root, &plugin, &fingerprint)?,
+        ArtifactKind::Glibc => {
+            let gcc_plugin = ensure_gcc_plugin(options, &fingerprint)?;
+            build_glibc(options, &artifact_root, &plugin, &gcc_plugin, &fingerprint)?
+        }
         ArtifactKind::Musl => build_musl(options, &artifact_root, &plugin, &fingerprint)?,
     };
     manifest.root = PathBuf::from(".");
@@ -276,6 +283,38 @@ fn ensure_llvm_plugin(options: &BuildOptions, artifact_fingerprint: &str) -> Res
     run(command, "build the rsched LLVM pass")?;
     if !plugin.exists() {
         bail!("expected LLVM plugin at {}", plugin.display());
+    }
+    Ok(plugin)
+}
+
+fn ensure_gcc_plugin(options: &BuildOptions, artifact_fingerprint: &str) -> Result<PathBuf> {
+    let component_root = options
+        .cache_root
+        .join("components/gcc-pass")
+        .join(options.profile.to_string())
+        .join(gcc_plugin_fingerprint(options, artifact_fingerprint)?);
+    let plugin = component_root.join("rsched_gcc_pass.so");
+    if plugin.exists() {
+        return Ok(plugin);
+    }
+
+    fs::create_dir_all(&component_root)?;
+    let include_dir = gcc_plugin_include_dir()?;
+    let source = options.workspace_root.join("gcc-pass/rsched_gcc_pass.cc");
+    let mut command = Command::new("g++");
+    command
+        .arg("-fPIC")
+        .arg("-shared")
+        .arg("-fno-rtti")
+        .arg("-O2")
+        .arg("-std=gnu++17")
+        .arg(format!("-I{}", include_dir.display()))
+        .arg(&source)
+        .arg("-o")
+        .arg(&plugin);
+    run(command, "build the rsched GCC pass")?;
+    if !plugin.exists() {
+        bail!("expected GCC plugin at {}", plugin.display());
     }
     Ok(plugin)
 }
@@ -333,14 +372,14 @@ fn build_glibc(
     options: &BuildOptions,
     root: &Path,
     plugin: &Path,
+    gcc_plugin: &Path,
     fingerprint: &str,
 ) -> Result<ArtifactManifest> {
-    require_program("clang-17")?;
     require_program("gcc")?;
     require_program("g++")?;
     require_program("make")?;
     require_program("objcopy")?;
-    require_program("opt-17")?;
+    require_program("ld")?;
 
     let cargo_target = root.join("rsched-target");
     let rsched = build_embedded_rsched(options, &cargo_target, None)?;
@@ -348,12 +387,12 @@ fn build_glibc(
     let install_dir = root.join("install");
     fs::create_dir_all(&build_dir)?;
 
-    let compiler_driver = options.workspace_root.join("glibc/instrument-clang.sh");
+    let compiler_driver = options.workspace_root.join("glibc/instrument-gcc.sh");
     let configure = options.workspace_root.join("glibc/glibc/configure");
     let mut command = Command::new(configure);
     command
         .current_dir(&build_dir)
-        .env("RSCHED_LLVM_PLUGIN", plugin)
+        .env("RSCHED_GCC_PLUGIN", gcc_plugin)
         .env("RSCHED_WORKSPACE", &options.workspace_root)
         .env("CC", &compiler_driver)
         .env("CFLAGS", "-g -O2")
@@ -369,7 +408,7 @@ fn build_glibc(
     let mut command = Command::new("make");
     command
         .current_dir(&build_dir)
-        .env("RSCHED_LLVM_PLUGIN", plugin)
+        .env("RSCHED_GCC_PLUGIN", gcc_plugin)
         .env("RSCHED_WORKSPACE", &options.workspace_root)
         .arg("--silent")
         .arg(format!("-j{jobs}"))
@@ -380,7 +419,7 @@ fn build_glibc(
     let mut command = Command::new("make");
     command
         .current_dir(&build_dir)
-        .env("RSCHED_LLVM_PLUGIN", plugin)
+        .env("RSCHED_GCC_PLUGIN", gcc_plugin)
         .env("RSCHED_WORKSPACE", &options.workspace_root)
         .arg("--silent")
         .arg(format!("-j{jobs}"));
@@ -396,7 +435,7 @@ fn build_glibc(
         let mut command = Command::new("make");
         command
             .current_dir(options.workspace_root.join("glibc/glibc").join(subdir))
-            .env("RSCHED_LLVM_PLUGIN", plugin)
+            .env("RSCHED_GCC_PLUGIN", gcc_plugin)
             .env("RSCHED_WORKSPACE", &options.workspace_root)
             .arg("--silent")
             .arg(format!("-j{jobs}"));
@@ -420,7 +459,7 @@ fn build_glibc(
     let mut command = Command::new("make");
     command
         .current_dir(options.workspace_root.join("glibc/glibc/support"))
-        .env("RSCHED_LLVM_PLUGIN", plugin)
+        .env("RSCHED_GCC_PLUGIN", gcc_plugin)
         .env("RSCHED_WORKSPACE", &options.workspace_root)
         .arg("--silent")
         .arg(format!("-j{jobs}"))
@@ -463,6 +502,8 @@ fn build_glibc(
     }
     let packaged_plugin = runtime.join("librsched_llvm_pass.so");
     fs::copy(plugin, &packaged_plugin)?;
+    let packaged_gcc_plugin = runtime.join("rsched_gcc_pass.so");
+    fs::copy(gcc_plugin, &packaged_gcc_plugin)?;
     let runner = runtime.join("run");
     write_glibc_runner(&runner)?;
 
@@ -475,6 +516,7 @@ fn build_glibc(
     manifest.build_dir = Some(build_dir);
     manifest.install_dir = Some(install_dir);
     manifest.rsched_library = Some(rsched);
+    manifest.gcc_plugin = Some(packaged_gcc_plugin);
     manifest.asan_runtime = asan_runtime.map(|path| runtime_lib.join(path.file_name().unwrap()));
     Ok(manifest)
 }
@@ -621,6 +663,7 @@ fn base_manifest(
         root: root.to_path_buf(),
         static_library,
         llvm_plugin: plugin,
+        gcc_plugin: None,
         libc: None,
         loader: None,
         library_path: None,
@@ -636,6 +679,7 @@ fn base_manifest(
 fn relativize_manifest(manifest: &mut ArtifactManifest, root: &Path) {
     for path in [
         &mut manifest.static_library,
+        &mut manifest.gcc_plugin,
         &mut manifest.libc,
         &mut manifest.loader,
         &mut manifest.runner,
@@ -677,6 +721,7 @@ fn fingerprint(options: &BuildOptions) -> Result<String> {
         "crates/rsched-libc-build/src",
         "llvm-pass/Cargo.toml",
         "llvm-pass/src",
+        "gcc-pass",
     ] {
         hash_path(
             &mut hash,
@@ -689,7 +734,7 @@ fn fingerprint(options: &BuildOptions) -> Result<String> {
         ArtifactKind::Glibc => {
             hash_path(
                 &mut hash,
-                &options.workspace_root.join("glibc/instrument-clang.sh"),
+                &options.workspace_root.join("glibc/instrument-gcc.sh"),
                 &options.workspace_root,
             )?;
             hash_source_checkout(
@@ -726,6 +771,26 @@ fn plugin_fingerprint(options: &BuildOptions, fallback: &str) -> Result<String> 
     hash.add(options.profile.to_string().as_bytes());
     hash.add(&program_version("rustc"));
     hash.add(&program_version("llvm-config-17"));
+    let value = hash.finish();
+    Ok(if value.is_empty() {
+        fallback.to_owned()
+    } else {
+        value
+    })
+}
+
+fn gcc_plugin_fingerprint(options: &BuildOptions, fallback: &str) -> Result<String> {
+    let mut hash = StableHash::new();
+    for path in ["gcc-pass", "libc-instrumentation/instrument-gcc.sh"] {
+        hash_path(
+            &mut hash,
+            &options.workspace_root.join(path),
+            &options.workspace_root,
+        )?;
+    }
+    hash.add(options.profile.to_string().as_bytes());
+    hash.add(&program_version("gcc"));
+    hash.add(&program_version("g++"));
     let value = hash.finish();
     Ok(if value.is_empty() {
         fallback.to_owned()
@@ -943,6 +1008,21 @@ fn copy_compiler_library(program: &str, name: &str, destination: &Path) -> Resul
     let output = destination.join(name);
     fs::copy(source, &output)?;
     Ok(output)
+}
+
+fn gcc_plugin_include_dir() -> Result<PathBuf> {
+    let mut command = Command::new("gcc");
+    command.arg("-print-file-name=plugin");
+    let output = run(command, "locate the GCC plugin directory")?;
+    let plugin_dir = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    let include_dir = plugin_dir.join("include");
+    if !include_dir.join("gcc-plugin.h").is_file() {
+        bail!(
+            "GCC plugin headers are missing at {}; install gcc-plugin-dev for the selected GCC",
+            include_dir.display()
+        );
+    }
+    Ok(include_dir)
 }
 
 fn compiler_library(program: &str, name: &str) -> Result<PathBuf> {

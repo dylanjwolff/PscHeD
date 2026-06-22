@@ -51,6 +51,10 @@ fn glibc_nptl_tests_with_instrumented_libc() {
         .rsched_library
         .as_ref()
         .expect("glibc artifact rsched library");
+    let gcc_plugin = artifact
+        .gcc_plugin
+        .as_ref()
+        .expect("glibc artifact GCC plugin");
     let libc_gnulib = format!("{} -lgcc_s -lgcc", rsched.display());
     let test_gnulib = "-lgcc_s -lgcc";
 
@@ -58,7 +62,7 @@ fn glibc_nptl_tests_with_instrumented_libc() {
         let mut command = Command::new("make");
         command
             .current_dir(build_dir)
-            .env("RSCHED_LLVM_PLUGIN", &artifact.llvm_plugin)
+            .env("RSCHED_GCC_PLUGIN", gcc_plugin)
             .arg("--silent")
             .arg(format!("libc.so-gnulib={libc_gnulib}"))
             .arg(format!("gnulib={test_gnulib}"))

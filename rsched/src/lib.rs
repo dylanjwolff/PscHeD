@@ -1601,13 +1601,27 @@ pub unsafe extern "C" fn rsched_pthread_join(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_pthread_exit(retval: *mut libc::c_void) -> ! {
-    let _ = retval;
     ensure_init();
+    #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
+    {
+        rsched_glock();
+        st().task_provider.exit_current(retval);
+        rsched_gunlock();
+    }
+    #[cfg(not(all(feature = "instrumented-libc", feature = "coro")))]
+    let _ = retval;
     do_thread_exit(my_pt());
+    #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
+    loop {
+        st().task_provider
+            .park(ParkingHandle::new(core::ptr::null_mut()));
+    }
     // Use the raw exit syscall to terminate this thread without going through
     // glibc's pthread_exit, which uses _Unwind_ForcedUnwind and conflicts with
     // Rust's own unwinding infrastructure.
+    #[cfg(not(all(feature = "instrumented-libc", feature = "coro")))]
     libc::syscall(libc::SYS_exit, 0i64);
+    #[cfg(not(all(feature = "instrumented-libc", feature = "coro")))]
     std::hint::unreachable_unchecked()
 }
 
