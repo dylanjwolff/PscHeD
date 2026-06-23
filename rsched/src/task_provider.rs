@@ -134,11 +134,6 @@ pub(crate) trait LocalTaskProvider {
     #[allow(dead_code)]
     unsafe fn attach_pthread(&mut self, _task_key: usize, _pthread: PthreadT) {}
 
-    #[allow(dead_code)]
-    unsafe fn exit_current(&mut self, _retval: *mut libc::c_void) -> bool {
-        false
-    }
-
     unsafe fn wake(&mut self, handle: ParkingHandle) -> libc::c_int;
 
     unsafe fn park(&mut self, handle: ParkingHandle);
@@ -270,8 +265,6 @@ mod coro {
         task_key: Cell<usize>,
         #[cfg(feature = "instrumented-libc")]
         call_depth: Cell<u32>,
-        exit_requested: Cell<bool>,
-        exit_retval: Cell<*mut libc::c_void>,
     }
 
     impl CoroContext {
@@ -283,8 +276,6 @@ mod coro {
                 task_key: Cell::new(task_key),
                 #[cfg(feature = "instrumented-libc")]
                 call_depth: Cell::new(0),
-                exit_requested: Cell::new(false),
-                exit_retval: Cell::new(core::ptr::null_mut()),
             }
         }
     }
@@ -376,11 +367,7 @@ mod coro {
             task.context.host_fs_base.set(host_fs_base);
             set_fs_base(task.context.fs_base.get());
             match task.coroutine.resume(()) {
-                CoroutineResult::Yield(CoroYield::Yielded) => {
-                    if task.context.exit_requested.get() {
-                        task.retval = Some(task.context.exit_retval.get());
-                    }
-                }
+                CoroutineResult::Yield(CoroYield::Yielded) => {}
                 CoroutineResult::Return(retval) => {
                     task.retval = Some(retval);
                 }
@@ -531,16 +518,6 @@ mod coro {
             if self.requested_next == Some(task_key) {
                 self.requested_next = Some(pthread as usize);
             }
-        }
-
-        unsafe fn exit_current(&mut self, retval: *mut libc::c_void) -> bool {
-            let context = CORO_CONTEXT.load(Ordering::Acquire);
-            if context.is_null() {
-                return false;
-            }
-            (*context).exit_retval.set(retval);
-            (*context).exit_requested.set(true);
-            true
         }
 
         unsafe fn join(&mut self, thread: PthreadT, retval: *mut *mut libc::c_void) -> libc::c_int {
@@ -1286,10 +1263,6 @@ impl ProcessTaskProvider {
 
     pub(crate) unsafe fn process_exit(&mut self, next: Option<TaskChoice>) {
         Self::process_exit_impl(next);
-    }
-
-    pub(crate) unsafe fn exit_current(&mut self, retval: *mut libc::c_void) -> bool {
-        self.inner.exit_current(retval)
     }
 
     pub(crate) unsafe fn execv(

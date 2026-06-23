@@ -9,7 +9,6 @@ args=("$@")
 compile=false
 source_file=
 output_file=
-dep_file=
 
 for ((i = 0; i < ${#args[@]}; i++)); do
     case "${args[i]}" in
@@ -18,10 +17,6 @@ for ((i = 0; i < ${#args[@]}; i++)); do
             ;;
         -o)
             output_file=${args[i + 1]}
-            ((i += 1))
-            ;;
-        -MF)
-            dep_file=${args[i + 1]}
             ((i += 1))
             ;;
         *.c|*.S|*.s)
@@ -72,30 +67,6 @@ wrapped_object="$work_dir/wrapped.o"
 wrapper_source="$work_dir/wrappers.S"
 wrapper_object="$work_dir/wrappers.o"
 symbols_file="$work_dir/symbols"
-original_source_file="$source_file"
-patched_source=
-
-# glibc's start_thread terminates with an INTERNAL_SYSCALL_CALL(exit, ...)
-# inline-assembly loop. GCC plugins cannot rewrite that inline syscall, but
-# coroutine-backed pthreads must exit cooperatively so pthread_join can observe
-# scheduler cleanup. Replace only that final thread-exit path.
-if [[ "$(basename "$source_file")" == pthread_create.c ]]; then
-    patched_source="$work_dir/pthread_create.rsched.c"
-    {
-        printf 'extern void rsched_pthread_exit(void *) __attribute__((noreturn));\n'
-        sed 's/INTERNAL_SYSCALL_CALL (exit, 0);/rsched_pthread_exit (THREAD_GETMEM (pd, result));/' "$source_file"
-    } >"$patched_source"
-    patched_args=()
-    for arg in "${args[@]}"; do
-        if [[ "$arg" == "$source_file" ]]; then
-            patched_args+=("$patched_source")
-        else
-            patched_args+=("$arg")
-        fi
-    done
-    args=("${patched_args[@]}")
-    source_file="$patched_source"
-fi
 
 compile_args=()
 for ((i = 0; i < ${#args[@]}; i++)); do
@@ -112,10 +83,6 @@ done
 compile_args+=("-fplugin=$RSCHED_GCC_PLUGIN")
 
 "$compiler" "${compile_args[@]}"
-
-if [[ -n "$patched_source" && -n "$dep_file" && -f "$dep_file" ]]; then
-    sed -i "s|$patched_source|$original_source_file|g" "$dep_file"
-fi
 
 nm -a --defined-only "$object" 2>/dev/null | awk '{ print $NF }' | sort -u >"$symbols_file"
 
