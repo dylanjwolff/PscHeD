@@ -109,6 +109,7 @@ pub(crate) struct CloneTask {
 pub(crate) struct CloneArgs {
     pub(crate) func: CloneStart,
     pub(crate) stack: *mut libc::c_void,
+    pub(crate) stack_size: usize,
     pub(crate) flags: libc::c_int,
     pub(crate) arg: *mut libc::c_void,
     pub(crate) ptid: *mut libc::pid_t,
@@ -219,9 +220,13 @@ mod coro {
         TaskChoice,
     };
     use crate::{AttrT, PthreadT, StartArg};
-    use corosensei::{Coroutine, CoroutineResult, stack::DefaultStack};
+    use corosensei::{
+        Coroutine, CoroutineResult,
+        stack::{DefaultStack, STACK_ALIGNMENT, Stack, StackPointer},
+    };
     use std::cell::Cell;
     use std::collections::BTreeMap as HashMap;
+    use std::num::NonZeroUsize;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 
@@ -329,8 +334,60 @@ mod coro {
         }
     }
 
+    enum CoroStack {
+        Owned(DefaultStack),
+        Libc {
+            base: StackPointer,
+            limit: StackPointer,
+        },
+    }
+
+    impl CoroStack {
+        fn owned(size: usize) -> Self {
+            Self::Owned(DefaultStack::new(size).unwrap())
+        }
+
+        fn libc(base: *mut libc::c_void, size: usize) -> Result<Self, libc::c_int> {
+            let base = base as usize;
+            let Some(limit) = base.checked_sub(size) else {
+                return Err(libc::EINVAL);
+            };
+            if size < corosensei::stack::MIN_STACK_SIZE
+                || !base.is_multiple_of(STACK_ALIGNMENT)
+                || !limit.is_multiple_of(STACK_ALIGNMENT)
+            {
+                return Err(libc::EINVAL);
+            }
+            let Some(base) = NonZeroUsize::new(base) else {
+                return Err(libc::EINVAL);
+            };
+            let Some(limit) = NonZeroUsize::new(limit) else {
+                return Err(libc::EINVAL);
+            };
+            Ok(Self::Libc { base, limit })
+        }
+    }
+
+    // The libc variant borrows a stack whose lifetime is managed by the libc
+    // thread descriptor. rsched retains the coroutine until libc has joined it.
+    unsafe impl Stack for CoroStack {
+        fn base(&self) -> StackPointer {
+            match self {
+                Self::Owned(stack) => stack.base(),
+                Self::Libc { base, .. } => *base,
+            }
+        }
+
+        fn limit(&self) -> StackPointer {
+            match self {
+                Self::Owned(stack) => stack.limit(),
+                Self::Libc { limit, .. } => *limit,
+            }
+        }
+    }
+
     struct CoroTask {
-        coroutine: Coroutine<(), CoroYield, *mut libc::c_void>,
+        coroutine: Coroutine<(), CoroYield, *mut libc::c_void, CoroStack>,
         context: Rc<CoroContext>,
         retval: Option<*mut libc::c_void>,
         tid: libc::pid_t,
@@ -431,9 +488,8 @@ mod coro {
             // scheduler-controlled task identity.
             let context = Rc::new(CoroContext::new(get_fs_base(), task_key));
             let context_for_coro = context.clone();
-            let coroutine = Coroutine::with_stack(
-                DefaultStack::new(2 * 1024 * 1024).unwrap(),
-                move |yielder, ()| {
+            let coroutine =
+                Coroutine::with_stack(CoroStack::owned(2 * 1024 * 1024), move |yielder, ()| {
                     context_for_coro.yielder.set(yielder as *const _);
                     CORO_CONTEXT.store(Rc::as_ptr(&context_for_coro).cast_mut(), Ordering::Release);
                     crate::MY_PT.with(|c| *c.borrow_mut() = task_key as PthreadT);
@@ -443,8 +499,7 @@ mod coro {
                     CORO_CONTEXT.store(core::ptr::null_mut(), Ordering::Release);
                     set_fs_base(context_for_coro.host_fs_base.get());
                     retval
-                },
-            );
+                });
             self.tasks.insert(
                 task_key,
                 CoroTask {
@@ -460,7 +515,8 @@ mod coro {
         unsafe fn clone_thread(&mut self, args: CloneArgs) -> Result<CloneTask, libc::c_int> {
             let CloneArgs {
                 func,
-                stack: _stack,
+                stack,
+                stack_size,
                 flags: _flags,
                 arg,
                 ptid,
@@ -481,22 +537,24 @@ mod coro {
             let context = Rc::new(CoroContext::new(tls as usize, task_key));
             let context_for_coro = context.clone();
 
-            let coroutine = Coroutine::with_stack(
-                DefaultStack::new(2 * 1024 * 1024).unwrap(),
-                move |yielder, ()| {
-                    context_for_coro.yielder.set(yielder as *const _);
-                    CORO_CONTEXT.store(Rc::as_ptr(&context_for_coro).cast_mut(), Ordering::Release);
-                    #[cfg(not(feature = "instrumented-libc"))]
-                    crate::MY_PT
-                        .with(|c| *c.borrow_mut() = context_for_coro.task_key.get() as PthreadT);
-                    let _ = func(arg);
-                    crate::do_thread_exit(context_for_coro.task_key.get() as PthreadT);
-                    context_for_coro.fs_base.set(get_fs_base());
-                    CORO_CONTEXT.store(core::ptr::null_mut(), Ordering::Release);
-                    set_fs_base(context_for_coro.host_fs_base.get());
-                    core::ptr::null_mut()
-                },
-            );
+            let coroutine_stack = if stack_size == 0 {
+                CoroStack::owned(2 * 1024 * 1024)
+            } else {
+                CoroStack::libc(stack, stack_size)?
+            };
+            let coroutine = Coroutine::with_stack(coroutine_stack, move |yielder, ()| {
+                context_for_coro.yielder.set(yielder as *const _);
+                CORO_CONTEXT.store(Rc::as_ptr(&context_for_coro).cast_mut(), Ordering::Release);
+                #[cfg(not(feature = "instrumented-libc"))]
+                crate::MY_PT
+                    .with(|c| *c.borrow_mut() = context_for_coro.task_key.get() as PthreadT);
+                let _ = func(arg);
+                crate::do_thread_exit(context_for_coro.task_key.get() as PthreadT);
+                context_for_coro.fs_base.set(get_fs_base());
+                CORO_CONTEXT.store(core::ptr::null_mut(), Ordering::Release);
+                set_fs_base(context_for_coro.host_fs_base.get());
+                core::ptr::null_mut()
+            });
             self.tasks.insert(
                 task_key,
                 CoroTask {

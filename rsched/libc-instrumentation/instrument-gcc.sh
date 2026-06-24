@@ -137,7 +137,17 @@ emit_wrapper() {
         printf '    popq %%rax\n'
         printf '    ret\n'
         printf '.Lrsched_nested_%s:\n' "$symbol"
-        printf '    jmp %s\n' "$real"
+        printf '    subq $8, %%rsp\n'
+        printf '    call %s\n' "$real"
+        printf '    addq $8, %%rsp\n'
+        printf '    pushq %%rax\n'
+        printf '    pushq %%rdx\n'
+        printf '    subq $8, %%rsp\n'
+        printf '    call rsched_exit@PLT\n'
+        printf '    addq $8, %%rsp\n'
+        printf '    popq %%rdx\n'
+        printf '    popq %%rax\n'
+        printf '    ret\n'
         printf '.size %s, .-%s\n' "$symbol" "$symbol"
     } >>"$wrapper_source"
 }
@@ -151,6 +161,23 @@ emit_syscall_trampoline() {
         printf '    jmp rsched_libc_syscall@PLT\n'
         printf '.size syscall, .-syscall\n'
     } >>"$wrapper_source"
+}
+
+add_versioned_public_wrappers() {
+    local public=$1
+    local rsched=$2
+    local real=$3
+    local index=0
+    local versioned
+
+    while IFS= read -r versioned; do
+        local old_alias="__rsched_real_version_${public}_${index}"
+        local wrapper="__rsched_public_version_${public}_${index}"
+        objcopy_args+=(--redefine-sym "$versioned=$old_alias")
+        emit_wrapper "$wrapper" "$rsched" "$real" yes no
+        printf '.symver %s,%s\n' "$wrapper" "$versioned" >>"$wrapper_source"
+        ((index += 1))
+    done < <(grep -E "^${public}@@?[^@]+$" "$symbols_file" || true)
 }
 
 add_rewrite() {
@@ -169,6 +196,7 @@ add_rewrite() {
         objcopy_args+=(--redefine-sym "$public=__rsched_real_alias_$public")
         emit_wrapper "$public" "$rsched" "$real" yes no
     fi
+    add_versioned_public_wrappers "$public" "$rsched" "$real"
     if [[ -n "$hidden" ]]; then
         if symbol_defined "$hidden"; then
             objcopy_args+=(--redefine-sym "$hidden=__rsched_real_alias_$hidden")

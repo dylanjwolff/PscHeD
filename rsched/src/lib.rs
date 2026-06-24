@@ -1509,6 +1509,7 @@ pub unsafe extern "C" fn rsched_clone(
         let result = st().task_provider.clone_thread(CloneArgs {
             func,
             stack,
+            stack_size: 0,
             flags,
             arg,
             ptid,
@@ -1555,16 +1556,61 @@ pub unsafe extern "C" fn rsched_clone_internal(
     }
     let args = &*args.cast::<LinuxCloneArgs>();
     let flags = (args.flags | args.exit_signal) as libc::c_int;
-    let stack = (args.stack as usize).saturating_add(args.stack_size as usize) as *mut libc::c_void;
-    let result = rsched_clone(
-        func,
-        stack,
-        flags,
-        arg,
-        args.parent_tid as usize as *mut libc::pid_t,
-        args.tls as usize as *mut libc::c_void,
-        args.child_tid as usize as *mut libc::c_void,
-    );
+    rsched_activate_instrumented_libc();
+
+    #[cfg(not(feature = "coro"))]
+    let result = with_internal_depth(|| {
+        real_clone(
+            func,
+            (args.stack as usize).saturating_add(args.stack_size as usize) as *mut libc::c_void,
+            flags,
+            arg,
+            args.parent_tid as usize as *mut libc::pid_t,
+            args.tls as usize as *mut libc::c_void,
+            args.child_tid as usize as *mut libc::c_void,
+        )
+    });
+
+    #[cfg(feature = "coro")]
+    let result = {
+        ensure_init();
+        rsched_glock();
+        let result = st().task_provider.clone_thread(CloneArgs {
+            func,
+            stack: (args.stack as usize).saturating_add(args.stack_size as usize)
+                as *mut libc::c_void,
+            stack_size: args.stack_size as usize,
+            flags,
+            arg,
+            ptid: args.parent_tid as usize as *mut libc::pid_t,
+            tls: args.tls as usize as *mut libc::c_void,
+            ctid: args.child_tid as usize as *mut libc::c_void,
+        });
+        let result = match result {
+            Ok(task) => {
+                let task_key = task.task_key as PthreadT;
+                st().add(Thread::new_with_tid(task_key, task.tid));
+                if PTHREAD_CREATE_DEPTH.load(Ordering::Acquire) != 0 {
+                    st().pending_pthread_clones.push(task_key);
+                }
+                st().task(task_key).set_startup_done(true);
+                if st().task_provider.starts_waiting() {
+                    st().task(task_key).set_waiting(true);
+                }
+                st().set_event(
+                    my_pt(),
+                    Event {
+                        instr_addr: return_address(),
+                        kind: EventKind::ThreadCreate,
+                    },
+                );
+                task.tid
+            }
+            Err(errno) => -errno,
+        };
+        rsched_gunlock();
+        result
+    };
     if result < 0 {
         *libc::__errno_location() = -result;
         -1
