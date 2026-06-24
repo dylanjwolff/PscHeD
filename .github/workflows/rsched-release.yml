@@ -1,0 +1,36 @@
+name: rsched release
+
+on:
+  push:
+    tags:
+      - "rsched-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Restore release build cache
+        uses: actions/cache@v4
+        with:
+          path: rsched/target/rsched-artifacts
+          key: rsched-release-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            rsched-release-${{ runner.os }}-
+      - name: Build release image
+        run: docker buildx build --progress=plain --cache-to type=gha,mode=max --cache-from type=gha -t rsched .
+      - name: Build and package all providers
+        run: >-
+          docker run --security-opt seccomp=unconfined
+          -v "$PWD/rsched/target/rsched-artifacts:/workspace/target/rsched-artifacts"
+          -v "$PWD/rsched/dist:/workspace/dist"
+          rsched cargo xtask package all --provider all --out /workspace/dist
+      - name: Upload release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" rsched/dist/*.tar.zst --generate-notes

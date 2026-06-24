@@ -42,18 +42,5 @@ void init(int argc, const char **argv, char **envp, void *dynp)
     if (dlopen_impl == NULL || dlsym_impl == NULL)
         return;
 
-    const char *filename = getenv("LD_PRELOAD");
-    if (filename == NULL)
-        return;
-
-    void *handle = dlopen(filename, RTLD_NOW);
-    if (handle == NULL)
-    {
-        fprintf(stderr, RED "error" OFF ": failed to open file \"%s\"\n",
-                filename);
-        return;
-    }
-
-    const char *funcname = "rsched_atomic_instrument_ra";
-    schedule_memop_fn = dlsym(handle, funcname);
+    schedule_memop_fn = dlsym(NULL, "rsched_atomic_instrument_ra");
 }

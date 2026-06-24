@@ -4,17 +4,22 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # System dependencies:
 #   build-essential  – CC toolchain for build.rs (compiles c-examples/*.c)
+#   gcc-13-plugin-dev – GCC plugin headers used by the glibc instrumentation pass
 #   clang-17         – used by integration tests (sanitizer builds, seccomp, binary instrumentation)
 #   llvm-17-dev      – provides llvm-config-17 and LLVM 17 libraries required by rsched-llvm-pass
 #                      (llvm-plugin crate, features = ["llvm17-0"] → llvm-sys 170.x)
 RUN apt-get update && apt-get install -y \
     build-essential \
+    bison \
     ca-certificates \
     clang-17 \
     curl \
+    gcc-13-plugin-dev \
+    gawk \
     llvm-17-dev \
     musl-tools \
     pkg-config \
+    zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # Expose versioned tools under canonical names so build scripts and tests
@@ -35,4 +40,4 @@ RUN rustup target add x86_64-unknown-linux-musl
 WORKDIR /workspace
 COPY rsched/ .
 
-CMD ["cargo", "test", "--workspace"]
+CMD ["cargo", "xtask", "test", "source", "--provider", "all"]

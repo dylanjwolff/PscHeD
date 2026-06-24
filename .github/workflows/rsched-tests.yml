@@ -2,22 +2,60 @@ name: rsched tests
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
-    types: ["labeled", "opened", "synchronize", "reopened"]
+    branches: [main]
+    types: [labeled, opened, synchronize, reopened]
 
 jobs:
-
-  test:
-
+  source:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-      with:
-        submodules: true
-    - name: Build the Docker image
-      run: docker buildx build --progress=plain --cache-to type=gha --cache-from type=gha -t rsched .
-    - name: Run tests
-      run: docker run --security-opt seccomp=unconfined rsched
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build test image
+        run: docker buildx build --progress=plain --cache-to type=gha,mode=max --cache-from type=gha -t rsched .
+      - name: Run source and LLVM pass tests
+        run: docker run --security-opt seccomp=unconfined rsched
+
+  libc:
+    strategy:
+      fail-fast: false
+      matrix:
+        libc: [glibc, musl]
+        provider: [native, coro]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Restore instrumented libc cache
+        uses: actions/cache@v4
+        with:
+          path: rsched/target/rsched-artifacts
+          key: >-
+            rsched-libc-${{ runner.os }}-${{ matrix.libc }}-${{ matrix.provider }}-
+            ${{ github.sha }}
+          restore-keys: |
+            rsched-libc-${{ runner.os }}-${{ matrix.libc }}-${{ matrix.provider }}-
+      - name: Build test image
+        run: docker buildx build --progress=plain --cache-to type=gha,mode=max --cache-from type=gha -t rsched .
+      - name: Build instrumented libc once
+        run: >-
+          docker run --security-opt seccomp=unconfined
+          -v "$PWD/rsched/target:/workspace/target"
+          rsched cargo xtask build libc ${{ matrix.libc }}
+          --provider ${{ matrix.provider }}
+      - name: Run libc conformance tests
+        run: >-
+          docker run --security-opt seccomp=unconfined
+          -v "$PWD/rsched/target:/workspace/target"
+          rsched cargo xtask test libc ${{ matrix.libc }}
+          --provider ${{ matrix.provider }}
+      - name: Run preload integration tests
+        run: >-
+          docker run --security-opt seccomp=unconfined
+          -v "$PWD/rsched/target:/workspace/target"
+          rsched cargo xtask test preload ${{ matrix.libc }}
+          --provider ${{ matrix.provider }}
