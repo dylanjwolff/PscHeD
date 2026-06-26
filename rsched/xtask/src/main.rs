@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use rsched_libc_build::{
-    ArtifactKind, BuildOptions, BuildProfile, Provider, ensure_artifact, package_artifact,
+    ArtifactKind, BuildOptions, BuildProfile, InstrumentationMode, Provider, ensure_artifact,
+    package_artifact,
 };
 use std::env;
 use std::path::{Path, PathBuf};
@@ -40,6 +41,7 @@ fn build_command(root: &Path, mut args: Vec<String>) -> Result<()> {
         .transpose()?;
     let providers = take_providers(&mut args)?;
     let profile = take_profile(&mut args)?;
+    let instrumentation = take_instrumentation(&mut args)?;
     reject_extra(&args)?;
 
     let kinds = match target.as_str() {
@@ -55,7 +57,7 @@ fn build_command(root: &Path, mut args: Vec<String>) -> Result<()> {
 
     for provider in providers {
         for kind in &kinds {
-            let manifest = ensure(root, *kind, provider, profile)?;
+            let manifest = ensure(root, *kind, provider, profile, instrumentation)?;
             println!("{}", manifest.manifest_path().display());
         }
     }
@@ -72,6 +74,7 @@ fn test_command(root: &Path, mut args: Vec<String>) -> Result<()> {
         .transpose()?;
     let providers = take_providers(&mut args)?;
     let profile = take_profile(&mut args)?;
+    let instrumentation = take_instrumentation(&mut args)?;
     reject_extra(&args)?;
 
     match suite.as_str() {
@@ -115,7 +118,7 @@ fn test_command(root: &Path, mut args: Vec<String>) -> Result<()> {
             let libc = libc.as_deref().unwrap();
             let kind = parse_libc(libc)?;
             for provider in providers {
-                let manifest = ensure(root, kind, provider, profile)?;
+                let manifest = ensure(root, kind, provider, profile, instrumentation)?;
                 let variable = match kind {
                     ArtifactKind::Glibc => "RSCHED_GLIBC_ARTIFACT",
                     ArtifactKind::Musl => "RSCHED_MUSL_ARTIFACT",
@@ -168,6 +171,7 @@ fn package_command(root: &Path, mut args: Vec<String>) -> Result<()> {
     )?;
     let providers = take_providers(&mut args)?;
     let profile = take_profile(&mut args)?;
+    let instrumentation = take_instrumentation(&mut args)?;
     let destination = take_option(&mut args, "--out")?
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("dist"));
@@ -186,7 +190,7 @@ fn package_command(root: &Path, mut args: Vec<String>) -> Result<()> {
     };
     for provider in providers {
         for kind in &kinds {
-            let manifest = ensure(root, *kind, provider, profile)?;
+            let manifest = ensure(root, *kind, provider, profile, instrumentation)?;
             println!("{}", package_artifact(&manifest, &destination)?.display());
         }
     }
@@ -198,9 +202,14 @@ fn ensure(
     kind: ArtifactKind,
     provider: Provider,
     profile: BuildProfile,
+    instrumentation: InstrumentationMode,
 ) -> Result<rsched_libc_build::ArtifactManifest> {
+    if instrumentation == InstrumentationMode::None && kind != ArtifactKind::Musl {
+        bail!("--instrumentation none is currently only supported for musl artifacts");
+    }
     let mut options = BuildOptions::new(root, kind, provider);
     options.profile = profile;
+    options.instrumentation = instrumentation;
     ensure_artifact(&options)
 }
 
@@ -218,6 +227,14 @@ fn take_profile(args: &mut Vec<String>) -> Result<BuildProfile> {
         None | Some("release") => Ok(BuildProfile::Release),
         Some("debug") => Ok(BuildProfile::Debug),
         Some(value) => bail!("unknown profile {value:?}; expected debug or release"),
+    }
+}
+
+fn take_instrumentation(args: &mut Vec<String>) -> Result<InstrumentationMode> {
+    match take_option(args, "--instrumentation")?.as_deref() {
+        None | Some("rsched") => Ok(InstrumentationMode::Rsched),
+        Some("none") => Ok(InstrumentationMode::None),
+        Some(value) => bail!("unknown instrumentation {value:?}; expected rsched or none"),
     }
 }
 
@@ -289,11 +306,11 @@ fn usage() {
     eprintln!(
         "usage:\n\
          cargo xtask build static [--provider native|coro|all]\n\
-         cargo xtask build libc <glibc|musl> [--provider native|coro|all]\n\
+         cargo xtask build libc <glibc|musl> [--provider native|coro|all] [--instrumentation rsched|none]\n\
          cargo xtask build all [--provider native|coro|all]\n\
          cargo xtask test source [--provider native|coro|all]\n\
-         cargo xtask test libc <glibc|musl> [--provider native|coro|all]\n\
+         cargo xtask test libc <glibc|musl> [--provider native|coro|all] [--instrumentation rsched|none]\n\
          cargo xtask test preload <glibc|musl> [--provider native|coro|all]\n\
-         cargo xtask package <static|glibc|musl|all> [--provider ...] [--out DIR]"
+         cargo xtask package <static|glibc|musl|all> [--provider ...] [--instrumentation ...] [--out DIR]"
     );
 }

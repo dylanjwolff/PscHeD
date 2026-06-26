@@ -83,6 +83,22 @@ impl fmt::Display for BuildProfile {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstrumentationMode {
+    Rsched,
+    None,
+}
+
+impl fmt::Display for InstrumentationMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rsched => f.write_str("rsched"),
+            Self::None => f.write_str("none"),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BuildOptions {
     pub workspace_root: PathBuf,
@@ -90,6 +106,7 @@ pub struct BuildOptions {
     pub kind: ArtifactKind,
     pub provider: Provider,
     pub profile: BuildProfile,
+    pub instrumentation: InstrumentationMode,
 }
 
 impl BuildOptions {
@@ -102,6 +119,7 @@ impl BuildOptions {
             kind,
             provider,
             profile: BuildProfile::Release,
+            instrumentation: InstrumentationMode::Rsched,
         }
     }
 }
@@ -112,6 +130,8 @@ pub struct ArtifactManifest {
     pub kind: ArtifactKind,
     pub provider: Provider,
     pub profile: BuildProfile,
+    #[serde(default = "default_instrumentation_mode")]
+    pub instrumentation: InstrumentationMode,
     pub target: String,
     pub fingerprint: String,
     pub root: PathBuf,
@@ -128,6 +148,10 @@ pub struct ArtifactManifest {
     pub compiler: Option<PathBuf>,
     pub rsched_library: Option<PathBuf>,
     pub asan_runtime: Option<PathBuf>,
+}
+
+fn default_instrumentation_mode() -> InstrumentationMode {
+    InstrumentationMode::Rsched
 }
 
 impl ArtifactManifest {
@@ -231,6 +255,7 @@ pub fn ensure_artifact(options: &BuildOptions) -> Result<ArtifactManifest> {
         .join(options.kind.to_string())
         .join(options.provider.to_string())
         .join(options.profile.to_string())
+        .join(options.instrumentation.to_string())
         .join(&fingerprint);
     let manifest_path = artifact_root.join("manifest.json");
     if manifest_path.exists() {
@@ -532,49 +557,67 @@ fn build_musl(
     require_program("musl-gcc")?;
     require_program("opt-17")?;
 
-    let cargo_target = root.join("rsched-target");
-    let rsched = build_embedded_rsched(options, &cargo_target, Some("x86_64-unknown-linux-musl"))?;
+    let rsched = if options.instrumentation == InstrumentationMode::Rsched {
+        let cargo_target = root.join("rsched-target");
+        Some(build_embedded_rsched(
+            options,
+            &cargo_target,
+            Some("x86_64-unknown-linux-musl"),
+        )?)
+    } else {
+        None
+    };
     let build_dir = root.join("build");
     let install_dir = root.join("install");
     fs::create_dir_all(&build_dir)?;
 
-    let compiler_driver = options.workspace_root.join("musl/instrument-clang.sh");
+    let compiler_driver = if options.instrumentation == InstrumentationMode::Rsched {
+        options.workspace_root.join("musl/instrument-clang.sh")
+    } else {
+        PathBuf::from("clang-17")
+    };
     let configure = options.workspace_root.join("musl/musl/configure");
     let mut command = Command::new(configure);
     command
         .current_dir(&build_dir)
-        .env("RSCHED_LLVM_PLUGIN", plugin)
-        .env("RSCHED_WORKSPACE", &options.workspace_root)
-        .env(
-            "LDFLAGS",
-            "-Wl,--export-dynamic-symbol=rsched_atomic_instrument \
-             -Wl,--export-dynamic-symbol=rsched_atomic_instrument_ra \
-             -Wl,--export-dynamic-symbol=rsched_fuzzer_test_one_input",
-        )
         .arg(format!("--prefix={}", install_dir.display()))
         .arg(format!("--syslibdir={}/lib", install_dir.display()))
         .env("CC", &compiler_driver);
+    if options.instrumentation == InstrumentationMode::Rsched {
+        command
+            .env("RSCHED_LLVM_PLUGIN", plugin)
+            .env("RSCHED_WORKSPACE", &options.workspace_root)
+            .env(
+                "LDFLAGS",
+                "-Wl,--export-dynamic-symbol=rsched_atomic_instrument \
+                 -Wl,--export-dynamic-symbol=rsched_atomic_instrument_ra \
+                 -Wl,--export-dynamic-symbol=rsched_fuzzer_test_one_input",
+            );
+    } else {
+        command.arg("CFLAGS=-ffp-contract=off");
+    }
     run(command, "configure instrumented musl")?;
 
-    let libcc = format!("{} -lgcc -lgcc_eh", rsched.display());
     let mut command = Command::new("make");
-    command
-        .current_dir(&build_dir)
-        .env("RSCHED_LLVM_PLUGIN", plugin)
-        .env("RSCHED_WORKSPACE", &options.workspace_root)
-        .arg(format!("-j{}", jobs()))
-        .arg(format!("LIBCC={libcc}"));
+    command.current_dir(&build_dir).arg(format!("-j{}", jobs()));
+    if let Some(rsched) = &rsched {
+        let libcc = format!("{} -lgcc -lgcc_eh", rsched.display());
+        command
+            .env("RSCHED_LLVM_PLUGIN", plugin)
+            .env("RSCHED_WORKSPACE", &options.workspace_root)
+            .arg(format!("LIBCC={libcc}"));
+    }
     run(command, "build instrumented musl")?;
 
     let mut command = Command::new("make");
-    command
-        .current_dir(&build_dir)
-        .env("RSCHED_LLVM_PLUGIN", plugin)
-        .env("RSCHED_WORKSPACE", &options.workspace_root)
-        .arg("install");
+    command.current_dir(&build_dir).arg("install");
+    if options.instrumentation == InstrumentationMode::Rsched {
+        command
+            .env("RSCHED_LLVM_PLUGIN", plugin)
+            .env("RSCHED_WORKSPACE", &options.workspace_root);
+    }
     run(command, "install instrumented musl")?;
 
-    fs::copy(&rsched, install_dir.join("lib/librsched.a"))?;
     let compiler = install_dir.join("bin/musl-clang");
     if !compiler.exists() {
         bail!(
@@ -582,7 +625,12 @@ fn build_musl(
             compiler.display()
         );
     }
-    patch_musl_compiler_for_static_rsched(&compiler)?;
+    if let Some(rsched) = &rsched {
+        fs::copy(rsched, install_dir.join("lib/librsched.a"))?;
+        patch_musl_compiler_for_static_rsched(&compiler)?;
+    } else {
+        patch_musl_compiler_for_clang_builtins(&compiler)?;
+    }
 
     let runtime = root.join("runtime");
     let runtime_lib = runtime.join("lib");
@@ -604,7 +652,7 @@ fn build_musl(
     manifest.build_dir = Some(build_dir);
     manifest.install_dir = Some(install_dir);
     manifest.compiler = Some(compiler);
-    manifest.rsched_library = Some(rsched);
+    manifest.rsched_library = rsched;
     Ok(manifest)
 }
 
@@ -626,6 +674,52 @@ fn patch_musl_compiler_for_static_rsched(compiler: &Path) -> Result<()> {
     fs::write(compiler, script)
         .with_context(|| format!("patch musl compiler wrapper {}", compiler.display()))?;
     Ok(())
+}
+
+fn patch_musl_compiler_for_clang_builtins(compiler: &Path) -> Result<()> {
+    let builtins = clang_compiler_rt_builtins()?;
+    let script = fs::read_to_string(compiler)
+        .with_context(|| format!("read musl compiler wrapper {}", compiler.display()))?;
+    if script.contains("libclang_rt.builtins") {
+        return Ok(());
+    }
+    let script = script.replace("sflags=\neflags=\n", "sflags=\neflags=\nstatic_builtins=\n");
+    let script = script.replace(
+        "    case \"$x\" in\n        -l*) input=1 ;;\n        *) input= ;;\n    esac\n",
+        &format!(
+            "    case \"$x\" in\n        -static|--static) static_builtins=\"-Wl,-u,__muldc3 -Wl,-u,__mulsc3 -Wl,-u,__mulxc3 {}\" ;;\n    esac\n    case \"$x\" in\n        -l*) input=1 ;;\n        *) input= ;;\n    esac\n",
+            builtins.display()
+        ),
+    );
+    let script = script.replace(
+        "    \"$@\" \\\n    $eflags \\\n",
+        "    \"$@\" \\\n    $static_builtins \\\n    $eflags \\\n",
+    );
+    fs::write(compiler, script)
+        .with_context(|| format!("patch musl compiler wrapper {}", compiler.display()))?;
+    Ok(())
+}
+
+fn clang_compiler_rt_builtins() -> Result<PathBuf> {
+    let output = Command::new("clang-17")
+        .args(["--rtlib=compiler-rt", "--print-libgcc-file-name"])
+        .output()
+        .context("query clang compiler-rt builtins")?;
+    if !output.status.success() {
+        bail!(
+            "query clang compiler-rt builtins failed with {}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let path = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    if !path.is_file() {
+        bail!(
+            "clang compiler-rt builtins archive is missing: {}",
+            path.display()
+        );
+    }
+    Ok(path)
 }
 
 fn build_embedded_rsched(
@@ -679,6 +773,7 @@ fn base_manifest(
         kind: options.kind,
         provider: options.provider,
         profile: options.profile,
+        instrumentation: options.instrumentation,
         target: "x86_64-unknown-linux-gnu".to_owned(),
         fingerprint: fingerprint.to_owned(),
         root: root.to_path_buf(),
@@ -727,6 +822,7 @@ fn fingerprint(options: &BuildOptions) -> Result<String> {
     hash.add(options.kind.to_string().as_bytes());
     hash.add(options.provider.to_string().as_bytes());
     hash.add(options.profile.to_string().as_bytes());
+    hash.add(options.instrumentation.to_string().as_bytes());
     hash.add(std::env::consts::ARCH.as_bytes());
     hash.add(std::env::consts::OS.as_bytes());
 
