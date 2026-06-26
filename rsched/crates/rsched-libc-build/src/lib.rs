@@ -553,7 +553,6 @@ fn build_musl(
         )
         .arg(format!("--prefix={}", install_dir.display()))
         .arg(format!("--syslibdir={}/lib", install_dir.display()))
-        .arg("--disable-static")
         .env("CC", &compiler_driver);
     run(command, "configure instrumented musl")?;
 
@@ -575,6 +574,7 @@ fn build_musl(
         .arg("install");
     run(command, "install instrumented musl")?;
 
+    fs::copy(&rsched, install_dir.join("lib/librsched.a"))?;
     let compiler = install_dir.join("bin/musl-clang");
     if !compiler.exists() {
         bail!(
@@ -582,6 +582,7 @@ fn build_musl(
             compiler.display()
         );
     }
+    patch_musl_compiler_for_static_rsched(&compiler)?;
 
     let runtime = root.join("runtime");
     let runtime_lib = runtime.join("lib");
@@ -605,6 +606,26 @@ fn build_musl(
     manifest.compiler = Some(compiler);
     manifest.rsched_library = Some(rsched);
     Ok(manifest)
+}
+
+fn patch_musl_compiler_for_static_rsched(compiler: &Path) -> Result<()> {
+    let script = fs::read_to_string(compiler)
+        .with_context(|| format!("read musl compiler wrapper {}", compiler.display()))?;
+    if script.contains("librsched.a") {
+        return Ok(());
+    }
+    let script = script.replace("sflags=\neflags=\n", "sflags=\neflags=\nstatic_rsched=\n");
+    let script = script.replace(
+        "    case \"$x\" in\n        -l*) input=1 ;;\n        *) input= ;;\n    esac\n",
+        "    case \"$x\" in\n        -static|--static) static_rsched=\"-Wl,--whole-archive $libc_lib/librsched.a -Wl,--no-whole-archive\" ;;\n    esac\n    case \"$x\" in\n        -l*) input=1 ;;\n        *) input= ;;\n    esac\n",
+    );
+    let script = script.replace(
+        "    \"$@\" \\\n    $eflags \\\n",
+        "    \"$@\" \\\n    $static_rsched \\\n    $eflags \\\n",
+    );
+    fs::write(compiler, script)
+        .with_context(|| format!("patch musl compiler wrapper {}", compiler.display()))?;
+    Ok(())
 }
 
 fn build_embedded_rsched(

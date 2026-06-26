@@ -1,7 +1,11 @@
 use rsched_libc_build::ArtifactManifest;
+use std::collections::BTreeSet;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::Duration;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
@@ -30,10 +34,90 @@ fn copy_libc_test_suite(source: &Path, destination: &Path) {
     assert!(status.success(), "copy musl libc-test suite failed");
 }
 
-fn run(mut command: Command, description: &str) -> Output {
-    let output = command
-        .output()
+fn capture_output<R>(mut reader: R) -> thread::JoinHandle<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut buffer = [0; 8192];
+        loop {
+            let count = reader.read(&mut buffer).expect("read child output");
+            if count == 0 {
+                break;
+            }
+            output.extend_from_slice(&buffer[..count]);
+        }
+        output
+    })
+}
+
+fn collect_err_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        let entry = entry.expect("read musl libc-test build entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_err_files(&path, files);
+        } else if is_test_result_err(&path) {
+            files.push(path);
+        }
+    }
+}
+
+fn is_test_result_err(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name.ends_with(".err")
+        && !name.ends_with(".o.err")
+        && !name.ends_with(".lo.err")
+        && !name.ends_with(".so.err")
+        && !name.ends_with(".ld.err")
+}
+
+fn print_musl_progress(build: &Path, seen: &mut BTreeSet<PathBuf>) {
+    let mut files = Vec::new();
+    collect_err_files(build, &mut files);
+    files.sort();
+    for file in files {
+        if !seen.insert(file.clone()) {
+            continue;
+        }
+        let relative = file.strip_prefix(build).unwrap_or(&file);
+        eprintln!("musl libc-test: {}", relative.display());
+    }
+}
+
+fn run_with_musl_progress(mut command: Command, build: &Path, description: &str) -> Output {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap_or_else(|error| panic!("failed to {description}: {error}"));
+    let stdout = capture_output(child.stdout.take().expect("capture musl test stdout"));
+    let stderr = capture_output(child.stderr.take().expect("capture musl test stderr"));
+
+    let mut seen = BTreeSet::new();
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .unwrap_or_else(|error| panic!("wait for {description}: {error}"))
+        {
+            break status;
+        }
+        print_musl_progress(build, &mut seen);
+        thread::sleep(Duration::from_secs(2));
+    };
+    print_musl_progress(build, &mut seen);
+
+    let output = Output {
+        status,
+        stdout: stdout.join().expect("join musl test stdout reader"),
+        stderr: stderr.join().expect("join musl test stderr reader"),
+    };
     assert!(
         output.status.success(),
         "{description} failed with {}\nstdout:\n{}\nstderr:\n{}",
@@ -106,6 +190,47 @@ fn has_math_failure(report: &str) -> bool {
         .any(|line| line.starts_with("FAIL ") && line.contains("/build/math/"))
 }
 
+fn summarize_musl_report(report_path: &Path, report: &str) -> String {
+    const MAX_FAILURE_LINES: usize = 80;
+
+    let failures = report
+        .lines()
+        .filter(|line| line.starts_with("FAIL "))
+        .collect::<Vec<_>>();
+    let timeouts = report
+        .lines()
+        .filter(|line| line.contains("[timed out]"))
+        .count();
+    let math_failures = report
+        .lines()
+        .filter(|line| line.starts_with("FAIL ") && line.contains("/build/math/"))
+        .count();
+
+    let mut summary = format!(
+        "musl libc-test report: {}\nFAIL lines: {}, timeouts: {}, math FAIL lines: {}",
+        report_path.display(),
+        failures.len(),
+        timeouts,
+        math_failures
+    );
+    if failures.is_empty() {
+        return summary;
+    }
+
+    summary.push_str("\nfirst failure lines:");
+    for failure in failures.iter().take(MAX_FAILURE_LINES) {
+        summary.push('\n');
+        summary.push_str(failure);
+    }
+    if failures.len() > MAX_FAILURE_LINES {
+        summary.push_str(&format!(
+            "\n... omitted {} additional FAIL lines; see REPORT above",
+            failures.len() - MAX_FAILURE_LINES
+        ));
+    }
+    summary
+}
+
 #[test]
 fn musl_libc_test_with_instrumented_libc() {
     let artifact = artifact();
@@ -131,20 +256,20 @@ fn musl_libc_test_with_instrumented_libc() {
         .env("RSCHED_LLVM_PLUGIN", &artifact.llvm_plugin)
         .arg(format!("B={}", build.display()))
         .arg(format!("RUN_WRAP={}", runner.display()))
-        .arg("functional.BINS_TEMPL=bin.exe")
-        .arg("regression.BINS_TEMPL=bin.exe")
-        .arg("math.BINS_TEMPL=bin.exe")
-        .arg("musl.BINS_TEMPL=bin.exe")
         .arg("run");
-    let output = run(
+    let output = run_with_musl_progress(
         command,
+        &build,
         "run full musl libc-test suite with instrumented musl",
     );
     let report = build.join("REPORT");
     let report = std::fs::read(&report).expect("read musl libc-test report");
     let report = String::from_utf8_lossy(&report);
     let normalized_report = normalize_musl_report(&report);
-    eprintln!("{normalized_report}");
+    eprintln!(
+        "{}",
+        summarize_musl_report(&build.join("REPORT"), &normalized_report)
+    );
     assert!(
         !normalized_report.contains("[timed out]"),
         "musl libc-test still has timed-out tests\nstdout:\n{}\nstderr:\n{}\nreport:\n{}",
