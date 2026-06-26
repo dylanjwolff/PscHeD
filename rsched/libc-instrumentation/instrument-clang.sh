@@ -57,6 +57,29 @@ if [[ "$RSCHED_LIBC_MODE" == glibc ]]; then
     esac
 fi
 
+# musl's libm has strict fenv and ULP-sensitive tests. These translation units
+# do not implement synchronization or task creation, so compile them with Clang
+# but skip the rsched LLVM pass.
+if [[ "$RSCHED_LIBC_MODE" == musl ]]; then
+    case "$source_file" in
+        */musl/musl/src/math/*)
+            clang_args=()
+            for arg in "${args[@]}"; do
+                case "$arg" in
+                    -ffp-contract=*)
+                        clang_args+=(-ffp-contract=off)
+                        ;;
+                    *)
+                        clang_args+=("$arg")
+                        ;;
+                esac
+            done
+            clang_args+=(-ffp-contract=off)
+            exec clang-17 "${clang_args[@]}"
+            ;;
+    esac
+fi
+
 # glibc's NPTL gai helper is a large GNU extern inline function. GCC inlines
 # every call at -O2, but Clang leaves an undefined out-of-line call even with
 # -fgnu89-inline. The helper ultimately calls the instrumented pthread entry
@@ -152,6 +175,12 @@ if [[ "$RSCHED_LIBC_MODE" == glibc ]]; then
         -include "$RSCHED_WORKSPACE/libc-instrumentation/glibc-clang-compat.h"
     )
 fi
+
+# libc libm implementations and conformance tests rely on the exact source
+# operation sequence for floating-point exceptions and ULP bounds. Clang may
+# otherwise contract multiply-adds even with -frounding-math, which changes
+# underflow/overflow signaling in musl's math tests.
+bc_args+=(-ffp-contract=off)
 
 clang-17 -emit-llvm "${bc_args[@]}"
 opt-17 \

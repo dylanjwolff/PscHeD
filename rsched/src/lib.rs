@@ -1923,6 +1923,244 @@ pub unsafe extern "C" fn rsched_pthread_barrier_wait(barrier: *mut BarrierT) -> 
     }
 }
 
+// ── Unsupported libc synchronization primitives ──────────────────────────
+//
+// These wrappers intentionally fail without blocking. Native implementations
+// can block the only kernel thread backing coroutine emulation, which turns
+// missing rsched semantics into a hang.
+
+unsafe fn unsupported_posix() -> libc::c_int {
+    *libc::__errno_location() = libc::ENOSYS;
+    -1
+}
+
+fn unsupported_pthread() -> libc::c_int {
+    libc::ENOSYS
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_sem_init(
+    _sem: *mut libc::sem_t,
+    _pshared: libc::c_int,
+    _value: libc::c_uint,
+) -> libc::c_int {
+    unsupported_posix()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_sem_destroy(_sem: *mut libc::sem_t) -> libc::c_int {
+    unsupported_posix()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_sem_wait(_sem: *mut libc::sem_t) -> libc::c_int {
+    unsupported_posix()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_sem_timedwait(
+    _sem: *mut libc::sem_t,
+    _timeout: *const libc::timespec,
+) -> libc::c_int {
+    unsupported_posix()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_sem_trywait(_sem: *mut libc::sem_t) -> libc::c_int {
+    unsupported_posix()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_sem_post(_sem: *mut libc::sem_t) -> libc::c_int {
+    unsupported_posix()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_sem_getvalue(
+    _sem: *mut libc::sem_t,
+    _value: *mut libc::c_int,
+) -> libc::c_int {
+    unsupported_posix()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_cond_timedwait(
+    _cond: *mut CondT,
+    _lock: *mut MutexT,
+    _timeout: *const libc::timespec,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_detach(_thread: PthreadT) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_cancel(_thread: PthreadT) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_once(
+    _once: *mut libc::pthread_once_t,
+    _init: Option<unsafe extern "C" fn()>,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_rwlock_init(
+    _lock: *mut libc::pthread_rwlock_t,
+    _attr: *const libc::pthread_rwlockattr_t,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_rwlock_destroy(
+    _lock: *mut libc::pthread_rwlock_t,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_rwlock_rdlock(
+    _lock: *mut libc::pthread_rwlock_t,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_rwlock_wrlock(
+    _lock: *mut libc::pthread_rwlock_t,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_rwlock_tryrdlock(
+    _lock: *mut libc::pthread_rwlock_t,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_rwlock_trywrlock(
+    _lock: *mut libc::pthread_rwlock_t,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_rwlock_timedrdlock(
+    _lock: *mut libc::pthread_rwlock_t,
+    _timeout: *const libc::timespec,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_rwlock_timedwrlock(
+    _lock: *mut libc::pthread_rwlock_t,
+    _timeout: *const libc::timespec,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_rwlock_unlock(
+    _lock: *mut libc::pthread_rwlock_t,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_spin_init(
+    _lock: *mut libc::pthread_spinlock_t,
+    _pshared: libc::c_int,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_spin_destroy(
+    _lock: *mut libc::pthread_spinlock_t,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_spin_lock(
+    _lock: *mut libc::pthread_spinlock_t,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_spin_trylock(
+    _lock: *mut libc::pthread_spinlock_t,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_spin_unlock(
+    _lock: *mut libc::pthread_spinlock_t,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_cnd_timedwait(
+    _cond: *mut libc::c_void,
+    _lock: *mut libc::c_void,
+    _timeout: *const libc::timespec,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_cnd_wait(
+    _cond: *mut libc::c_void,
+    _lock: *mut libc::c_void,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_mtx_lock(_lock: *mut libc::c_void) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_mtx_timedlock(
+    _lock: *mut libc::c_void,
+    _timeout: *const libc::timespec,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_mtx_trylock(_lock: *mut libc::c_void) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_mtx_unlock(_lock: *mut libc::c_void) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_call_once(
+    _once: *mut libc::c_void,
+    _init: Option<unsafe extern "C" fn()>,
+) {
+    let _ = _once;
+    let _ = _init;
+}
+
 // ── rsched_sched_yield ────────────────────────────────────────────────────
 
 #[unsafe(no_mangle)]
