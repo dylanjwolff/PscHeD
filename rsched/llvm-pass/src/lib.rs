@@ -960,6 +960,13 @@ const MUSL_REWRITES: &[LibcRewrite] = &[
         diverges: false,
     },
     LibcRewrite {
+        implementation: "sem_clockwait",
+        public: "sem_clockwait",
+        real: "__rsched_real_sem_clockwait",
+        rsched: "rsched_sem_clockwait",
+        diverges: false,
+    },
+    LibcRewrite {
         implementation: "sem_trywait",
         public: "sem_trywait",
         real: "__rsched_real_sem_trywait",

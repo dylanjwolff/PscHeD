@@ -1929,13 +1929,17 @@ pub unsafe extern "C" fn rsched_pthread_barrier_wait(barrier: *mut BarrierT) -> 
 // can block the only kernel thread backing coroutine emulation, which turns
 // missing rsched semantics into a hang.
 
-unsafe fn unsupported_posix() -> libc::c_int {
-    *libc::__errno_location() = libc::ENOSYS;
-    -1
+fn abort_unsupported(kind: &str) -> ! {
+    eprintln!("rsched: unsupported {kind} primitive");
+    std::process::abort();
+}
+
+fn unsupported_posix() -> libc::c_int {
+    abort_unsupported("POSIX synchronization")
 }
 
 fn unsupported_pthread() -> libc::c_int {
-    libc::ENOSYS
+    abort_unsupported("pthread synchronization")
 }
 
 #[unsafe(no_mangle)]
@@ -1960,6 +1964,15 @@ pub unsafe extern "C" fn rsched_sem_wait(_sem: *mut libc::sem_t) -> libc::c_int 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_sem_timedwait(
     _sem: *mut libc::sem_t,
+    _timeout: *const libc::timespec,
+) -> libc::c_int {
+    unsupported_posix()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_sem_clockwait(
+    _sem: *mut libc::sem_t,
+    _clock_id: libc::clockid_t,
     _timeout: *const libc::timespec,
 ) -> libc::c_int {
     unsupported_posix()

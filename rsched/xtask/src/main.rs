@@ -204,8 +204,8 @@ fn ensure(
     profile: BuildProfile,
     instrumentation: InstrumentationMode,
 ) -> Result<rsched_libc_build::ArtifactManifest> {
-    if instrumentation == InstrumentationMode::None && kind != ArtifactKind::Musl {
-        bail!("--instrumentation none is currently only supported for musl artifacts");
+    if instrumentation == InstrumentationMode::None && kind == ArtifactKind::Static {
+        bail!("--instrumentation none is only supported for libc artifacts");
     }
     let mut options = BuildOptions::new(root, kind, provider);
     options.profile = profile;

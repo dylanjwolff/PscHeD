@@ -273,8 +273,18 @@ pub fn ensure_artifact(options: &BuildOptions) -> Result<ArtifactManifest> {
     let mut manifest = match options.kind {
         ArtifactKind::Static => build_static(options, &artifact_root, &plugin, &fingerprint)?,
         ArtifactKind::Glibc => {
-            let gcc_plugin = ensure_gcc_plugin(options, &fingerprint)?;
-            build_glibc(options, &artifact_root, &plugin, &gcc_plugin, &fingerprint)?
+            let gcc_plugin = if options.instrumentation == InstrumentationMode::Rsched {
+                Some(ensure_gcc_plugin(options, &fingerprint)?)
+            } else {
+                None
+            };
+            build_glibc(
+                options,
+                &artifact_root,
+                &plugin,
+                gcc_plugin.as_deref(),
+                &fingerprint,
+            )?
         }
         ArtifactKind::Musl => build_musl(options, &artifact_root, &plugin, &fingerprint)?,
     };
@@ -397,7 +407,7 @@ fn build_glibc(
     options: &BuildOptions,
     root: &Path,
     plugin: &Path,
-    gcc_plugin: &Path,
+    gcc_plugin: Option<&Path>,
     fingerprint: &str,
 ) -> Result<ArtifactManifest> {
     require_program("gcc")?;
@@ -406,96 +416,241 @@ fn build_glibc(
     require_program("objcopy")?;
     require_program("ld")?;
 
-    let cargo_target = root.join("rsched-target");
-    let rsched = build_embedded_rsched(options, &cargo_target, None)?;
+    let rsched = if options.instrumentation == InstrumentationMode::Rsched {
+        let cargo_target = root.join("rsched-target");
+        Some(build_embedded_rsched(options, &cargo_target, None)?)
+    } else {
+        None
+    };
     let build_dir = root.join("build");
     let install_dir = root.join("install");
     fs::create_dir_all(&build_dir)?;
 
-    let compiler_driver = options.workspace_root.join("glibc/instrument-gcc.sh");
+    let compiler_driver = if options.instrumentation == InstrumentationMode::Rsched {
+        options.workspace_root.join("glibc/instrument-gcc.sh")
+    } else {
+        PathBuf::from("gcc")
+    };
     let configure = options.workspace_root.join("glibc/glibc/configure");
     let mut command = Command::new(configure);
     command
         .current_dir(&build_dir)
-        .env("RSCHED_GCC_PLUGIN", gcc_plugin)
-        .env("RSCHED_WORKSPACE", &options.workspace_root)
         .env("CC", &compiler_driver)
         .env("CFLAGS", "-g -O2")
         .env("CXXFLAGS", "-g -O2")
         .env_remove("CPPFLAGS")
-        .arg(format!("--prefix={}", install_dir.display()))
+        .arg("--prefix=/usr")
+        .arg("--sysconfdir=/etc")
+        .arg("--localstatedir=/var")
         .arg("--disable-static")
-        .arg("--disable-werror");
+        .arg("--disable-werror")
+        .arg("--with-selinux=no");
+    if options.instrumentation == InstrumentationMode::Rsched {
+        command
+            .env("RSCHED_GCC_PLUGIN", gcc_plugin.expect("rsched GCC plugin"))
+            .env("RSCHED_WORKSPACE", &options.workspace_root);
+    }
     run(command, "configure instrumented glibc")?;
 
     let jobs = jobs();
-    let shared_gnulib = format!("{} -lgcc_s -lgcc", rsched.display());
+    let glibc_link_args = rsched.as_ref().map(|rsched| {
+        (
+            format!("{} -lgcc_s -lgcc", rsched.display()),
+            format!(
+                "{} -lgcc -lgcc_eh -Wl,--allow-multiple-definition",
+                rsched.display()
+            ),
+        )
+    });
     let mut command = Command::new("make");
     command
         .current_dir(&build_dir)
-        .env("RSCHED_GCC_PLUGIN", gcc_plugin)
-        .env("RSCHED_WORKSPACE", &options.workspace_root)
         .arg("--silent")
-        .arg(format!("-j{jobs}"))
-        .arg(build_dir.join("versions.stmp"));
+        .arg(format!("-j{jobs}"));
+    if options.instrumentation == InstrumentationMode::Rsched {
+        command
+            .env("RSCHED_GCC_PLUGIN", gcc_plugin.expect("rsched GCC plugin"))
+            .env("RSCHED_WORKSPACE", &options.workspace_root);
+    }
+    command.arg(build_dir.join("versions.stmp"));
     run(command, "generate glibc symbol version maps")?;
-    export_glibc_hooks(&build_dir.join("libc.map"))?;
+    if options.instrumentation == InstrumentationMode::Rsched {
+        export_glibc_hooks(&build_dir.join("libc.map"))?;
+    }
 
     let mut command = Command::new("make");
     command
         .current_dir(&build_dir)
-        .env("RSCHED_GCC_PLUGIN", gcc_plugin)
-        .env("RSCHED_WORKSPACE", &options.workspace_root)
         .arg("--silent")
         .arg(format!("-j{jobs}"));
-    add_glibc_link_args(&mut command, &shared_gnulib);
+    if options.instrumentation == InstrumentationMode::Rsched {
+        command
+            .env("RSCHED_GCC_PLUGIN", gcc_plugin.expect("rsched GCC plugin"))
+            .env("RSCHED_WORKSPACE", &options.workspace_root);
+        let (shared_gnulib, static_gnulib) = glibc_link_args.as_ref().unwrap();
+        add_glibc_link_args(&mut command, shared_gnulib, static_gnulib);
+    }
     command.arg("lib");
     run(command, "build instrumented glibc libraries")?;
 
-    for (subdir, library, soname) in [
+    let glibc_shared_libraries = [
+        ("crypt", "libcrypt.so", "libcrypt.so.1"),
+        ("dlfcn", "libdl.so", "libdl.so.2"),
+        ("locale", "libBrokenLocale.so", "libBrokenLocale.so.1"),
+        ("login", "libutil.so", "libutil.so.1"),
+        ("malloc", "libc_malloc_debug.so", "libc_malloc_debug.so.0"),
         ("math", "libm.so", "libm.so.6"),
+        ("mathvec", "libmvec.so", "libmvec.so.1"),
+        ("nis", "libnsl.so", "libnsl.so.1"),
+        ("nptl", "libpthread.so", "libpthread.so.0"),
+        ("nptl_db", "libthread_db.so", "libthread_db.so.1"),
+        ("nss", "libnss_compat.so", "libnss_compat.so.2"),
+        ("nss", "libnss_db.so", "libnss_db.so.2"),
+        ("nss", "libnss_files.so", "libnss_files.so.2"),
+        ("resolv", "libanl.so", "libanl.so.1"),
+        ("resolv", "libnss_dns.so", "libnss_dns.so.2"),
         ("resolv", "libresolv.so", "libresolv.so.2"),
-    ] {
-        let library = build_dir.join(subdir).join(library);
+        ("rt", "librt.so", "librt.so.1"),
+    ];
+
+    for (subdir, library, soname) in glibc_shared_libraries {
+        let library_path = build_dir.join(subdir).join(library);
         let mut command = Command::new("make");
         command
             .current_dir(options.workspace_root.join("glibc/glibc").join(subdir))
-            .env("RSCHED_GCC_PLUGIN", gcc_plugin)
-            .env("RSCHED_WORKSPACE", &options.workspace_root)
             .arg("--silent")
             .arg(format!("-j{jobs}"));
-        add_glibc_link_args(&mut command, &shared_gnulib);
+        if options.instrumentation == InstrumentationMode::Rsched {
+            command
+                .env("RSCHED_GCC_PLUGIN", gcc_plugin.expect("rsched GCC plugin"))
+                .env("RSCHED_WORKSPACE", &options.workspace_root);
+            let (shared_gnulib, static_gnulib) = glibc_link_args.as_ref().unwrap();
+            add_glibc_link_args(&mut command, shared_gnulib, static_gnulib);
+        }
         command
             .arg(format!("subdir={subdir}"))
             .arg("..=../")
             .arg(format!("objdir={}", build_dir.display()))
-            .arg(&library);
-        run(command, &format!("build instrumented glibc {library:?}"))?;
+            .arg(&library_path);
+        run(
+            command,
+            &format!("build glibc shared library {library_path:?}"),
+        )?;
         let soname = build_dir.join(subdir).join(soname);
         if !soname.exists() {
             symlink(
-                library.file_name().context("glibc library file name")?,
+                library_path
+                    .file_name()
+                    .context("glibc library file name")?,
                 &soname,
             )?;
         }
     }
+    let libmvec_archive = build_dir.join("mathvec/libmvec.a");
+    let mut command = Command::new("make");
+    command
+        .current_dir(options.workspace_root.join("glibc/glibc").join("mathvec"))
+        .arg("--silent")
+        .arg(format!("-j{jobs}"))
+        .arg("subdir=mathvec")
+        .arg("..=../")
+        .arg(format!("objdir={}", build_dir.display()))
+        .arg(&libmvec_archive);
+    if options.instrumentation == InstrumentationMode::Rsched {
+        command
+            .env("RSCHED_GCC_PLUGIN", gcc_plugin.expect("rsched GCC plugin"))
+            .env("RSCHED_WORKSPACE", &options.workspace_root);
+        let (shared_gnulib, static_gnulib) = glibc_link_args.as_ref().unwrap();
+        add_glibc_link_args(&mut command, shared_gnulib, static_gnulib);
+    }
+    run(command, "build glibc mathvec static archive")?;
+
+    let nptl_lock_constants = build_dir.join("nptl/nptl_lock_constants.py");
+    let mut command = Command::new("make");
+    command
+        .current_dir(options.workspace_root.join("glibc/glibc").join("nptl"))
+        .arg("--silent")
+        .arg(format!("-j{jobs}"))
+        .arg("subdir=nptl")
+        .arg("..=../")
+        .arg(format!("objdir={}", build_dir.display()))
+        .arg(&nptl_lock_constants);
+    if options.instrumentation == InstrumentationMode::Rsched {
+        command
+            .env("RSCHED_GCC_PLUGIN", gcc_plugin.expect("rsched GCC plugin"))
+            .env("RSCHED_WORKSPACE", &options.workspace_root);
+    }
+    run(command, "build glibc NPTL pretty-printer constants")?;
+
+    let malloc_mtrace = build_dir.join("malloc/mtrace");
+    let mut command = Command::new("make");
+    command
+        .current_dir(options.workspace_root.join("glibc/glibc").join("malloc"))
+        .arg("--silent")
+        .arg(format!("-j{jobs}"))
+        .arg("subdir=malloc")
+        .arg("..=../")
+        .arg(format!("objdir={}", build_dir.display()))
+        .arg(&malloc_mtrace);
+    if options.instrumentation == InstrumentationMode::Rsched {
+        command
+            .env("RSCHED_GCC_PLUGIN", gcc_plugin.expect("rsched GCC plugin"))
+            .env("RSCHED_WORKSPACE", &options.workspace_root);
+        let (shared_gnulib, static_gnulib) = glibc_link_args.as_ref().unwrap();
+        add_glibc_link_args(&mut command, shared_gnulib, static_gnulib);
+    }
+    run(command, "build glibc malloc mtrace script")?;
 
     let support_archive = build_dir.join("support/libsupport_nonshared.a");
     let mut command = Command::new("make");
     command
         .current_dir(options.workspace_root.join("glibc/glibc/support"))
-        .env("RSCHED_GCC_PLUGIN", gcc_plugin)
-        .env("RSCHED_WORKSPACE", &options.workspace_root)
         .arg("--silent")
         .arg(format!("-j{jobs}"))
         .arg("subdir=support")
         .arg("..=../")
         .arg(format!("objdir={}", build_dir.display()))
         .arg(&support_archive);
+    if options.instrumentation == InstrumentationMode::Rsched {
+        command
+            .env("RSCHED_GCC_PLUGIN", gcc_plugin.expect("rsched GCC plugin"))
+            .env("RSCHED_WORKSPACE", &options.workspace_root);
+    }
     run(command, "build the glibc test support library")?;
 
+    let support_container_programs = [
+        build_dir.join("support/test-container"),
+        build_dir.join("support/shell-container"),
+        build_dir.join("support/echo-container"),
+        build_dir.join("support/true-container"),
+        build_dir.join("support/links-dso-program"),
+        build_dir.join("support/test-run-command"),
+    ];
+    let mut command = Command::new("make");
+    command
+        .current_dir(options.workspace_root.join("glibc/glibc/support"))
+        .arg("--silent")
+        .arg(format!("-j{jobs}"))
+        .arg("subdir=support")
+        .arg("..=../")
+        .arg(format!("objdir={}", build_dir.display()));
+    for program in &support_container_programs {
+        command.arg(program);
+    }
+    if options.instrumentation == InstrumentationMode::Rsched {
+        command
+            .env("RSCHED_GCC_PLUGIN", gcc_plugin.expect("rsched GCC plugin"))
+            .env("RSCHED_WORKSPACE", &options.workspace_root);
+        let (shared_gnulib, static_gnulib) = glibc_link_args.as_ref().unwrap();
+        add_glibc_link_args(&mut command, shared_gnulib, static_gnulib);
+    }
+    run(command, "build the glibc test container support programs")?;
+
     copy_compiler_library("gcc", "libgcc_s.so.1", &build_dir)?;
-    let asan_runtime = if options.provider == Provider::Native {
+    copy_compiler_library("g++", "libstdc++.so.6", &build_dir)?;
+    let asan_runtime = if options.instrumentation == InstrumentationMode::Rsched
+        && options.provider == Provider::Native
+    {
         Some(prepare_clang_asan_runtime(options, root, &build_dir)?)
     } else {
         None
@@ -508,27 +663,35 @@ fn build_glibc(
     fs::copy(build_dir.join("elf/ld-linux-x86-64.so.2"), &loader)?;
     let libc = runtime_lib.join("libc.so.6");
     fs::copy(build_dir.join("libc.so"), &libc)?;
-    for (source, name) in [
-        (build_dir.join("math/libm.so"), "libm.so.6"),
-        (build_dir.join("resolv/libresolv.so"), "libresolv.so.2"),
-        (build_dir.join("libgcc_s.so.1"), "libgcc_s.so.1"),
-    ] {
-        fs::copy(source, runtime_lib.join(name))?;
+    for (subdir, library, soname) in glibc_shared_libraries {
+        fs::copy(
+            build_dir.join(subdir).join(library),
+            runtime_lib.join(soname),
+        )?;
     }
+    fs::copy(
+        build_dir.join("libgcc_s.so.1"),
+        runtime_lib.join("libgcc_s.so.1"),
+    )?;
+    fs::copy(
+        build_dir.join("libstdc++.so.6"),
+        runtime_lib.join("libstdc++.so.6"),
+    )?;
     if let Some(path) = &asan_runtime {
         fs::copy(
             path,
             runtime_lib.join(path.file_name().context("ASAN runtime file name")?),
         )?;
-        fs::copy(
-            build_dir.join("libstdc++.so.6"),
-            runtime_lib.join("libstdc++.so.6"),
-        )?;
     }
     let packaged_plugin = runtime.join("librsched_llvm_pass.so");
     fs::copy(plugin, &packaged_plugin)?;
-    let packaged_gcc_plugin = runtime.join("rsched_gcc_pass.so");
-    fs::copy(gcc_plugin, &packaged_gcc_plugin)?;
+    let packaged_gcc_plugin = if options.instrumentation == InstrumentationMode::Rsched {
+        let packaged_gcc_plugin = runtime.join("rsched_gcc_pass.so");
+        fs::copy(gcc_plugin.expect("rsched GCC plugin"), &packaged_gcc_plugin)?;
+        Some(packaged_gcc_plugin)
+    } else {
+        None
+    };
     let runner = runtime.join("run");
     write_glibc_runner(&runner)?;
 
@@ -540,8 +703,8 @@ fn build_glibc(
     manifest.runner = Some(runner);
     manifest.build_dir = Some(build_dir);
     manifest.install_dir = Some(install_dir);
-    manifest.rsched_library = Some(rsched);
-    manifest.gcc_plugin = Some(packaged_gcc_plugin);
+    manifest.rsched_library = rsched;
+    manifest.gcc_plugin = packaged_gcc_plugin;
     manifest.asan_runtime = asan_runtime.map(|path| runtime_lib.join(path.file_name().unwrap()));
     Ok(manifest)
 }
@@ -1011,17 +1174,28 @@ fn prepare_clang_asan_runtime(
         &cxxabi_map,
         "CXXABI_1.3 {\n\
          global:\n\
-           __cxa_*;\n\
+           __cxa_[a-s]*;\n\
+           __cxa_throw;\n\
+           __cxa_throw_bad_array_length;\n\
+           __cxa_throw_bad_array_new_length;\n\
+           __cxa_tm_cleanup;\n\
+           __cxa_vec_*;\n\
            __dynamic_cast;\n\
            _ZTIN10__cxxabiv1*;\n\
            _ZTSN10__cxxabiv1*;\n\
          };\n\
+         CXXABI_1.3.7 {\n\
+         global:\n\
+           __cxa_thread_atexit;\n\
+         } CXXABI_1.3;\n\
          GLIBCXX_3.4 {\n\
          global:\n\
            _ZTISt9type_info;\n\
            _ZTSSt9type_info;\n\
          local: *;\n\
-         } CXXABI_1.3;\n",
+         } CXXABI_1.3.7;\n\
+         GLIBCXX_3.4.9 {\n\
+         } GLIBCXX_3.4;\n",
     )?;
     let mut command = Command::new("clang-17");
     command
@@ -1057,19 +1231,19 @@ fn export_glibc_hooks(libc_map: &Path) -> Result<()> {
     Ok(())
 }
 
-fn add_glibc_link_args(command: &mut Command, shared_gnulib: &str) {
+fn add_glibc_link_args(command: &mut Command, shared_gnulib: &str, static_gnulib: &str) {
     command
         .arg(format!("libc.so-gnulib={shared_gnulib}"))
         .arg(format!("gnulib={shared_gnulib}"))
         .arg(format!("gnulib-tests={shared_gnulib}"))
-        .arg("static-gnulib=-lgcc -lgcc_eh")
-        .arg("static-gnulib-tests=-lgcc -lgcc_eh");
+        .arg(format!("static-gnulib={static_gnulib}"))
+        .arg(format!("static-gnulib-tests={static_gnulib}"));
 }
 
 fn glibc_build_library_paths(build_dir: &Path) -> String {
     [
         "", "math", "elf", "dlfcn", "nss", "nis", "rt", "resolv", "mathvec", "support", "crypt",
-        "nptl",
+        "nptl", "nptl_db", "login", "locale", "malloc",
     ]
     .into_iter()
     .map(|directory| build_dir.join(directory).display().to_string())
@@ -1123,6 +1297,8 @@ fn executable(path: &Path) -> Result<()> {
 fn copy_compiler_library(program: &str, name: &str, destination: &Path) -> Result<PathBuf> {
     let source = compiler_library(program, name)?;
     let output = destination.join(name);
+    let source = fs::canonicalize(&source)
+        .with_context(|| format!("resolve compiler library {}", source.display()))?;
     fs::copy(source, &output)?;
     Ok(output)
 }

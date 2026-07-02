@@ -152,6 +152,39 @@ emit_wrapper() {
     } >>"$wrapper_source"
 }
 
+emit_direct_wrapper() {
+    local symbol=$1
+    local target=$2
+    local hidden=$3
+
+    {
+        printf '\n.text\n'
+        printf '.globl %s\n' "$symbol"
+        if [[ "$hidden" == yes ]]; then
+            printf '.hidden %s\n' "$symbol"
+        fi
+        printf '.type %s, @function\n' "$symbol"
+        printf '%s:\n' "$symbol"
+        printf '    pushq %%rdi\n'
+        printf '    pushq %%rsi\n'
+        printf '    pushq %%rdx\n'
+        printf '    pushq %%rcx\n'
+        printf '    pushq %%r8\n'
+        printf '    pushq %%r9\n'
+        printf '    subq $8, %%rsp\n'
+        printf '    call rsched_activate_instrumented_libc@PLT\n'
+        printf '    addq $8, %%rsp\n'
+        printf '    popq %%r9\n'
+        printf '    popq %%r8\n'
+        printf '    popq %%rcx\n'
+        printf '    popq %%rdx\n'
+        printf '    popq %%rsi\n'
+        printf '    popq %%rdi\n'
+        printf '    jmp %s@PLT\n' "$target"
+        printf '.size %s, .-%s\n' "$symbol" "$symbol"
+    } >>"$wrapper_source"
+}
+
 emit_syscall_trampoline() {
     {
         printf '\n.text\n'
@@ -175,6 +208,22 @@ add_versioned_public_wrappers() {
         local wrapper="__rsched_public_version_${public}_${index}"
         objcopy_args+=(--redefine-sym "$versioned=$old_alias")
         emit_wrapper "$wrapper" "$rsched" "$real" yes no
+        printf '.symver %s,%s\n' "$wrapper" "$versioned" >>"$wrapper_source"
+        ((index += 1))
+    done < <(grep -E "^${public}@@?[^@]+$" "$symbols_file" || true)
+}
+
+add_direct_versioned_public_wrappers() {
+    local public=$1
+    local rsched=$2
+    local index=0
+    local versioned
+
+    while IFS= read -r versioned; do
+        local old_alias="__rsched_real_version_${public}_${index}"
+        local wrapper="__rsched_public_version_${public}_${index}"
+        objcopy_args+=(--redefine-sym "$versioned=$old_alias")
+        emit_direct_wrapper "$wrapper" "$rsched" no
         printf '.symver %s,%s\n' "$wrapper" "$versioned" >>"$wrapper_source"
         ((index += 1))
     done < <(grep -E "^${public}@@?[^@]+$" "$symbols_file" || true)
@@ -206,6 +255,32 @@ add_rewrite() {
     emit_wrapper "$impl" "$rsched" "$real" yes no
 }
 
+add_direct_rewrite() {
+    local impl=$1
+    local public=$2
+    local real=$3
+    local rsched=$4
+    local hidden=$5
+
+    if ! symbol_defined "$impl"; then
+        return
+    fi
+
+    objcopy_args+=(--redefine-sym "$impl=$real")
+    if [[ "$public" != "$impl" ]] && symbol_defined "$public"; then
+        objcopy_args+=(--redefine-sym "$public=__rsched_real_alias_$public")
+        emit_direct_wrapper "$public" "$rsched" no
+    fi
+    add_direct_versioned_public_wrappers "$public" "$rsched"
+    if [[ -n "$hidden" ]]; then
+        if symbol_defined "$hidden"; then
+            objcopy_args+=(--redefine-sym "$hidden=__rsched_real_alias_$hidden")
+        fi
+        emit_direct_wrapper "$hidden" "$rsched" yes
+    fi
+    emit_direct_wrapper "$impl" "$rsched" no
+}
+
 objcopy_args=()
 : >"$wrapper_source"
 
@@ -230,6 +305,14 @@ add_rewrite "___pthread_cond_signal" "pthread_cond_signal" "__rsched_real_pthrea
 add_rewrite "___pthread_cond_broadcast" "pthread_cond_broadcast" "__rsched_real_pthread_cond_broadcast" "rsched_pthread_cond_broadcast" "__GI___pthread_cond_broadcast"
 add_rewrite "___pthread_barrier_init" "pthread_barrier_init" "__rsched_real_pthread_barrier_init" "rsched_pthread_barrier_init" "__GI___pthread_barrier_init"
 add_rewrite "___pthread_barrier_wait" "pthread_barrier_wait" "__rsched_real_pthread_barrier_wait" "rsched_pthread_barrier_wait" "__GI___pthread_barrier_wait"
+add_direct_rewrite "__new_sem_init" "sem_init" "__rsched_real_sem_init" "rsched_sem_init" "__GI_sem_init"
+add_direct_rewrite "__new_sem_destroy" "sem_destroy" "__rsched_real_sem_destroy" "rsched_sem_destroy" "__GI_sem_destroy"
+add_direct_rewrite "__new_sem_wait" "sem_wait" "__rsched_real_sem_wait" "rsched_sem_wait" "__GI_sem_wait"
+add_direct_rewrite "___sem_timedwait" "sem_timedwait" "__rsched_real_sem_timedwait" "rsched_sem_timedwait" "__GI_sem_timedwait"
+add_direct_rewrite "___sem_clockwait" "sem_clockwait" "__rsched_real_sem_clockwait" "rsched_sem_clockwait" "__GI_sem_clockwait"
+add_direct_rewrite "__new_sem_trywait" "sem_trywait" "__rsched_real_sem_trywait" "rsched_sem_trywait" "__GI_sem_trywait"
+add_direct_rewrite "__new_sem_post" "sem_post" "__rsched_real_sem_post" "rsched_sem_post" "__GI_sem_post"
+add_direct_rewrite "__new_sem_getvalue" "sem_getvalue" "__rsched_real_sem_getvalue" "rsched_sem_getvalue" "__GI_sem_getvalue"
 add_rewrite "__sched_yield" "sched_yield" "__rsched_real_sched_yield" "rsched_sched_yield" "__GI___sched_yield"
 add_rewrite "_exit" "_exit" "__rsched_real_process_exit" "rsched_process_exit_status" "__GI__exit"
 add_rewrite "__waitpid" "waitpid" "__rsched_real_waitpid" "rsched_waitpid" "__GI___waitpid"
