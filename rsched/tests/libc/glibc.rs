@@ -1,6 +1,7 @@
 use rsched_libc_build::{ArtifactManifest, InstrumentationMode, Provider};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 fn artifact() -> ArtifactManifest {
     let path = std::env::var_os("RSCHED_GLIBC_ARTIFACT").expect(
@@ -76,7 +77,7 @@ fn add_instrumented_link_args(command: &mut Command, artifact: &ArtifactManifest
         .gcc_plugin
         .as_ref()
         .expect("instrumented glibc artifact GCC plugin");
-    let shared_gnulib = format!("{} -lgcc_s -lgcc", rsched.display());
+    let shared_gnulib = format!("-lgcc_s -lgcc {}", rsched.display());
     let static_gnulib = format!(
         "{} -lgcc -lgcc_eh -Wl,--allow-multiple-definition",
         rsched.display()
@@ -85,9 +86,11 @@ fn add_instrumented_link_args(command: &mut Command, artifact: &ArtifactManifest
         .env("RSCHED_GCC_PLUGIN", gcc_plugin)
         .arg(format!("libc.so-gnulib={shared_gnulib}"))
         .arg(format!("gnulib={shared_gnulib}"))
-        .arg(format!("gnulib-tests={shared_gnulib}"))
+        // The conformance subjects should exercise the instrumented libc,
+        // not pull Rust/compiler_builtins from librsched.a into every test.
+        .arg("gnulib-tests=-lgcc_s -lgcc")
         .arg(format!("static-gnulib={static_gnulib}"))
-        .arg(format!("static-gnulib-tests={static_gnulib}"));
+        .arg("static-gnulib-tests=-lgcc -lgcc_eh");
 }
 
 fn glibc_build_library_path(build_dir: &Path) -> String {
@@ -99,6 +102,20 @@ fn glibc_build_library_path(build_dir: &Path) -> String {
     .map(|directory| build_dir.join(directory).display().to_string())
     .collect::<Vec<_>>()
     .join(":")
+}
+
+fn run_in_process_group(command: &mut Command) -> std::io::Result<ExitStatus> {
+    command.process_group(0);
+    let mut child = command.spawn()?;
+    let child_pid = child.id() as libc::pid_t;
+    let status = child.wait();
+
+    unsafe {
+        libc::kill(-child_pid, libc::SIGTERM);
+        libc::kill(-child_pid, libc::SIGKILL);
+    }
+
+    status
 }
 
 #[test]
@@ -116,8 +133,9 @@ fn glibc_tests_with_built_libc() {
         .arg("-k")
         .arg(format!("-j{}", jobs()))
         .arg("check")
+        .arg("CC=gcc")
         .arg(format!(
-            "test-wrapper-env=env LD_LIBRARY_PATH={}",
+            "test-wrapper-env=timeout 120s env LD_LIBRARY_PATH={}",
             glibc_build_library_path(build_dir)
         ))
         .env("TIMEOUTFACTOR", "1")
@@ -135,8 +153,7 @@ fn glibc_tests_with_built_libc() {
         command.env("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
     }
 
-    let status = command
-        .status()
+    let status = run_in_process_group(&mut command)
         .unwrap_or_else(|error| panic!("failed to run glibc tests: {error}"));
     let summary = summarize_results(build_dir);
     eprintln!("{summary}");

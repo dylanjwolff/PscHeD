@@ -115,6 +115,12 @@ struct SBarrier {
     waiters: Vec<PthreadT>,
 }
 
+struct SSemaphore {
+    value: libc::c_uint,
+    waiters: Vec<PthreadT>,
+    grants: Vec<PthreadT>,
+}
+
 // ── Scheduler state ───────────────────────────────────────────────────────
 
 struct State {
@@ -127,6 +133,7 @@ struct State {
     recursive_mutex_attrs: HashSet<usize>,
     conds: HashMap<usize, SCond>,
     barriers: HashMap<usize, SBarrier>,
+    semaphores: HashMap<usize, SSemaphore>,
     /// A child thread created but not yet processed at a scheduling point.
     /// rsched_pthread_create stores the (StartArg*, child pthread_t) here and
     /// returns immediately so sanitiser post-create hooks can run.  The next
@@ -152,6 +159,7 @@ impl State {
             recursive_mutex_attrs: HashSet::new(),
             conds: HashMap::new(),
             barriers: HashMap::new(),
+            semaphores: HashMap::new(),
             pending_child: None,
             #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
             pending_pthread_clones: Vec::new(),
@@ -438,6 +446,65 @@ impl State {
         let waiter = self.mutexes.get_mut(&key).unwrap().waiters.remove(idx);
         let waiter_tid = self.info[&waiter].tid;
         self.mutexes.get_mut(&key).unwrap().owner_tid = waiter_tid;
+        self.task(waiter).set_blocking(false);
+        0
+    }
+
+    unsafe fn sem_wait(&mut self, key: usize, caller: PthreadT) -> libc::c_int {
+        loop {
+            let sem = self.semaphores.entry(key).or_insert(SSemaphore {
+                value: 0,
+                waiters: Vec::new(),
+                grants: Vec::new(),
+            });
+            if let Some(idx) = sem.grants.iter().position(|&pt| pt == caller) {
+                sem.grants.remove(idx);
+                return 0;
+            }
+            if sem.value > 0 {
+                sem.value -= 1;
+                return 0;
+            }
+            if !sem.waiters.contains(&caller) {
+                sem.waiters.push(caller);
+            }
+            self.task(caller).set_blocking(true);
+            self.context_switch(caller);
+            self.park_if_blocked(caller);
+        }
+    }
+
+    unsafe fn sem_trywait(&mut self, key: usize) -> libc::c_int {
+        let Some(sem) = self.semaphores.get_mut(&key) else {
+            return libc::EAGAIN;
+        };
+        if sem.value == 0 {
+            return libc::EAGAIN;
+        }
+        sem.value -= 1;
+        0
+    }
+
+    unsafe fn sem_post(&mut self, key: usize) -> libc::c_int {
+        let waiter_count = {
+            let sem = self.semaphores.entry(key).or_insert(SSemaphore {
+                value: 0,
+                waiters: Vec::new(),
+                grants: Vec::new(),
+            });
+            sem.waiters.len()
+        };
+        if waiter_count == 0 {
+            self.semaphores.get_mut(&key).unwrap().value += 1;
+            return 0;
+        }
+
+        let blocking = vec![false; waiter_count];
+        let idx = self
+            .choose_index(&blocking)
+            .expect("rsched: non-empty semaphore waiter list");
+        let waiter = self.semaphores.get_mut(&key).unwrap().waiters.remove(idx);
+        self.semaphores.get_mut(&key).unwrap().grants.push(waiter);
         self.task(waiter).set_blocking(false);
         0
     }
@@ -1923,6 +1990,27 @@ pub unsafe extern "C" fn rsched_pthread_barrier_wait(barrier: *mut BarrierT) -> 
     }
 }
 
+// ── POSIX semaphore wrappers ──────────────────────────────────────────────
+
+unsafe fn set_errno(errno: libc::c_int) {
+    *libc::__errno_location() = errno;
+}
+
+unsafe fn sem_timeout_expired(timeout: *const libc::timespec, clock_id: libc::clockid_t) -> bool {
+    if timeout.is_null() {
+        return false;
+    }
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if libc::clock_gettime(clock_id, &mut now) != 0 {
+        return false;
+    }
+    let timeout = *timeout;
+    now.tv_sec > timeout.tv_sec || (now.tv_sec == timeout.tv_sec && now.tv_nsec >= timeout.tv_nsec)
+}
+
 // ── Unsupported libc synchronization primitives ──────────────────────────
 //
 // These wrappers intentionally fail without blocking. Native implementations
@@ -1934,66 +2022,185 @@ fn abort_unsupported(kind: &str) -> ! {
     std::process::abort();
 }
 
-fn unsupported_posix() -> libc::c_int {
-    abort_unsupported("POSIX synchronization")
-}
-
 fn unsupported_pthread() -> libc::c_int {
     abort_unsupported("pthread synchronization")
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_sem_init(
-    _sem: *mut libc::sem_t,
-    _pshared: libc::c_int,
-    _value: libc::c_uint,
+    sem: *mut libc::sem_t,
+    pshared: libc::c_int,
+    value: libc::c_uint,
 ) -> libc::c_int {
-    unsupported_posix()
+    if sem.is_null() {
+        set_errno(libc::EINVAL);
+        return -1;
+    }
+    let _ = pshared;
+    ensure_init();
+    rsched_glock();
+    let caller = my_pt();
+    st().context_switch(caller);
+    st().semaphores.insert(
+        sem as usize,
+        SSemaphore {
+            value,
+            waiters: Vec::new(),
+            grants: Vec::new(),
+        },
+    );
+    rsched_gunlock();
+    0
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rsched_sem_destroy(_sem: *mut libc::sem_t) -> libc::c_int {
-    unsupported_posix()
+pub unsafe extern "C" fn rsched_sem_destroy(sem: *mut libc::sem_t) -> libc::c_int {
+    if sem.is_null() {
+        set_errno(libc::EINVAL);
+        return -1;
+    }
+    ensure_init();
+    rsched_glock();
+    let caller = my_pt();
+    st().context_switch(caller);
+    st().semaphores.remove(&(sem as usize));
+    rsched_gunlock();
+    0
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rsched_sem_wait(_sem: *mut libc::sem_t) -> libc::c_int {
-    unsupported_posix()
+pub unsafe extern "C" fn rsched_sem_wait(sem: *mut libc::sem_t) -> libc::c_int {
+    if sem.is_null() {
+        set_errno(libc::EINVAL);
+        return -1;
+    }
+    ensure_init();
+    rsched_glock();
+    let caller = my_pt();
+    st().context_switch(caller);
+    let result = st().sem_wait(sem as usize, caller);
+    rsched_gunlock();
+    result
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_sem_timedwait(
-    _sem: *mut libc::sem_t,
-    _timeout: *const libc::timespec,
+    sem: *mut libc::sem_t,
+    timeout: *const libc::timespec,
 ) -> libc::c_int {
-    unsupported_posix()
+    if sem.is_null() {
+        set_errno(libc::EINVAL);
+        return -1;
+    }
+    ensure_init();
+    rsched_glock();
+    let caller = my_pt();
+    st().context_switch(caller);
+    let result = st().sem_trywait(sem as usize);
+    if result == 0 {
+        rsched_gunlock();
+        return 0;
+    }
+    if sem_timeout_expired(timeout, libc::CLOCK_REALTIME) {
+        set_errno(libc::ETIMEDOUT);
+        rsched_gunlock();
+        return -1;
+    }
+    set_errno(libc::ETIMEDOUT);
+    rsched_gunlock();
+    -1
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_sem_clockwait(
-    _sem: *mut libc::sem_t,
-    _clock_id: libc::clockid_t,
-    _timeout: *const libc::timespec,
+    sem: *mut libc::sem_t,
+    clock_id: libc::clockid_t,
+    timeout: *const libc::timespec,
 ) -> libc::c_int {
-    unsupported_posix()
+    if sem.is_null() {
+        set_errno(libc::EINVAL);
+        return -1;
+    }
+    match clock_id {
+        libc::CLOCK_REALTIME | libc::CLOCK_MONOTONIC => {}
+        _ => {
+            set_errno(libc::EINVAL);
+            return -1;
+        }
+    }
+    ensure_init();
+    rsched_glock();
+    let caller = my_pt();
+    st().context_switch(caller);
+    let result = st().sem_trywait(sem as usize);
+    if result == 0 {
+        rsched_gunlock();
+        return 0;
+    }
+    if sem_timeout_expired(timeout, clock_id) {
+        set_errno(libc::ETIMEDOUT);
+        rsched_gunlock();
+        return -1;
+    }
+    set_errno(libc::ETIMEDOUT);
+    rsched_gunlock();
+    -1
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rsched_sem_trywait(_sem: *mut libc::sem_t) -> libc::c_int {
-    unsupported_posix()
+pub unsafe extern "C" fn rsched_sem_trywait(sem: *mut libc::sem_t) -> libc::c_int {
+    if sem.is_null() {
+        set_errno(libc::EINVAL);
+        return -1;
+    }
+    ensure_init();
+    rsched_glock();
+    let caller = my_pt();
+    st().context_switch(caller);
+    let result = st().sem_trywait(sem as usize);
+    if result != 0 {
+        set_errno(result);
+        rsched_gunlock();
+        return -1;
+    }
+    rsched_gunlock();
+    0
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rsched_sem_post(_sem: *mut libc::sem_t) -> libc::c_int {
-    unsupported_posix()
+pub unsafe extern "C" fn rsched_sem_post(sem: *mut libc::sem_t) -> libc::c_int {
+    if sem.is_null() {
+        set_errno(libc::EINVAL);
+        return -1;
+    }
+    ensure_init();
+    rsched_glock();
+    let caller = my_pt();
+    let result = st().sem_post(sem as usize);
+    st().context_switch(caller);
+    rsched_gunlock();
+    result
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_sem_getvalue(
-    _sem: *mut libc::sem_t,
-    _value: *mut libc::c_int,
+    sem: *mut libc::sem_t,
+    value: *mut libc::c_int,
 ) -> libc::c_int {
-    unsupported_posix()
+    if sem.is_null() || value.is_null() {
+        set_errno(libc::EINVAL);
+        return -1;
+    }
+    ensure_init();
+    rsched_glock();
+    let caller = my_pt();
+    st().context_switch(caller);
+    *value = st()
+        .semaphores
+        .get(&(sem as usize))
+        .map_or(0, |sem| sem.value as libc::c_int);
+    rsched_gunlock();
+    0
 }
 
 #[unsafe(no_mangle)]
