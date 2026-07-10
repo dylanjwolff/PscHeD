@@ -951,22 +951,30 @@ pub unsafe extern "C" fn rsched_execve(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_waitpid(
-    pid: libc::pid_t,
-    status: *mut libc::c_int,
-    options: libc::c_int,
+    _pid: libc::pid_t,
+    _status: *mut libc::c_int,
+    _options: libc::c_int,
 ) -> libc::pid_t {
-    ensure_init();
-    if options & libc::WNOHANG != 0 {
-        return with_internal_depth(|| libc::waitpid(pid, status, options));
-    }
+    abort_unsupported("process wait")
+}
 
-    loop {
-        let r = with_internal_depth(|| libc::waitpid(pid, status, options | libc::WNOHANG));
-        if r != 0 {
-            return r;
-        }
-        rsched_sched_yield();
-    }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_wait3(
+    _status: *mut libc::c_int,
+    _options: libc::c_int,
+    _rusage: *mut libc::rusage,
+) -> libc::pid_t {
+    abort_unsupported("process wait")
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_wait4(
+    _pid: libc::pid_t,
+    _status: *mut libc::c_int,
+    _options: libc::c_int,
+    _rusage: *mut libc::rusage,
+) -> libc::pid_t {
+    abort_unsupported("process wait")
 }
 
 // ── Reentrancy depth tracking ─────────────────────────────────────────────────
@@ -2219,6 +2227,27 @@ pub unsafe extern "C" fn rsched_pthread_detach(_thread: PthreadT) -> libc::c_int
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_pthread_cancel(_thread: PthreadT) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_testcancel() {
+    abort_unsupported("pthread cancellation")
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_setcancelstate(
+    _state: libc::c_int,
+    _oldstate: *mut libc::c_int,
+) -> libc::c_int {
+    unsupported_pthread()
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_setcanceltype(
+    _kind: libc::c_int,
+    _oldkind: *mut libc::c_int,
+) -> libc::c_int {
     unsupported_pthread()
 }
 

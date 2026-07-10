@@ -292,6 +292,10 @@ fi
 add_rewrite "__pthread_create_2_1" "pthread_create" "__rsched_real_pthread_create" "rsched_pthread_create" "__GI___pthread_create"
 add_rewrite "___pthread_join" "pthread_join" "__rsched_real_pthread_join" "rsched_pthread_join" "__GI___pthread_join"
 add_rewrite "__pthread_exit" "pthread_exit" "__rsched_real_pthread_exit" "rsched_pthread_exit" "__GI___pthread_exit"
+add_rewrite "__pthread_cancel" "pthread_cancel" "__rsched_real_pthread_cancel" "rsched_pthread_cancel" ""
+add_rewrite "___pthread_testcancel" "pthread_testcancel" "__rsched_real_pthread_testcancel" "rsched_pthread_testcancel" "__GI___pthread_testcancel"
+add_rewrite "__pthread_setcancelstate" "pthread_setcancelstate" "__rsched_real_pthread_setcancelstate" "rsched_pthread_setcancelstate" "__GI___pthread_setcancelstate"
+add_rewrite "__pthread_setcanceltype" "pthread_setcanceltype" "__rsched_real_pthread_setcanceltype" "rsched_pthread_setcanceltype" "__GI___pthread_setcanceltype"
 add_rewrite "___pthread_mutexattr_init" "pthread_mutexattr_init" "__rsched_real_pthread_mutexattr_init" "rsched_pthread_mutexattr_init" "__GI___pthread_mutexattr_init"
 add_rewrite "___pthread_mutexattr_settype" "pthread_mutexattr_settype" "__rsched_real_pthread_mutexattr_settype" "rsched_pthread_mutexattr_settype" "__GI___pthread_mutexattr_settype"
 add_rewrite "___pthread_mutexattr_destroy" "pthread_mutexattr_destroy" "__rsched_real_pthread_mutexattr_destroy" "rsched_pthread_mutexattr_destroy" "__GI___pthread_mutexattr_destroy"
@@ -316,6 +320,8 @@ add_direct_rewrite "__new_sem_getvalue" "sem_getvalue" "__rsched_real_sem_getval
 add_rewrite "__sched_yield" "sched_yield" "__rsched_real_sched_yield" "rsched_sched_yield" "__GI___sched_yield"
 add_rewrite "_exit" "_exit" "__rsched_real_process_exit" "rsched_process_exit_status" "__GI__exit"
 add_rewrite "__waitpid" "waitpid" "__rsched_real_waitpid" "rsched_waitpid" "__GI___waitpid"
+add_rewrite "__wait3" "wait3" "__rsched_real_wait3" "rsched_wait3" ""
+add_rewrite "__wait4" "wait4" "__rsched_real_wait4" "rsched_wait4" "__GI___wait4"
 
 if [[ ${#objcopy_args[@]} -eq 0 ]]; then
     mv "$object" "$output_file"

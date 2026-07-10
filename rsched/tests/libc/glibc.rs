@@ -86,11 +86,9 @@ fn add_instrumented_link_args(command: &mut Command, artifact: &ArtifactManifest
         .env("RSCHED_GCC_PLUGIN", gcc_plugin)
         .arg(format!("libc.so-gnulib={shared_gnulib}"))
         .arg(format!("gnulib={shared_gnulib}"))
-        // The conformance subjects should exercise the instrumented libc,
-        // not pull Rust/compiler_builtins from librsched.a into every test.
-        .arg("gnulib-tests=-lgcc_s -lgcc")
+        .arg(format!("gnulib-tests={shared_gnulib}"))
         .arg(format!("static-gnulib={static_gnulib}"))
-        .arg("static-gnulib-tests=-lgcc -lgcc_eh");
+        .arg(format!("static-gnulib-tests={static_gnulib}"));
 }
 
 fn glibc_build_library_path(build_dir: &Path) -> String {

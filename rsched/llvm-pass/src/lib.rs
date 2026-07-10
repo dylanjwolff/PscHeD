@@ -578,6 +578,9 @@ fn wrap_glibc_hidden_implementations(
 ) -> bool {
     let mut changed = false;
     for (rewrite, hidden) in rewrites.iter().zip(hidden_names) {
+        if hidden.is_empty() {
+            continue;
+        }
         let Some(real) = module.get_function(rewrite.real) else {
             continue;
         };
@@ -1170,6 +1173,20 @@ const MUSL_REWRITES: &[LibcRewrite] = &[
         diverges: false,
     },
     LibcRewrite {
+        implementation: "wait3",
+        public: "wait3",
+        real: "__rsched_real_wait3",
+        rsched: "rsched_wait3",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "wait4",
+        public: "wait4",
+        real: "__rsched_real_wait4",
+        rsched: "rsched_wait4",
+        diverges: false,
+    },
+    LibcRewrite {
         implementation: "_exit",
         public: "_exit",
         real: "__rsched_real_process_exit",
@@ -1307,15 +1324,31 @@ const GLIBC_REWRITES: &[LibcRewrite] = &[
     },
 ];
 
-const GLIBC_PUBLIC_REWRITES: &[LibcRewrite] = &[LibcRewrite {
-    implementation: "__waitpid",
-    public: "waitpid",
-    real: "__rsched_real_waitpid",
-    rsched: "rsched_waitpid",
-    diverges: false,
-}];
+const GLIBC_PUBLIC_REWRITES: &[LibcRewrite] = &[
+    LibcRewrite {
+        implementation: "__waitpid",
+        public: "waitpid",
+        real: "__rsched_real_waitpid",
+        rsched: "rsched_waitpid",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__wait3",
+        public: "wait3",
+        real: "__rsched_real_wait3",
+        rsched: "rsched_wait3",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__wait4",
+        public: "wait4",
+        real: "__rsched_real_wait4",
+        rsched: "rsched_wait4",
+        diverges: false,
+    },
+];
 
-const GLIBC_PUBLIC_HIDDEN_NAMES: &[&str] = &["__GI___waitpid"];
+const GLIBC_PUBLIC_HIDDEN_NAMES: &[&str] = &["__GI___waitpid", "", "__GI___wait4"];
 
 const GLIBC_HIDDEN_NAMES: &[&str] = &[
     "__GI___pthread_create",

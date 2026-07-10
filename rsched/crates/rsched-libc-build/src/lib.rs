@@ -244,6 +244,21 @@ impl ArtifactManifest {
                 bail!("artifact is incomplete: {} is missing", path.display());
             }
         }
+        if self.kind == ArtifactKind::Glibc && self.instrumentation == InstrumentationMode::Rsched {
+            let libc = self.libc.as_ref().context("glibc artifact libc path")?;
+            let libc_bytes = fs::read(libc).with_context(|| format!("read {}", libc.display()))?;
+            for symbol in ["rsched_clone", "rsched_sem_wait"] {
+                if !libc_bytes
+                    .windows(symbol.len())
+                    .any(|window| window == symbol.as_bytes())
+                {
+                    bail!(
+                        "instrumented glibc artifact is missing {symbol} in {}",
+                        libc.display()
+                    );
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -259,7 +274,17 @@ pub fn ensure_artifact(options: &BuildOptions) -> Result<ArtifactManifest> {
         .join(&fingerprint);
     let manifest_path = artifact_root.join("manifest.json");
     if manifest_path.exists() {
-        return ArtifactManifest::load(manifest_path);
+        match ArtifactManifest::load(&manifest_path) {
+            Ok(manifest) => return Ok(manifest),
+            Err(error) => {
+                eprintln!(
+                    "discarding invalid cached rsched artifact {}: {error:#}",
+                    artifact_root.display()
+                );
+                fs::remove_dir_all(&artifact_root)
+                    .with_context(|| format!("remove invalid {}", artifact_root.display()))?;
+            }
+        }
     }
 
     if artifact_root.exists() {
