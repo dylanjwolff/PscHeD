@@ -202,6 +202,10 @@ fn first_global(module: &Module<'_>) -> LLVMValueRef {
 }
 
 fn next_global(value: LLVMValueRef) -> LLVMValueRef {
+    debug_assert!(
+        !value.is_null(),
+        "rsched LLVM pass: next_global received null value"
+    );
     // SAFETY: `value` is either null-checked by the caller or was returned by
     // LLVM's global iterator APIs.
     unsafe { LLVMGetNextGlobal(value) }
@@ -214,29 +218,53 @@ fn first_global_alias(module: &Module<'_>) -> LLVMValueRef {
 }
 
 fn next_global_alias(value: LLVMValueRef) -> LLVMValueRef {
+    debug_assert!(
+        !value.is_null(),
+        "rsched LLVM pass: next_global_alias received null value"
+    );
     // SAFETY: `value` is either null-checked by the caller or was returned by
     // LLVM's alias iterator APIs.
     unsafe { LLVMGetNextGlobalAlias(value) }
 }
 
 fn named_global_alias(module: &Module<'_>, name: &str) -> LLVMValueRef {
+    debug_assert!(
+        !name.as_bytes().contains(&0),
+        "rsched LLVM pass: alias name contains NUL"
+    );
     // SAFETY: `module.as_mut_ptr()` is valid, and LLVM accepts a pointer/length
     // pair that does not need to be NUL-terminated.
     unsafe { LLVMGetNamedGlobalAlias(module.as_mut_ptr(), name.as_ptr().cast(), name.len()) }
 }
 
 fn alias_aliasee(alias: LLVMValueRef) -> LLVMValueRef {
+    debug_assert!(
+        !alias.is_null(),
+        "rsched LLVM pass: alias_aliasee received null alias"
+    );
+    debug_assert!(
+        is_global_alias(alias),
+        "rsched LLVM pass: alias_aliasee received non-alias value"
+    );
     // SAFETY: `alias` was returned by LLVM's alias iterator APIs.
     unsafe { LLVMAliasGetAliasee(alias) }
 }
 
 fn is_global_alias(value: LLVMValueRef) -> bool {
+    debug_assert!(
+        !value.is_null(),
+        "rsched LLVM pass: is_global_alias received null value"
+    );
     // SAFETY: LLVM accepts any value reference and returns null when it is not
     // a global alias.
     unsafe { !LLVMIsAGlobalAlias(value).is_null() }
 }
 
 fn value_name(value: LLVMValueRef) -> Option<String> {
+    debug_assert!(
+        !value.is_null(),
+        "rsched LLVM pass: value_name received null value"
+    );
     let mut len = 0;
     // SAFETY: `value` is an LLVM value owned by the current module. LLVM
     // returns a borrowed byte pointer plus length.

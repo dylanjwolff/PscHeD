@@ -769,6 +769,16 @@ unsafe fn rpt() -> &'static RealPt {
             // type.  Function pointers and data pointers share the same width on every
             // platform rsched targets, so the transmute is sound.
             unsafe fn sym<T: Copy>(lib: *mut libc::c_void, name: &[u8]) -> T {
+                debug_assert!(!lib.is_null(), "rsched: dlsym library handle is null");
+                debug_assert!(
+                    name.last() == Some(&0) && !name[..name.len().saturating_sub(1)].contains(&0),
+                    "rsched: dlsym name must be exactly one NUL-terminated C string"
+                );
+                debug_assert_eq!(
+                    core::mem::size_of::<T>(),
+                    core::mem::size_of::<*mut libc::c_void>(),
+                    "rsched: real pthread symbol type has unexpected size"
+                );
                 let p = libc::dlsym(lib, name.as_ptr() as *const _);
                 assert!(!p.is_null(), "rsched: dlsym returned null");
                 std::mem::transmute_copy::<*mut libc::c_void, T>(&p)
@@ -804,6 +814,15 @@ unsafe fn rsched_gunlock() {
 }
 
 pub(crate) unsafe fn thread_cond_wait(cond: *mut CondT) {
+    debug_assert!(
+        !cond.is_null(),
+        "rsched: thread_cond_wait received null cond"
+    );
+    debug_assert_eq!(
+        (cond as usize) % core::mem::align_of::<CondT>(),
+        0,
+        "rsched: thread_cond_wait received misaligned cond"
+    );
     tsan::sync_release();
     with_internal_depth(|| (rpt().cond_wait)(cond, addr_of_mut!(GMTX)));
     tsan::sync_acquire();
@@ -811,6 +830,9 @@ pub(crate) unsafe fn thread_cond_wait(cond: *mut CondT) {
 
 #[cfg(not(feature = "instrumented-libc"))]
 extern "C" fn process_atexit() {
+    // SAFETY: This callback is registered by rsched during initialization and
+    // runs at process exit, where forwarding to the exported exit hook is the
+    // intended teardown path.
     unsafe {
         rsched_process_exit();
     }
@@ -1197,6 +1219,11 @@ pub unsafe fn rsched_musl_dl_find_object(
     if address.is_null() || result.is_null() {
         return -1;
     }
+    debug_assert_eq!(
+        (result as usize) % core::mem::align_of::<DlFindObject>(),
+        0,
+        "rsched: dl_find_object result pointer is misaligned"
+    );
     let mut context = DlFindContext {
         address: address as usize,
         result: result.cast(),
@@ -1252,6 +1279,10 @@ unsafe fn with_internal_depth<T>(f: impl FnOnce() -> T) -> T {
 }
 
 unsafe fn st() -> &'static mut State {
+    debug_assert!(
+        (*addr_of_mut!(STATE)).is_some(),
+        "rsched: scheduler state accessed before initialization"
+    );
     (*addr_of_mut!(STATE))
         .as_mut()
         .expect("rsched not initialised")
@@ -1498,6 +1529,15 @@ pub unsafe extern "C" fn rsched_pthread_create(
     start_routine: StartRoutine,
     arg: *mut libc::c_void,
 ) -> libc::c_int {
+    debug_assert!(
+        !thread.is_null(),
+        "rsched: pthread_create output pointer is null"
+    );
+    debug_assert_eq!(
+        (thread as usize) % core::mem::align_of::<PthreadT>(),
+        0,
+        "rsched: pthread_create output pointer is misaligned"
+    );
     #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
     {
         rsched_activate_instrumented_libc();
@@ -1648,6 +1688,11 @@ pub unsafe extern "C" fn rsched_clone_internal(
         *libc::__errno_location() = libc::EINVAL;
         return -1;
     }
+    debug_assert_eq!(
+        (args as usize) % core::mem::align_of::<LinuxCloneArgs>(),
+        0,
+        "rsched: clone args pointer is misaligned"
+    );
     let args = &*args.cast::<LinuxCloneArgs>();
     let flags = (args.flags | args.exit_signal) as libc::c_int;
     rsched_activate_instrumented_libc();
@@ -1755,6 +1800,15 @@ pub unsafe extern "C" fn rsched_pthread_exit(retval: *mut libc::c_void) -> ! {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_pthread_mutex_lock(lock: *mut MutexT) -> libc::c_int {
+    debug_assert!(
+        !lock.is_null(),
+        "rsched: pthread_mutex_lock received null mutex"
+    );
+    debug_assert_eq!(
+        (lock as usize) % core::mem::align_of::<MutexT>(),
+        0,
+        "rsched: pthread_mutex_lock received misaligned mutex"
+    );
     ensure_init();
     let key = lock as usize;
     rsched_glock();
@@ -1786,6 +1840,15 @@ pub unsafe extern "C" fn rsched_pthread_mutex_lock(lock: *mut MutexT) -> libc::c
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_pthread_mutex_trylock(lock: *mut MutexT) -> libc::c_int {
+    debug_assert!(
+        !lock.is_null(),
+        "rsched: pthread_mutex_trylock received null mutex"
+    );
+    debug_assert_eq!(
+        (lock as usize) % core::mem::align_of::<MutexT>(),
+        0,
+        "rsched: pthread_mutex_trylock received misaligned mutex"
+    );
     ensure_init();
     let key = lock as usize;
     rsched_glock();
@@ -1831,6 +1894,15 @@ pub unsafe extern "C" fn rsched_pthread_mutex_trylock(lock: *mut MutexT) -> libc
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_pthread_mutex_unlock(lock: *mut MutexT) -> libc::c_int {
+    debug_assert!(
+        !lock.is_null(),
+        "rsched: pthread_mutex_unlock received null mutex"
+    );
+    debug_assert_eq!(
+        (lock as usize) % core::mem::align_of::<MutexT>(),
+        0,
+        "rsched: pthread_mutex_unlock received misaligned mutex"
+    );
     ensure_init();
     let key = lock as usize;
     rsched_glock();
@@ -1863,6 +1935,24 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
     cond: *mut CondT,
     lock: *mut MutexT,
 ) -> libc::c_int {
+    debug_assert!(
+        !cond.is_null(),
+        "rsched: pthread_cond_wait received null cond"
+    );
+    debug_assert!(
+        !lock.is_null(),
+        "rsched: pthread_cond_wait received null mutex"
+    );
+    debug_assert_eq!(
+        (cond as usize) % core::mem::align_of::<CondT>(),
+        0,
+        "rsched: pthread_cond_wait received misaligned cond"
+    );
+    debug_assert_eq!(
+        (lock as usize) % core::mem::align_of::<MutexT>(),
+        0,
+        "rsched: pthread_cond_wait received misaligned mutex"
+    );
     ensure_init();
     let ckey = cond as usize;
     let lkey = lock as usize;
@@ -2027,6 +2117,15 @@ unsafe fn sem_timeout_expired(timeout: *const libc::timespec, clock_id: libc::cl
     if timeout.is_null() {
         return false;
     }
+    debug_assert_eq!(
+        (timeout as usize) % core::mem::align_of::<libc::timespec>(),
+        0,
+        "rsched: semaphore timeout pointer is misaligned"
+    );
+    debug_assert!(
+        (*timeout).tv_nsec >= 0 && (*timeout).tv_nsec < 1_000_000_000,
+        "rsched: semaphore timeout has invalid nanoseconds"
+    );
     let mut now = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -2072,6 +2171,11 @@ pub unsafe extern "C" fn rsched_sem_init(
         set_errno(libc::EINVAL);
         return -1;
     }
+    debug_assert_eq!(
+        (sem as usize) % core::mem::align_of::<libc::sem_t>(),
+        0,
+        "rsched: sem_init received misaligned semaphore"
+    );
     let _ = pshared;
     ensure_init();
     rsched_glock();
@@ -2095,6 +2199,11 @@ pub unsafe extern "C" fn rsched_sem_destroy(sem: *mut libc::sem_t) -> libc::c_in
         set_errno(libc::EINVAL);
         return -1;
     }
+    debug_assert_eq!(
+        (sem as usize) % core::mem::align_of::<libc::sem_t>(),
+        0,
+        "rsched: sem_destroy received misaligned semaphore"
+    );
     ensure_init();
     rsched_glock();
     let caller = my_pt();
@@ -2110,6 +2219,11 @@ pub unsafe extern "C" fn rsched_sem_wait(sem: *mut libc::sem_t) -> libc::c_int {
         set_errno(libc::EINVAL);
         return -1;
     }
+    debug_assert_eq!(
+        (sem as usize) % core::mem::align_of::<libc::sem_t>(),
+        0,
+        "rsched: sem_wait received misaligned semaphore"
+    );
     ensure_init();
     rsched_glock();
     let caller = my_pt();
@@ -2128,6 +2242,11 @@ pub unsafe extern "C" fn rsched_sem_timedwait(
         set_errno(libc::EINVAL);
         return -1;
     }
+    debug_assert_eq!(
+        (sem as usize) % core::mem::align_of::<libc::sem_t>(),
+        0,
+        "rsched: sem_timedwait received misaligned semaphore"
+    );
     ensure_init();
     rsched_glock();
     let caller = my_pt();
@@ -2157,6 +2276,11 @@ pub unsafe extern "C" fn rsched_sem_clockwait(
         set_errno(libc::EINVAL);
         return -1;
     }
+    debug_assert_eq!(
+        (sem as usize) % core::mem::align_of::<libc::sem_t>(),
+        0,
+        "rsched: sem_clockwait received misaligned semaphore"
+    );
     match clock_id {
         libc::CLOCK_REALTIME | libc::CLOCK_MONOTONIC => {}
         _ => {
@@ -2189,6 +2313,11 @@ pub unsafe extern "C" fn rsched_sem_trywait(sem: *mut libc::sem_t) -> libc::c_in
         set_errno(libc::EINVAL);
         return -1;
     }
+    debug_assert_eq!(
+        (sem as usize) % core::mem::align_of::<libc::sem_t>(),
+        0,
+        "rsched: sem_trywait received misaligned semaphore"
+    );
     ensure_init();
     rsched_glock();
     let caller = my_pt();
@@ -2209,6 +2338,11 @@ pub unsafe extern "C" fn rsched_sem_post(sem: *mut libc::sem_t) -> libc::c_int {
         set_errno(libc::EINVAL);
         return -1;
     }
+    debug_assert_eq!(
+        (sem as usize) % core::mem::align_of::<libc::sem_t>(),
+        0,
+        "rsched: sem_post received misaligned semaphore"
+    );
     ensure_init();
     rsched_glock();
     let caller = my_pt();
@@ -2227,6 +2361,16 @@ pub unsafe extern "C" fn rsched_sem_getvalue(
         set_errno(libc::EINVAL);
         return -1;
     }
+    debug_assert_eq!(
+        (sem as usize) % core::mem::align_of::<libc::sem_t>(),
+        0,
+        "rsched: sem_getvalue received misaligned semaphore"
+    );
+    debug_assert_eq!(
+        (value as usize) % core::mem::align_of::<libc::c_int>(),
+        0,
+        "rsched: sem_getvalue received misaligned output pointer"
+    );
     ensure_init();
     rsched_glock();
     let caller = my_pt();
@@ -2476,6 +2620,15 @@ pub unsafe extern "C" fn rsched_sched_yield() -> libc::c_int {
 
 use std::sync::atomic::AtomicUsize;
 
+fn debug_assert_atomic_ptr<T>(ptr: *const T, name: &str) {
+    debug_assert!(!ptr.is_null(), "rsched: {name} pointer is null");
+    debug_assert_eq!(
+        (ptr as usize) % core::mem::align_of::<T>(),
+        0,
+        "rsched: {name} pointer is misaligned"
+    );
+}
+
 /// Internal scheduling point for atomic memory operations.
 /// `instr_addr` must be obtained via `return_address()` at the call site of the
 /// exported atomic function so that it points into user code, not into rsched.
@@ -2541,24 +2694,28 @@ pub unsafe extern "C" fn rsched_atomic_instrument(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_atomic_load_i32(ptr: *const AtomicI32) -> libc::c_int {
+    debug_assert_atomic_ptr(ptr, "atomic_load_i32");
     schedule_memop(return_address(), ptr as *const _, 4, AccessKind::Read);
     (*ptr).load(Ordering::SeqCst)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_atomic_store_i32(ptr: *mut AtomicI32, val: libc::c_int) {
+    debug_assert_atomic_ptr(ptr, "atomic_store_i32");
     schedule_memop(return_address(), ptr as *const _, 4, AccessKind::Write);
     (*ptr).store(val, Ordering::SeqCst);
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_atomic_load_u32(ptr: *const AtomicU32) -> libc::c_uint {
+    debug_assert_atomic_ptr(ptr, "atomic_load_u32");
     schedule_memop(return_address(), ptr as *const _, 4, AccessKind::Read);
     (*ptr).load(Ordering::SeqCst)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_atomic_store_u32(ptr: *mut AtomicU32, val: libc::c_uint) {
+    debug_assert_atomic_ptr(ptr, "atomic_store_u32");
     schedule_memop(return_address(), ptr as *const _, 4, AccessKind::Write);
     (*ptr).store(val, Ordering::SeqCst);
 }
@@ -2567,6 +2724,7 @@ pub unsafe extern "C" fn rsched_atomic_store_u32(ptr: *mut AtomicU32, val: libc:
 /// `ptr` is a type-erased pointer to any `T * _Atomic` variable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_atomic_load_ptr(ptr: *const libc::c_void) -> *mut libc::c_void {
+    debug_assert_atomic_ptr(ptr.cast::<AtomicUsize>(), "atomic_load_ptr");
     schedule_memop(
         return_address(),
         ptr,
@@ -2581,6 +2739,7 @@ pub unsafe extern "C" fn rsched_atomic_load_ptr(ptr: *const libc::c_void) -> *mu
 /// `ptr` is a type-erased pointer to any `T * _Atomic` variable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_atomic_store_ptr(ptr: *mut libc::c_void, val: *mut libc::c_void) {
+    debug_assert_atomic_ptr(ptr.cast::<AtomicUsize>(), "atomic_store_ptr");
     schedule_memop(
         return_address(),
         ptr,
@@ -2597,6 +2756,8 @@ pub unsafe extern "C" fn rsched_atomic_compare_exchange_i32(
     expected: *mut libc::c_int,
     desired: libc::c_int,
 ) -> bool {
+    debug_assert_atomic_ptr(ptr, "atomic_compare_exchange_i32");
+    debug_assert_atomic_ptr(expected, "atomic_compare_exchange_i32 expected");
     schedule_memop(return_address(), ptr as *const _, 4, AccessKind::ReadWrite);
     match (*ptr).compare_exchange(*expected, desired, Ordering::SeqCst, Ordering::SeqCst) {
         Ok(_) => true,
@@ -2613,6 +2774,8 @@ pub unsafe extern "C" fn rsched_atomic_compare_exchange_u32(
     expected: *mut libc::c_uint,
     desired: libc::c_uint,
 ) -> bool {
+    debug_assert_atomic_ptr(ptr, "atomic_compare_exchange_u32");
+    debug_assert_atomic_ptr(expected, "atomic_compare_exchange_u32 expected");
     schedule_memop(return_address(), ptr as *const _, 4, AccessKind::ReadWrite);
     match (*ptr).compare_exchange(*expected, desired, Ordering::SeqCst, Ordering::SeqCst) {
         Ok(_) => true,
@@ -2628,6 +2791,7 @@ pub unsafe extern "C" fn rsched_atomic_fetch_add_i32(
     ptr: *mut AtomicI32,
     val: libc::c_int,
 ) -> libc::c_int {
+    debug_assert_atomic_ptr(ptr, "atomic_fetch_add_i32");
     schedule_memop(return_address(), ptr as *const _, 4, AccessKind::ReadWrite);
     (*ptr).fetch_add(val, Ordering::SeqCst)
 }
@@ -2637,6 +2801,7 @@ pub unsafe extern "C" fn rsched_atomic_fetch_add_u32(
     ptr: *mut AtomicU32,
     val: libc::c_uint,
 ) -> libc::c_uint {
+    debug_assert_atomic_ptr(ptr, "atomic_fetch_add_u32");
     schedule_memop(return_address(), ptr as *const _, 4, AccessKind::ReadWrite);
     (*ptr).fetch_add(val, Ordering::SeqCst)
 }
@@ -2646,6 +2811,7 @@ pub unsafe extern "C" fn rsched_atomic_fetch_xor_i32(
     ptr: *mut AtomicI32,
     val: libc::c_int,
 ) -> libc::c_int {
+    debug_assert_atomic_ptr(ptr, "atomic_fetch_xor_i32");
     schedule_memop(return_address(), ptr as *const _, 4, AccessKind::ReadWrite);
     (*ptr).fetch_xor(val, Ordering::SeqCst)
 }
@@ -2655,6 +2821,7 @@ pub unsafe extern "C" fn rsched_atomic_fetch_xor_u32(
     ptr: *mut AtomicU32,
     val: libc::c_uint,
 ) -> libc::c_uint {
+    debug_assert_atomic_ptr(ptr, "atomic_fetch_xor_u32");
     schedule_memop(return_address(), ptr as *const _, 4, AccessKind::ReadWrite);
     (*ptr).fetch_xor(val, Ordering::SeqCst)
 }

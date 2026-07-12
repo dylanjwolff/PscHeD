@@ -24,12 +24,14 @@ pub(crate) unsafe fn sync_release() {
 }
 
 pub(crate) unsafe fn user_acquire(addr: *mut libc::c_void) {
+    debug_assert!(!addr.is_null(), "rsched: TSAN acquire address is null");
     ignore_end();
     acquire(addr);
     ignore_begin();
 }
 
 pub(crate) unsafe fn user_release(addr: *mut libc::c_void) {
+    debug_assert!(!addr.is_null(), "rsched: TSAN release address is null");
     ignore_end();
     release(addr);
     ignore_begin();
@@ -40,7 +42,6 @@ pub(crate) unsafe fn is_thread_start(start: StartRoutine, arg: *mut libc::c_void
     if arg.is_null() {
         return false;
     }
-
     let code = std::slice::from_raw_parts(start as *const u8, TSAN_THREAD_START_PREFIX.len());
     code == TSAN_THREAD_START_PREFIX
 }
@@ -57,6 +58,12 @@ pub(crate) unsafe fn is_background_start(start: StartRoutine, arg: *mut libc::c_
 
 #[cfg(feature = "tsan")]
 pub(crate) unsafe fn prepare_start_gate(arg: *mut libc::c_void) -> *mut libc::c_void {
+    debug_assert!(!arg.is_null(), "rsched: TSAN start gate argument is null");
+    debug_assert_eq!(
+        (arg as usize) % core::mem::align_of::<usize>(),
+        0,
+        "rsched: TSAN start gate argument is misaligned"
+    );
     let fields = arg as *mut usize;
     let routine = std::mem::transmute_copy::<usize, StartRoutine>(&*fields);
     let user_arg = *fields.add(1) as *mut libc::c_void;
@@ -71,6 +78,18 @@ pub(crate) unsafe fn prepare_start_gate(arg: *mut libc::c_void) -> *mut libc::c_
 
 #[cfg(feature = "tsan")]
 pub(crate) unsafe fn restore_start_gate(arg: *mut libc::c_void, gate: *mut libc::c_void) {
+    debug_assert!(!arg.is_null(), "rsched: TSAN restore argument is null");
+    debug_assert!(!gate.is_null(), "rsched: TSAN restore gate is null");
+    debug_assert_eq!(
+        (arg as usize) % core::mem::align_of::<usize>(),
+        0,
+        "rsched: TSAN restore argument is misaligned"
+    );
+    debug_assert_eq!(
+        (gate as usize) % core::mem::align_of::<TSanGateArg>(),
+        0,
+        "rsched: TSAN restore gate is misaligned"
+    );
     let gate_box = Box::from_raw(gate.cast::<TSanGateArg>());
     let fields = arg as *mut usize;
     *fields = gate_box.routine as usize;
@@ -79,6 +98,15 @@ pub(crate) unsafe fn restore_start_gate(arg: *mut libc::c_void, gate: *mut libc:
 
 #[cfg(feature = "tsan")]
 extern "C" fn user_start_gate(raw: *mut libc::c_void) -> *mut libc::c_void {
+    debug_assert!(
+        !raw.is_null(),
+        "rsched: TSAN user start gate received null gate"
+    );
+    debug_assert_eq!(
+        (raw as usize) % core::mem::align_of::<TSanGateArg>(),
+        0,
+        "rsched: TSAN user start gate received misaligned gate"
+    );
     // SAFETY: `raw` was produced by `prepare_start_gate` with
     // `Box::into_raw::<TSanGateArg>`. The gate is consumed exactly once by the
     // thread start trampoline before invoking the original user routine.

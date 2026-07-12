@@ -217,6 +217,37 @@ rsched-musl-coro-x86_64-linux.tar.zst
 Each archive includes a `manifest.json` describing its provider, target,
 fingerprint, and runtime paths.
 
+## Unsafe code
+
+`rsched` has a substantial unsafe surface because it interposes on C ABIs and
+controls thread, process, and coroutine execution. Unsafe blocks should have a
+`SAFETY:` comment explaining the local invariant, and pure-Rust unsafe helpers
+should be covered by unit tests where Miri can execute them.
+
+The broad remaining sources of unsafe code are:
+
+- C ABI boundaries: exported `extern "C"` interposition functions receive raw
+  libc pointers and must preserve pthread, semaphore, process, and atomic ABI
+  behavior.
+- FFI calls: libc, raw syscalls, TSan hooks, LLVM C APIs, `dlsym`, and dynamic
+  loader/object lookup paths all require unsafe calls or raw symbols.
+- Scheduler global state: the runtime owns singleton scheduler state,
+  process-shared mappings, DFS shared state, and cross-thread/process task
+  bookkeeping that cannot be represented directly with ordinary Rust borrows.
+- Thread and coroutine machinery: stack ownership, FS-base handling, raw start
+  routine arguments, clone/pthread lifecycle control, and coroutine context
+  switching require manual invariants.
+- Atomic instrumentation wrappers: instrumented code passes raw addresses that
+  are interpreted as Rust atomic pointers for scheduling and memory-operation
+  hooks.
+- Test and benchmark fixtures: Rust tests and benches call C fixture entry
+  points directly.
+
+The main architectural opportunities to reduce unsafety are to keep C ABI
+shims thin, route internal logic through typed safe wrappers, encapsulate global
+scheduler/process state behind narrow guard APIs, and isolate LLVM C API usage
+behind a small adapter layer.
+
 ## Testing
 
 Initialize the glibc, musl, and binary-instrumentation submodules before

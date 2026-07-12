@@ -139,10 +139,19 @@ impl SharedDfsState {
 }
 
 fn dfs_state() -> &'static mut SharedDfsState {
+    // SAFETY: `shared_dfs_state` returns the process-shared DFS storage owned
+    // by rsched. The pointer is validated below before it is dereferenced.
+    let ptr = unsafe { crate::task_provider::shared_dfs_state() };
+    debug_assert!(!ptr.is_null(), "rsched: DFS state pointer is null");
+    debug_assert_eq!(
+        (ptr as usize) % core::mem::align_of::<SharedDfsState>(),
+        0,
+        "rsched: DFS state pointer is misaligned"
+    );
     // SAFETY: `shared_dfs_state` returns the process-shared scheduler state
     // backing DFS exploration. rsched serializes scheduler access through its
     // global scheduling lock, so callers do not alias this mutable reference.
-    unsafe { &mut *crate::task_provider::shared_dfs_state() }
+    unsafe { &mut *ptr }
 }
 
 /// Scheduling algorithm interface.
@@ -450,5 +459,73 @@ impl<S: Scheduler> Scheduler for LoggingScheduler<S> {
 
     fn avoid_self_on_stutter(&self) -> bool {
         self.inner.avoid_self_on_stutter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dfs_state_enumerates_choices_without_repeating_completed_path() {
+        let mut state = SharedDfsState::EMPTY;
+
+        state.start_execution_if_needed();
+        assert_eq!(state.next_choice(2), 0);
+        assert_eq!(state.next_choice(3), 0);
+        state.finish_execution();
+
+        state.start_execution_if_needed();
+        assert_eq!(state.next_choice(2), 0);
+        assert_eq!(state.next_choice(3), 1);
+        state.finish_execution();
+
+        state.start_execution_if_needed();
+        assert_eq!(state.next_choice(2), 0);
+        assert_eq!(state.next_choice(3), 2);
+        state.finish_execution();
+
+        state.start_execution_if_needed();
+        assert_eq!(state.next_choice(2), 1);
+        assert_eq!(state.next_choice(3), 0);
+
+        assert_eq!(state.completed, 3);
+        assert_eq!(state.path.len, 2);
+        assert_eq!(state.path.choice(0), Some(1));
+        assert_eq!(state.path.choice(1), Some(0));
+    }
+
+    #[test]
+    fn dfs_state_finishes_after_cartesian_product_is_exhausted() {
+        let mut state = SharedDfsState::EMPTY;
+        let mut visited = Vec::new();
+
+        while {
+            state.start_execution_if_needed();
+            state.in_progress != 0
+        } {
+            let first = state.next_choice(2);
+            let second = state.next_choice(2);
+            visited.push((first, second));
+            state.finish_execution();
+        }
+
+        assert_eq!(visited, vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
+        assert_eq!(state.completed, 4);
+        assert_eq!(state.has_next, 0);
+        assert_eq!(state.path.len, 0);
+    }
+
+    #[test]
+    fn random_walk_zero_seed_is_deterministic_and_nonzero() {
+        let mut a = RandomWalk::new(0);
+        let mut b = RandomWalk::new(0);
+        let runnable = [false, true, false, false];
+
+        let choices_a: Vec<_> = (0..16).map(|_| a.choose(&runnable)).collect();
+        let choices_b: Vec<_> = (0..16).map(|_| b.choose(&runnable)).collect();
+
+        assert_eq!(choices_a, choices_b);
+        assert!(choices_a.iter().all(Option::is_some));
     }
 }

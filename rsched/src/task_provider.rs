@@ -13,6 +13,7 @@ pub(crate) struct ParkingHandle(*mut CondT);
 
 impl ParkingHandle {
     pub(crate) fn new(cond: *mut CondT) -> Self {
+        debug_assert!(!cond.is_null(), "rsched: parking cond pointer is null");
         Self(cond)
     }
 }
@@ -44,11 +45,25 @@ impl TaskHandle {
             !ps.is_null(),
             "rsched: task handle used before process state"
         );
+        debug_assert_eq!(
+            (ps as usize) % core::mem::align_of::<ProcessShared>(),
+            0,
+            "rsched: process state pointer is misaligned"
+        );
+        debug_assert!(
+            (*ps).task_count <= MAX_TASKS,
+            "rsched: process task count exceeds task storage"
+        );
         assert!(
             self.creation_idx < (*ps).task_count && self.creation_idx < MAX_TASKS,
             "rsched: invalid task creation index"
         );
-        f(&mut (*ps).tasks[self.creation_idx])
+        let task = addr_of_mut!((*ps).tasks[self.creation_idx]);
+        debug_assert!(
+            !task.is_null(),
+            "rsched: task slot pointer unexpectedly null"
+        );
+        f(&mut *task)
     }
 
     pub(crate) unsafe fn is_blocking(self) -> bool {
@@ -339,10 +354,15 @@ mod coro {
 
     impl CoroStack {
         fn owned(size: usize) -> Self {
+            debug_assert!(
+                size >= corosensei::stack::MIN_STACK_SIZE,
+                "rsched: owned coroutine stack is too small"
+            );
             Self::Owned(DefaultStack::new(size).unwrap())
         }
 
         fn libc(base: *mut libc::c_void, size: usize) -> Result<Self, libc::c_int> {
+            debug_assert!(!base.is_null(), "rsched: libc coroutine stack base is null");
             let base = base as usize;
             let Some(limit) = base.checked_sub(size) else {
                 return Err(libc::EINVAL);
@@ -418,6 +438,11 @@ mod coro {
             });
             let host_fs_base = get_fs_base();
             task.context.host_fs_base.set(host_fs_base);
+            debug_assert_ne!(
+                task.context.fs_base.get(),
+                0,
+                "rsched: coroutine FS base is zero before resume"
+            );
             set_fs_base(task.context.fs_base.get());
             match task.coroutine.resume(()) {
                 CoroutineResult::Yield(CoroYield::Yielded) => {}
@@ -436,6 +461,11 @@ mod coro {
             if ctx.is_null() {
                 return;
             }
+            debug_assert_eq!(
+                (ctx as usize) % core::mem::align_of::<CoroContext>(),
+                0,
+                "rsched: coroutine context pointer is misaligned"
+            );
             let yielder = (*ctx).yielder.get();
             if yielder.is_null() {
                 return;
@@ -473,6 +503,24 @@ mod coro {
 
             let task_key = NEXT_TASK_KEY.fetch_add(1, Ordering::Relaxed);
             let tid = NEXT_FAKE_TID.fetch_add(1, Ordering::Relaxed);
+            debug_assert!(
+                !thread.is_null(),
+                "rsched: coro create thread pointer is null"
+            );
+            debug_assert!(
+                !start_arg.is_null(),
+                "rsched: coro create start argument is null"
+            );
+            debug_assert_eq!(
+                (thread as usize) % core::mem::align_of::<PthreadT>(),
+                0,
+                "rsched: coro create thread pointer is misaligned"
+            );
+            debug_assert_eq!(
+                (start_arg as usize) % core::mem::align_of::<StartArg>(),
+                0,
+                "rsched: coro create start argument is misaligned"
+            );
             *thread = task_key as PthreadT;
 
             let routine = (*start_arg).routine;
@@ -521,6 +569,18 @@ mod coro {
             } = args;
             if tls.is_null() {
                 return Err(libc::EINVAL);
+            }
+            debug_assert_eq!(
+                (tls as usize) % core::mem::align_of::<usize>(),
+                0,
+                "rsched: clone TLS pointer is unexpectedly unaligned"
+            );
+            if !ptid.is_null() {
+                debug_assert_eq!(
+                    (ptid as usize) % core::mem::align_of::<libc::pid_t>(),
+                    0,
+                    "rsched: clone parent tid pointer is misaligned"
+                );
             }
 
             static NEXT_TASK_KEY: AtomicUsize = AtomicUsize::new(1_000_000);
@@ -691,12 +751,24 @@ struct ProcessShared {
 }
 
 pub(crate) unsafe fn shared_dfs_state() -> *mut SharedDfsState {
-    addr_of_mut!((*process_shared_ptr()).dfs)
+    let ps = process_shared_ptr();
+    debug_assert!(!ps.is_null(), "rsched: process shared pointer is null");
+    debug_assert_eq!(
+        (ps as usize) % core::mem::align_of::<ProcessShared>(),
+        0,
+        "rsched: process shared pointer is misaligned"
+    );
+    addr_of_mut!((*ps).dfs)
 }
 
 unsafe fn process_shared_ptr() -> *mut ProcessShared {
     let mut p = PROCESS_SHARED.load(Ordering::Acquire);
     if !p.is_null() {
+        debug_assert_eq!(
+            (p as usize) % core::mem::align_of::<ProcessShared>(),
+            0,
+            "rsched: cached process shared pointer is misaligned"
+        );
         return p;
     }
 
@@ -718,6 +790,11 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
             "rsched: mmap inherited shared process state failed"
         );
         p = raw.cast::<ProcessShared>();
+        debug_assert_eq!(
+            (p as usize) % core::mem::align_of::<ProcessShared>(),
+            0,
+            "rsched: inherited process shared mapping is misaligned"
+        );
         PROCESS_SHARED_FD.store(fd, Ordering::Release);
         PROCESS_SHARED.store(p, Ordering::Release);
         return p;
@@ -744,6 +821,11 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
     );
     core::ptr::write_bytes(raw, 0, size);
     p = raw.cast::<ProcessShared>();
+    debug_assert_eq!(
+        (p as usize) % core::mem::align_of::<ProcessShared>(),
+        0,
+        "rsched: process shared mapping is misaligned"
+    );
     PROCESS_SHARED_FD.store(fd, Ordering::Release);
     set_env_usize("RSCHED_SHM_FD", fd as usize);
 
@@ -784,12 +866,21 @@ unsafe fn envp_with_rsched_vars(
     ];
 
     if !envp.is_null() {
+        debug_assert_eq!(
+            (envp as usize) % core::mem::align_of::<*const libc::c_char>(),
+            0,
+            "rsched: envp pointer is misaligned"
+        );
         let mut i = 0;
         loop {
             let p = *envp.add(i);
             if p.is_null() {
                 break;
             }
+            debug_assert!(
+                !p.is_null(),
+                "rsched: envp entry became null after null check"
+            );
             let bytes = CStr::from_ptr(p).to_bytes();
             if !rsched_prefixes
                 .iter()
@@ -820,6 +911,18 @@ fn process_log(args: core::fmt::Arguments<'_>) {
 }
 
 unsafe fn deactivate_process_tasks(ps: *mut ProcessShared, domain: i32) {
+    debug_assert!(
+        !ps.is_null(),
+        "rsched: deactivate_process_tasks received null process state"
+    );
+    debug_assert!(
+        domain >= 0 && (domain as usize) < MAX_PROCESSES,
+        "rsched: deactivate_process_tasks received invalid domain"
+    );
+    debug_assert!(
+        (*ps).task_count <= MAX_TASKS,
+        "rsched: task count exceeds task storage"
+    );
     for id in 0..(*ps).task_count.min(MAX_TASKS) {
         if (*ps).tasks[id].domain == domain {
             (*ps).tasks[id].active = 0;
@@ -830,6 +933,14 @@ unsafe fn deactivate_process_tasks(ps: *mut ProcessShared, domain: i32) {
 }
 
 unsafe fn process_wait_on_slot(ps: *mut ProcessShared, slot: i32) {
+    debug_assert!(
+        !ps.is_null(),
+        "rsched: process_wait_on_slot received null process state"
+    );
+    debug_assert!(
+        slot >= 0 && (slot as usize) < MAX_PROCESSES,
+        "rsched: process_wait_on_slot received invalid slot"
+    );
     loop {
         let r = crate::with_internal_depth(|| {
             libc::sem_wait(addr_of_mut!((*ps).slots[slot as usize].gate))
@@ -1382,4 +1493,106 @@ pub(crate) fn default_task_provider() -> ProcessTaskProvider {
         Box::new(ThreadTaskProvider::new())
     };
     ProcessTaskProvider::new(local)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::MaybeUninit;
+    use std::sync::{Mutex, MutexGuard};
+
+    static PROCESS_SHARED_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ProcessSharedFixture {
+        previous: *mut ProcessShared,
+        current: *mut ProcessShared,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl ProcessSharedFixture {
+        fn install() -> Self {
+            let guard = PROCESS_SHARED_TEST_LOCK.lock().unwrap();
+            let previous = PROCESS_SHARED.load(Ordering::Acquire);
+            // SAFETY: `ProcessShared` is a C-layout shared-memory record whose
+            // runtime initialization path also starts from zeroed bytes before
+            // fields are populated. These tests only read and write the Rust
+            // scalar fields, not the embedded semaphore objects.
+            let shared = unsafe { MaybeUninit::<ProcessShared>::zeroed().assume_init() };
+            let current = Box::into_raw(Box::new(shared));
+            PROCESS_SHARED.store(current, Ordering::Release);
+            Self {
+                previous,
+                current,
+                _guard: guard,
+            }
+        }
+
+        fn get(&mut self) -> &mut ProcessShared {
+            // SAFETY: `current` was produced by `Box::into_raw` and remains
+            // uniquely owned by this fixture until `drop`.
+            unsafe { &mut *self.current }
+        }
+    }
+
+    impl Drop for ProcessSharedFixture {
+        fn drop(&mut self) {
+            PROCESS_SHARED.store(self.previous, Ordering::Release);
+            // SAFETY: `current` was allocated with `Box::into_raw` in
+            // `install`, and this fixture restores the global before freeing.
+            unsafe {
+                drop(Box::from_raw(self.current));
+            }
+        }
+    }
+
+    #[test]
+    fn task_handle_mutates_process_shared_task_slot() {
+        let mut fixture = ProcessSharedFixture::install();
+        let shared = fixture.get();
+        shared.task_count = 1;
+        shared.tasks[0] = SharedTask {
+            active: 1,
+            is_blocking: 0,
+            startup_done: 0,
+            is_waiting: 1,
+            domain: 7,
+            pthread: 11,
+        };
+
+        let handle = TaskHandle::new(0);
+
+        // SAFETY: The fixture installed a valid `ProcessShared` record with
+        // one task, so task handle index 0 is in bounds for this test.
+        unsafe {
+            assert!(!handle.is_blocking());
+            handle.set_blocking(true);
+            assert!(handle.is_blocking());
+            assert!(!handle.startup_done());
+            handle.set_startup_done(true);
+            assert!(handle.startup_done());
+            assert!(handle.is_waiting());
+            handle.set_waiting(false);
+            assert!(!handle.is_waiting());
+            handle.deactivate();
+        }
+
+        let task = fixture.get().tasks[0];
+        assert_eq!(task.active, 0);
+        assert_eq!(task.is_blocking, 1);
+        assert_eq!(task.is_waiting, 0);
+        assert_eq!(task.startup_done, 1);
+    }
+
+    #[test]
+    fn shared_dfs_state_uses_installed_process_shared_record() {
+        let mut fixture = ProcessSharedFixture::install();
+        let expected = addr_of_mut!(fixture.get().dfs);
+
+        // SAFETY: The fixture installed a valid process-shared record, so
+        // `shared_dfs_state` returns the address of its embedded DFS state.
+        unsafe {
+            let dfs = shared_dfs_state();
+            assert_eq!(dfs, expected);
+        }
+    }
 }
