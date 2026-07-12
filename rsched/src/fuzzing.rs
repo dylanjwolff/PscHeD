@@ -14,6 +14,8 @@ fn input_hash(data: *const libc::c_uchar, size: usize) -> u64 {
 
     let mut hash = FNV_OFFSET;
     if !data.is_null() {
+        // SAFETY: libFuzzer passes `data` as a valid buffer of `size` bytes
+        // for the duration of this callback. A null pointer is handled above.
         for byte in unsafe { std::slice::from_raw_parts(data, size) } {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(FNV_PRIME);

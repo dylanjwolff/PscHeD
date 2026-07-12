@@ -21,6 +21,8 @@ static RSCHED_LOCK: Mutex<()> = Mutex::new(());
 #[test]
 fn c_benchmark_kernels_complete() {
     let _g = RSCHED_LOCK.lock().unwrap();
+    // SAFETY: These functions are provided by the linked C benchmark fixtures
+    // and their signatures match the declarations above.
     unsafe {
         assert_eq!(run_bench_create(0x12345678, 8), 8);
         assert_eq!(run_bench_counter(0x12345678, 8, 4), 32);

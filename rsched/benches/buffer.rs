@@ -20,6 +20,8 @@ unsafe extern "C" {
 static _RSCHED_ANCHOR: unsafe extern "C" fn() = rsched::rsched_init;
 
 fn bounded_buffer() {
+    // SAFETY: `run_bench_buffer` is provided by the linked C benchmark fixture
+    // and its signature matches this declaration.
     let count = unsafe {
         run_bench_buffer(
             SEED,

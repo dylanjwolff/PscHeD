@@ -286,52 +286,47 @@ mod coro {
     }
 
     #[cfg(feature = "instrumented-libc")]
-    pub(crate) fn depth_fetch_add(delta: u32) -> Option<u32> {
-        let context = CORO_CONTEXT.load(Ordering::Acquire);
-        if context.is_null() {
-            return None;
-        }
-        unsafe {
-            let previous = (*context).call_depth.get();
-            (*context).call_depth.set(previous + delta);
-            Some(previous)
-        }
-    }
-
-    #[cfg(feature = "instrumented-libc")]
-    pub(crate) fn depth_fetch_sub(delta: u32) -> Option<u32> {
-        let context = CORO_CONTEXT.load(Ordering::Acquire);
-        if context.is_null() {
-            return None;
-        }
-        unsafe {
-            let previous = (*context).call_depth.get();
-            (*context).call_depth.set(previous - delta);
-            Some(previous)
-        }
-    }
-
-    #[cfg(feature = "instrumented-libc")]
-    pub(crate) fn depth_load() -> Option<u32> {
+    fn with_coro_context<R>(f: impl FnOnce(&CoroContext) -> R) -> Option<R> {
         let context = CORO_CONTEXT.load(Ordering::Acquire);
         if context.is_null() {
             None
         } else {
-            Some(unsafe { (*context).call_depth.get() })
+            // SAFETY: `CORO_CONTEXT` is set to the currently running
+            // coroutine's context while that coroutine is active. It is cleared
+            // before the context storage is dropped, so a non-null pointer is
+            // valid for the duration of this access.
+            Some(f(unsafe { &*context }))
         }
     }
 
     #[cfg(feature = "instrumented-libc")]
+    pub(crate) fn depth_fetch_add(delta: u32) -> Option<u32> {
+        with_coro_context(|context| {
+            let previous = context.call_depth.get();
+            context.call_depth.set(previous + delta);
+            Some(previous)
+        })
+        .flatten()
+    }
+
+    #[cfg(feature = "instrumented-libc")]
+    pub(crate) fn depth_fetch_sub(delta: u32) -> Option<u32> {
+        with_coro_context(|context| {
+            let previous = context.call_depth.get();
+            context.call_depth.set(previous - delta);
+            Some(previous)
+        })
+        .flatten()
+    }
+
+    #[cfg(feature = "instrumented-libc")]
+    pub(crate) fn depth_load() -> Option<u32> {
+        with_coro_context(|context| context.call_depth.get())
+    }
+
+    #[cfg(feature = "instrumented-libc")]
     pub(crate) fn depth_store(depth: u32) -> bool {
-        let context = CORO_CONTEXT.load(Ordering::Acquire);
-        if context.is_null() {
-            false
-        } else {
-            unsafe {
-                (*context).call_depth.set(depth);
-            }
-            true
-        }
+        with_coro_context(|context| context.call_depth.set(depth)).is_some()
     }
 
     enum CoroStack {
@@ -368,8 +363,9 @@ mod coro {
         }
     }
 
-    // The libc variant borrows a stack whose lifetime is managed by the libc
-    // thread descriptor. rsched retains the coroutine until libc has joined it.
+    // SAFETY: The libc variant borrows a stack whose lifetime is managed by
+    // the libc thread descriptor. rsched retains the coroutine until libc has
+    // joined it, so corosensei never observes a dangling stack.
     unsafe impl Stack for CoroStack {
         fn base(&self) -> StackPointer {
             match self {
@@ -768,6 +764,8 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
 fn set_env_usize(key: &str, value: usize) {
     let key = CString::new(key).expect("rsched env key contains nul");
     let value = CString::new(value.to_string()).expect("rsched env value contains nul");
+    // SAFETY: `key` and `value` are valid NUL-terminated strings and `setenv`
+    // copies them before returning.
     unsafe {
         let r = libc::setenv(key.as_ptr(), value.as_ptr(), 1);
         assert_eq!(r, 0, "rsched: setenv failed");

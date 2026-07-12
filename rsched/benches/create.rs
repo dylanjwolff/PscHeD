@@ -12,6 +12,8 @@ unsafe extern "C" {
 static _RSCHED_ANCHOR: unsafe extern "C" fn() = rsched::rsched_init;
 
 fn create(tasks: u32) {
+    // SAFETY: `run_bench_create` is provided by the linked C benchmark fixture
+    // and its signature matches this declaration.
     let count = unsafe { run_bench_create(SEED, tasks) };
     assert_eq!(count, tasks);
 }

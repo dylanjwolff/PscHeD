@@ -139,6 +139,9 @@ impl SharedDfsState {
 }
 
 fn dfs_state() -> &'static mut SharedDfsState {
+    // SAFETY: `shared_dfs_state` returns the process-shared scheduler state
+    // backing DFS exploration. rsched serializes scheduler access through its
+    // global scheduling lock, so callers do not alias this mutable reference.
     unsafe { &mut *crate::task_provider::shared_dfs_state() }
 }
 
@@ -260,11 +263,15 @@ fn env_is(name: &str, value: &str) -> bool {
     let Ok(name) = std::ffi::CString::new(name) else {
         return false;
     };
+    // SAFETY: `name` is a valid NUL-terminated C string. We immediately copy
+    // from the returned pointer before any environment mutation.
     let ptr = unsafe { libc::getenv(name.as_ptr()) };
     if ptr.is_null() {
         return false;
     }
 
+    // SAFETY: POSIX `getenv` returns either null or a pointer to a
+    // NUL-terminated string owned by the process environment.
     let bytes = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_bytes();
     bytes == value.as_bytes()
 }

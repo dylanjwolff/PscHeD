@@ -10,6 +10,9 @@ struct TSanGateArg {
 }
 
 #[cfg(feature = "tsan")]
+// SAFETY: The gate only transfers an opaque user thread-start function pointer
+// and argument pointer to the newly created OS thread. Ownership of the boxed
+// gate moves exactly once through `Box::into_raw`/`Box::from_raw`.
 unsafe impl Send for TSanGateArg {}
 
 pub(crate) unsafe fn sync_acquire() {
@@ -76,6 +79,9 @@ pub(crate) unsafe fn restore_start_gate(arg: *mut libc::c_void, gate: *mut libc:
 
 #[cfg(feature = "tsan")]
 extern "C" fn user_start_gate(raw: *mut libc::c_void) -> *mut libc::c_void {
+    // SAFETY: `raw` was produced by `prepare_start_gate` with
+    // `Box::into_raw::<TSanGateArg>`. The gate is consumed exactly once by the
+    // thread start trampoline before invoking the original user routine.
     unsafe {
         let gate = Box::from_raw(raw as *mut TSanGateArg);
         let routine = gate.routine;

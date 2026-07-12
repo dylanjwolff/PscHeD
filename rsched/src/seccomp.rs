@@ -72,6 +72,9 @@ extern "C" fn sigsys_handler(
     _info: *mut libc::siginfo_t,
     ucontext: *mut libc::c_void,
 ) {
+    // SAFETY: Linux invokes a SA_SIGINFO handler with `ucontext` pointing to a
+    // writable `ucontext_t`. This handler only uses async-signal-safe raw
+    // syscalls and edits the saved register frame before returning.
     unsafe {
         let ctx = &mut *(ucontext as *mut libc::ucontext_t);
         let regs = &mut ctx.uc_mcontext.gregs;

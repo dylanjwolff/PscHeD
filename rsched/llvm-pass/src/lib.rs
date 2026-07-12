@@ -16,6 +16,8 @@ use llvm_plugin::{
     LlvmModulePass, ModuleAnalysisManager, PassBuilder, PipelineParsing, PreservedAnalyses,
 };
 
+type LLVMValueRef = llvm_plugin::inkwell::llvm_sys::prelude::LLVMValueRef;
+
 const PASS_NAME: &str = "rsched-atomics";
 
 #[derive(Clone, Copy, Debug)]
@@ -124,7 +126,7 @@ impl LlvmModulePass for RschedAtomicsPass {
 fn materialize_glibc_hidden_declarations(module: &mut Module<'_>) -> bool {
     const PREFIX: &str = "__rsched_hidden_ref_";
     let mut names = Vec::new();
-    let mut marker = unsafe { LLVMGetFirstGlobal(module.as_mut_ptr()) };
+    let mut marker = first_global(module);
     while !marker.is_null() {
         if let Some(marker_name) = value_name(marker)
             && let Some(rest) = marker_name.strip_prefix(PREFIX)
@@ -132,7 +134,7 @@ fn materialize_glibc_hidden_declarations(module: &mut Module<'_>) -> bool {
         {
             names.push(original_name.to_owned());
         }
-        marker = unsafe { LLVMGetNextGlobal(marker) };
+        marker = next_global(marker);
     }
 
     let mut changed = false;
@@ -141,13 +143,7 @@ fn materialize_glibc_hidden_declarations(module: &mut Module<'_>) -> bool {
             continue;
         };
         let hidden_name = format!("__GI_{original_name}");
-        let hidden_alias = unsafe {
-            LLVMGetNamedGlobalAlias(
-                module.as_mut_ptr(),
-                hidden_name.as_ptr().cast(),
-                hidden_name.len(),
-            )
-        };
+        let hidden_alias = named_global_alias(module, &hidden_name);
         if module.get_function(&hidden_name).is_none() && hidden_alias.is_null() {
             module.add_function(&hidden_name, original.get_type(), None);
             changed = true;
@@ -158,9 +154,9 @@ fn materialize_glibc_hidden_declarations(module: &mut Module<'_>) -> bool {
 
 fn normalize_glibc_hidden_aliases(module: &mut Module<'_>) -> bool {
     let mut aliases = Vec::new();
-    let mut alias = unsafe { LLVMGetFirstGlobalAlias(module.as_mut_ptr()) };
+    let mut alias = first_global_alias(module);
     while !alias.is_null() {
-        let next = unsafe { LLVMGetNextGlobalAlias(alias) };
+        let next = next_global_alias(alias);
         let Some(hidden_name) = value_name(alias) else {
             alias = next;
             continue;
@@ -169,8 +165,8 @@ fn normalize_glibc_hidden_aliases(module: &mut Module<'_>) -> bool {
             alias = next;
             continue;
         };
-        let aliasee = unsafe { LLVMAliasGetAliasee(alias) };
-        let aliasee_is_alias = unsafe { !LLVMIsAGlobalAlias(aliasee).is_null() };
+        let aliasee = alias_aliasee(alias);
+        let aliasee_is_alias = is_global_alias(aliasee);
         if !aliasee_is_alias && value_name(aliasee).as_deref() == Some(original_name.as_str()) {
             aliases.push((alias, aliasee, hidden_name, original_name));
         }
@@ -182,6 +178,8 @@ fn normalize_glibc_hidden_aliases(module: &mut Module<'_>) -> bool {
             .expect("glibc symbol name contains no NUL");
         set_value_name(*alias, &format!("__rsched_hidden_alias_{original_name}"));
         set_value_name(*aliasee, hidden_name);
+        // SAFETY: All values belong to `module`. `public_name` is
+        // NUL-terminated and lives for the duration of the call.
         unsafe {
             LLVMSetLinkage(*alias, LLVMLinkage::LLVMPrivateLinkage);
             LLVMSetVisibility(*aliasee, LLVMVisibility::LLVMHiddenVisibility);
@@ -197,12 +195,56 @@ fn normalize_glibc_hidden_aliases(module: &mut Module<'_>) -> bool {
     !aliases.is_empty()
 }
 
-fn value_name(value: llvm_plugin::inkwell::llvm_sys::prelude::LLVMValueRef) -> Option<String> {
+fn first_global(module: &Module<'_>) -> LLVMValueRef {
+    // SAFETY: `module.as_mut_ptr()` is a valid LLVM module pointer managed by
+    // inkwell for the duration of this pass.
+    unsafe { LLVMGetFirstGlobal(module.as_mut_ptr()) }
+}
+
+fn next_global(value: LLVMValueRef) -> LLVMValueRef {
+    // SAFETY: `value` is either null-checked by the caller or was returned by
+    // LLVM's global iterator APIs.
+    unsafe { LLVMGetNextGlobal(value) }
+}
+
+fn first_global_alias(module: &Module<'_>) -> LLVMValueRef {
+    // SAFETY: `module.as_mut_ptr()` is a valid LLVM module pointer managed by
+    // inkwell for the duration of this pass.
+    unsafe { LLVMGetFirstGlobalAlias(module.as_mut_ptr()) }
+}
+
+fn next_global_alias(value: LLVMValueRef) -> LLVMValueRef {
+    // SAFETY: `value` is either null-checked by the caller or was returned by
+    // LLVM's alias iterator APIs.
+    unsafe { LLVMGetNextGlobalAlias(value) }
+}
+
+fn named_global_alias(module: &Module<'_>, name: &str) -> LLVMValueRef {
+    // SAFETY: `module.as_mut_ptr()` is valid, and LLVM accepts a pointer/length
+    // pair that does not need to be NUL-terminated.
+    unsafe { LLVMGetNamedGlobalAlias(module.as_mut_ptr(), name.as_ptr().cast(), name.len()) }
+}
+
+fn alias_aliasee(alias: LLVMValueRef) -> LLVMValueRef {
+    // SAFETY: `alias` was returned by LLVM's alias iterator APIs.
+    unsafe { LLVMAliasGetAliasee(alias) }
+}
+
+fn is_global_alias(value: LLVMValueRef) -> bool {
+    // SAFETY: LLVM accepts any value reference and returns null when it is not
+    // a global alias.
+    unsafe { !LLVMIsAGlobalAlias(value).is_null() }
+}
+
+fn value_name(value: LLVMValueRef) -> Option<String> {
     let mut len = 0;
+    // SAFETY: `value` is an LLVM value owned by the current module. LLVM
+    // returns a borrowed byte pointer plus length.
     let name = unsafe { LLVMGetValueName2(value, &mut len) };
     if name.is_null() {
         return None;
     }
+    // SAFETY: LLVM returned `name` with exactly `len` bytes valid for reads.
     let bytes = unsafe { std::slice::from_raw_parts(name.cast(), len) };
     std::str::from_utf8(bytes).ok().map(str::to_owned)
 }
@@ -216,6 +258,8 @@ fn wrap_fuzzer_entrypoint(module: &mut Module<'_>) -> bool {
         return false;
     }
 
+    // SAFETY: `original` is a valid LLVM function value. LLVM copies the
+    // provided pointer/length into the value's symbol name.
     unsafe {
         LLVMSetValueName2(
             original.as_value_ref(),
@@ -464,6 +508,9 @@ fn rewrite_function_uses(
                 if callee.as_value_ref() != from.as_value_ref() {
                     continue;
                 }
+                // SAFETY: `i` is a call instruction and `callee_operand` was
+                // computed from its operand count. `to` belongs to the same
+                // module as the rewritten instruction.
                 unsafe {
                     LLVMSetOperand(i.as_value_ref(), callee_operand, to.as_value_ref());
                 }
@@ -706,14 +753,15 @@ fn build_forwarding_wrapper<'ctx>(
 }
 
 fn rename_global_alias(module: &Module<'_>, name: &str) {
-    let alias =
-        unsafe { LLVMGetNamedGlobalAlias(module.as_mut_ptr(), name.as_ptr().cast(), name.len()) };
+    let alias = named_global_alias(module, name);
     if !alias.is_null() {
         set_value_name(alias, &format!("__rsched_real_alias_{name}"));
     }
 }
 
-fn set_value_name(value: llvm_plugin::inkwell::llvm_sys::prelude::LLVMValueRef, name: &str) {
+fn set_value_name(value: LLVMValueRef, name: &str) {
+    // SAFETY: `value` is an LLVM value owned by the current module. LLVM copies
+    // the pointer/length bytes into the value's symbol name.
     unsafe {
         LLVMSetValueName2(value, name.as_ptr().cast(), name.len());
     }
@@ -730,6 +778,7 @@ fn build_guarded_wrapper<'ctx>(
     let function_type = real.get_type();
     let wrapper = module.add_function(name, function_type, Some(real.get_linkage()));
     if name == rewrite.public {
+        // SAFETY: `wrapper` is a valid function just inserted into `module`.
         unsafe {
             LLVMSetLinkage(wrapper.as_value_ref(), LLVMLinkage::LLVMExternalLinkage);
         }

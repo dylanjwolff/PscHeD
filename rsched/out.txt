@@ -1,0 +1,2824 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.67s
+     Running `target/debug/xtask test libc glibc --provider coro --instrumentation rsched`
+   Compiling rsched v0.1.0 (/home/wolffd/git/PscHeD/rsched)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.37s
+     Running tests/libc/glibc.rs (target/debug/deps/glibc_conformance-74181db873e77a77)
+
+running 1 test
+test glibc_tests_with_built_libc has been running for over 60 seconds
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/lib64
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/lib64
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/bits
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/gnu
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/sbin
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/bin
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/bits/types
+ar: `u' modifier ignored since `D' is the default (see `U')
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/i18n/charmaps
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/i18n/charmaps
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/i18n/locales
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/i18n/locales
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/i18n/locales
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/lib64/gconv
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/lib64/gconv/gconv-modules.d
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/finclude
+ar: `u' modifier ignored since `D' is the default (see `U')
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/sys
+ar: `u' modifier ignored since `D' is the default (see `U')
+ar: `u' modifier ignored since `D' is the default (see `U')
+ar: `u' modifier ignored since `D' is the default (see `U')
+ar: `u' modifier ignored since `D' is the default (see `U')
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/libexec/getconf
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/scsi
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/scsi
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/net
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/net
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/net
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/net
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/info
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/be/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/da/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/de/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/el/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/eo/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/en_GB/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/es/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/fi/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/fr/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/gl/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/hr/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/hu/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/ia/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/id/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/it/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/ja/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/ko/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/lt/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/nb/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/pl/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/nl/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/pt/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/pt_BR/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/ru/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/rw/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/sk/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/sl/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/sv/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/sr/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/tr/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/uk/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/vi/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/zh_CN/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/zh_TW/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/bg/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/cs/LC_MESSAGES
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/share/locale/ca/LC_MESSAGES
+ar: `u' modifier ignored since `D' is the default (see `U')
+ar: `u' modifier ignored since `D' is the default (see `U')
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/netinet
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/netinet
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/arpa
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/arpa
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/protocols
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/protocols
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/protocols
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/rpc
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/netipx
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/netash
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/netatalk
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/netax25
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/netrom
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/netpacket
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/netrose
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/neteconet
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/netiucv
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/etc
+ar: `u' modifier ignored since `D' is the default (see `U')
+ar: `u' modifier ignored since `D' is the default (see `U')
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/var/db
+ar: `u' modifier ignored since `D' is the default (see `U')
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/nfs
+ar: `u' modifier ignored since `D' is the default (see `U')
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/sys/platform
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/include/bits/platform
+/usr/bin/ld: /usr/bin/ld: mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/usr/lib64/audit
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/testroot.pristine/sbin
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+Generating locale C.UTF-8: this might take a while...
+Generating locale en_US.UTF-8: this might take a while...
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
++ common_objpfx=/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/
++ test_wrapper_env=timeout 120s env LD_LIBRARY_PATH=/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/math:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/elf:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/dlfcn:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nss:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nis:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/rt:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/resolv:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/mathvec:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/support:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/crypt:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nptl:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nptl_db:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/login:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/malloc
++ run_program_env=GCONV_PATH=/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/iconvdata LOCPATH=/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/localedata LC_ALL=C
++ LIBPATH=/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/
++ testroot=/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale/tst-locale-locpath-directory
++ trap cleanup 0
++ rm -rf /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale/tst-locale-locpath-directory
++ mkdir -p /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale/tst-locale-locpath-directory
++ timeout 120s env LD_LIBRARY_PATH=/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/math:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/elf:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/dlfcn:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nss:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nis:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/rt:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/resolv:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/mathvec:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/support:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/crypt:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nptl:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nptl_db:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/login:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale:/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/malloc GCONV_PATH=/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/iconvdata LOCPATH=/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/localedata LC_ALL=C LANG= LC_ALL=invalid-locale LOCPATH=does-not-exist /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/elf/ld.so --library-path /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/ /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale/locale
++ echo * standard error
++ cat /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale/tst-locale-locpath-directory/stderr
++ echo * standard output
++ cat /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale/tst-locale-locpath-directory/stdout
++ cat
++ cat
++ errors=0
++ cmp -s /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale/tst-locale-locpath-directory/stderr-expected /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale/tst-locale-locpath-directory/stderr
++ cmp -s /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale/tst-locale-locpath-directory/stdout-expected /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale/tst-locale-locpath-directory/stdout
++ exit 0
++ cleanup
++ rm -rf /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/locale/tst-locale-locpath-directory
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+Generating locale am_ET.UTF-8: this might take a while...
+Generating locale be_BY.UTF-8: this might take a while...
+Generating locale az_AZ.UTF-8: this might take a while...
+Generating locale ber_DZ.UTF-8: this might take a while...
+Generating locale bg_BG.UTF-8: this might take a while...
+Generating locale ber_MA.UTF-8: this might take a while...
+Generating locale bs_BA.UTF-8: this might take a while...
+Generating locale br_FR.UTF-8: this might take a while...
+Generating locale ckb_IQ.UTF-8: this might take a while...
+Generating locale cmn_TW.UTF-8: this might take a while...
+Generating locale cs_CZ.UTF-8: this might take a while...
+Generating locale csb_PL.UTF-8: this might take a while...
+Generating locale da_DK.ISO-8859-1: this might take a while...
+Generating locale cv_RU.UTF-8: this might take a while...
+Generating locale crh_UA.UTF-8: this might take a while...
+Generating locale cy_GB.UTF-8: this might take a while...
+Generating locale de_DE.UTF-8: this might take a while...
+Generating locale de_DE.ISO-8859-1: this might take a while...
+Generating locale dsb_DE.UTF-8: this might take a while...
+Generating locale dz_BT.UTF-8: this might take a while...
+Generating locale en_GB.UTF-8: this might take a while...
+Generating locale en_US.ANSI_X3.4-1968: this might take a while...
+Generating locale en_US.ISO-8859-1: this might take a while...
+Generating locale eo.UTF-8: this might take a while...
+Generating locale es_ES.UTF-8: this might take a while...
+rsched: unsupported process wait primitive
+Generating locale et_EE.UTF-8: this might take a while...
+Generating locale fa_IR.UTF-8: this might take a while...
+Generating locale fi_FI.UTF-8: this might take a while...
+Generating locale fil_PH.UTF-8: this might take a while...
+Generating locale fr_CA.UTF-8: this might take a while...
+Generating locale fr_FR.ISO-8859-1: this might take a while...
+Generating locale fr_FR.UTF-8: this might take a while...
+Generating locale fur_IT.UTF-8: this might take a while...
+Generating locale gez_ER.UTF-8: this might take a while...
+Generating locale ha_NG.UTF-8: this might take a while...
+Generating locale hr_HR.ISO-8859-2: this might take a while...
+Generating locale hr_HR.UTF-8: this might take a while...
+Generating locale hsb_DE.UTF-8: this might take a while...
+Generating locale hu_HU.UTF-8: this might take a while...
+Generating locale ig_NG.UTF-8: this might take a while...
+Generating locale ik_CA.UTF-8: this might take a while...
+Generating locale is_IS.UTF-8: this might take a while...
+Generating locale ja_JP.EUC-JP: this might take a while...
+Generating locale ja_JP.SJIS: this might take a while...
+Generating locale ja_JP.UTF-8: this might take a while...
+Generating locale kk_KZ.UTF-8: this might take a while...
+Generating locale ku_TR.UTF-8: this might take a while...
+Generating locale ky_KG.UTF-8: this might take a while...
+Generating locale ln_CD.UTF-8: this might take a while...
+Generating locale lt_LT.UTF-8: this might take a while...
+Generating locale lv_LV.UTF-8: this might take a while...
+Generating locale mi_NZ.UTF-8: this might take a while...
+Generating locale ml_IN.UTF-8: this might take a while...
+Generating locale mn_MN.UTF-8: this might take a while...
+Generating locale mr_IN.UTF-8: this might take a while...
+Generating locale mt_MT.UTF-8: this might take a while...
+Generating locale nan_TW.UTF-8: this might take a while...
+Generating locale nb_NO.ISO-8859-1: this might take a while...
+Generating locale nb_NO.UTF-8: this might take a while...
+Generating locale nl_NL.UTF-8: this might take a while...
+Generating locale om_KE.UTF-8: this might take a while...
+Generating locale nn_NO.ISO-8859-1: this might take a while...
+Generating locale or_IN.UTF-8: this might take a while...
+Generating locale os_RU.UTF-8: this might take a while...
+Generating locale pl_PL.UTF-8: this might take a while...
+Generating locale ps_AF.UTF-8: this might take a while...
+Generating locale ro_RO.UTF-8: this might take a while...
+Generating locale ru_RU.UTF-8: this might take a while...
+Generating locale sah_RU.UTF-8: this might take a while...
+Generating locale sc_IT.UTF-8: this might take a while...
+Generating locale se_NO.UTF-8: this might take a while...
+Generating locale si_LK.UTF-8: this might take a while...
+Generating locale sq_AL.UTF-8: this might take a while...
+Generating locale sr_RS.UTF-8: this might take a while...
+Generating locale sv_SE.ISO-8859-1: this might take a while...
+Generating locale sv_SE.UTF-8: this might take a while...
+Generating locale tg_TJ.UTF-8: this might take a while...
+Generating locale szl_PL.UTF-8: this might take a while...
+Generating locale tk_TM.UTF-8: this might take a while...
+Generating locale tr_TR.ISO-8859-9: this might take a while...
+Generating locale tr_TR.UTF-8: this might take a while...
+Generating locale tt_RU.UTF-8: this might take a while...
+Generating locale tt_RU.UTF-8: this might take a while...
+Generating locale ug_CN.UTF-8: this might take a while...
+Generating locale uk_UA.UTF-8: this might take a while...
+Generating locale uz_UZ.UTF-8: this might take a while...
+Generating locale vi_VN.UTF-8: this might take a while...
+Generating locale yi_US.UTF-8: this might take a while...
+Generating locale yo_NG.UTF-8: this might take a while...
+Generating locale zh_CN.UTF-8: this might take a while...
+Generating locale zh_TW.EUC-TW: this might take a while...
+/usr/bin/ld: /usr/bin/ld: rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+/usr/bin/ld: rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+Aborted (core dumped)
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Generating locale zh_HK.BIG5-HKSCS: this might take a while...
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+timeout: the monitored command dumped core
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+Testing ASCIItimeout: the monitored command dumped core
+Aborted
+
+Testing ISO646-GBrsched: unsupported process wait primitive
+
+Testing ISO646-CAtimeout: the monitored command dumped core
+Aborted
+
+Testing ISO646-CA2
+Testing ISO646-DE
+Testing ISO646-DK
+Testing ISO646-ES
+Testing ISO646-ES2
+Testing ISO646-CNrsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+
+Testing ISO646-ITtimeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+
+Testing ISO646-JP
+Testing ISO646-JP-OCR-B
+Testing ISO646-YU
+Testing ISO646-KR
+Testing ISO646-HU
+Testing ISO646-CU
+Testing ISO646-FR
+Testing ISO646-FR1
+Testing ISO646-NO
+Testing ISO646-NO2
+Testing ISO646-PT
+Testing ISO646-PT2
+Testing ISO646-SE
+Testing ISO646-SE2
+Testing ISO-8859-1
+Testing ISO-8859-2
+Testing ISO-8859-3
+Testing ISO-8859-4
+Testing ISO-8859-5
+Testing ISO-8859-6
+Testing ISO-8859-7
+Testing ISO-8859-8
+Testing ISO-8859-9
+Testing ISO-8859-9E
+Testing ISO-8859-10
+Testing ISO-8859-11
+Testing ISO-8859-13
+Testing ISO-8859-14
+Testing ISO-8859-15
+Testing ISO-8859-16
+Testing T.61-8BIT
+Testing ISO_6937
+Testing KOI-8
+Testing KOI8-R
+Testing LATIN-GREEK
+Testing LATIN-GREEK-1
+Testing HP-ROMAN8
+Testing HP-ROMAN9
+Testing HP-TURKISH8
+Testing HP-THAI8
+Testing HP-GREEK8
+Testing EBCDIC-AT-DE
+Testing EBCDIC-AT-DE-A
+Testing EBCDIC-CA-FR
+Testing EBCDIC-DK-NO
+Testing EBCDIC-DK-NO-A
+Testing EBCDIC-ES
+Testing EBCDIC-ES-A
+Testing EBCDIC-ES-S
+Testing EBCDIC-FI-SE
+Testing EBCDIC-FI-SE-A
+Testing EBCDIC-FR
+Testing EBCDIC-IS-FRISS
+Testing EBCDIC-IT
+Testing EBCDIC-PT
+Testing EBCDIC-UK
+Testing EBCDIC-US
+Testing IBM037
+Testing IBM038
+Testing IBM256
+Testing IBM273
+Testing IBM274
+Testing IBM275
+Testing IBM277
+Testing IBM278
+Testing IBM280
+Testing IBM281
+Testing IBM284
+Testing IBM285
+Testing IBM290
+Testing IBM297
+Testing IBM420
+Testing IBM423
+Testing IBM424
+Testing IBM437
+Testing IBM500
+Testing IBM850
+Testing IBM851
+Testing IBM852
+Testing IBM855
+Testing IBM856
+Testing IBM857
+Testing IBM858
+Testing IBM860
+Testing IBM861
+Testing IBM862
+Testing IBM863
+Testing IBM864
+Testing IBM865
+Testing IBM866
+Testing IBM866NAV
+Testing IBM868
+Testing IBM869
+Testing IBM870
+Testing IBM871
+Testing IBM875
+Testing IBM880
+Testing IBM891
+Testing IBM903
+Testing IBM904
+Testing IBM905
+Testing IBM918
+Testing IBM922
+Testing IBM1004
+Testing IBM1026
+Testing IBM1047
+Testing IBM1124
+Testing IBM1129
+Testing IBM1160
+Testing IBM1161
+Testing IBM1132
+Testing IBM1133
+Testing IBM1162
+Testing IBM1163
+Testing IBM1164
+Testing CP1125
+Testing CP1250
+Testing CP1251
+Testing CP1252
+Testing CP1253
+Testing CP1254
+Testing CP1255
+Testing CP1256
+Testing CP1257
+Testing CP1258
+Testing IBM874
+Testing CP737
+Testing CP770
+Testing CP771
+Testing CP772
+Testing CP773
+Testing CP774
+Testing CP775
+Testing MACINTOSH
+Testing IEC_P27-1
+Testing ASMO_449
+Testing ISO-IR-99
+Testing ISO-IR-139
+Testing CWI
+Testing DEC-MCS
+Testing ECMA-CYRILLIC
+Testing ISO-IR-153
+Testing GREEK-CCITT
+Testing GREEK7
+Testing GREEK7-OLD
+Testing INIS
+Testing INIS-8
+Testing INIS-CYRILLIC
+Testing ISO_2033
+Testing ISO_5427
+Testing ISO_5427-EXT
+Testing ISO_10367-BOX
+Testing MAC-IS
+Testing MAC-UK
+Testing CP10007
+Testing NATS-DANO
+Testing NATS-SEFI
+Testing WIN-SAMI-2
+Testing ISO-IR-197
+Testing TIS-620
+Testing KOI8-U
+Testing VISCII
+Testing KOI8-T
+Testing GEORGIAN-PS
+Testing GEORGIAN-ACADEMY
+Testing ISO-IR-209
+Testing MAC-SAMI
+Testing ARMSCII-8
+Testing TCVN5712-1
+Testing TSCII
+Testing PT154
+Testing RK1048
+Testing MIK
+Testing BRF
+Testing MAC-CENTRALEUROPE
+Testing KOI8-RU
+Testing SJIS
+Testing CP932
+Testing EUC-KR
+Testing CP949
+Testing JOHAB
+Testing BIG5
+Testing BIG5HKSCS
+Testing EUC-JP
+Testing EUC-JP-MS
+Testing EUC-CN
+Testing GBK
+Testing EUC-TW
+This might take a while
+Testing GB18030
+Testing EUC-JISX0213
+Testing SHIFT_JISX0213
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/intl/domaindir/de_DE/LC_MESSAGES
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+mkdir -p -- /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/catgets/de
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+/usr/bin/ld: /usr/bin/ld: /usr/bin/ld: /usr/bin/ld: /usr/bin/ld: /usr/bin/ld: /usr/bin/ld: /usr/bin/ld: /usr/bin/ld: /usr/bin/ld: /usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+Aborted
+process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped corersched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported rsched: unsupported process waitprocess wait primitive
+ primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+Aborted
+process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported Aborted
+process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: rsched: unsupported the monitored command dumped coreprocess wait primitive
+
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported Aborted
+rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+Aborted
+process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported Aborted
+rsched: unsupported process wait primitive
+Aborted
+process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+timeout: the monitored command dumped core
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+/usr/bin/ld: timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported timeout: the monitored command dumped core
+Aborted
+process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Generating locale hi_IN.UTF-8: this might take a while...
+Generating locale el_GR.UTF-8: this might take a while...
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/stdlib/test-canon2.o: in function `do_prepare':
+/home/wolffd/git/PscHeD/rsched/glibc/glibc/stdlib/test-canon2.c:50: warning: the use of `mktemp' is dangerous, better use `mkstemp' or `mkdtemp'
+/usr/bin/ld: rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+making contexts
+called context function
+PASS: Called exit function
+Aborted
+timeout: the monitored command dumped core
+Aborted
+process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/stdio-common/temptest.o: in function `main':
+/home/wolffd/git/PscHeD/rsched/glibc/glibc/stdio-common/temptest.c:14: warning: the use of `tempnam' is dangerous, better use `mkstemp'
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/stdio-common/tst-gets.o: in function `do_test':
+/home/wolffd/git/PscHeD/rsched/glibc/glibc/stdio-common/tst-gets.c:34: warning: the `gets' function is dangerous and should not be used.
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/stdio-common/tst-tmpnam.o: in function `do_test':
+/home/wolffd/git/PscHeD/rsched/glibc/glibc/stdio-common/tst-tmpnam.c:31: warning: the use of `tmpnam' is dangerous, better use `mkstemp'
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: rsched: unsupported the monitored command dumped coreprocess wait primitive
+
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+timeout: the monitored command dumped core
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+process wait primitive
+rsched: unsupported Aborted
+timeout: the monitored command dumped core
+Aborted
+process wait primitive
+Aborted
+timeout: rsched: unsupported process wait primitive
+the monitored command dumped core
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported pthread synchronization primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/stdio-common/tst-unbputc.out - differ: char 1, line 1
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/libio/tst-bz24153.o: in function `narrow':
+/home/wolffd/git/PscHeD/rsched/glibc/glibc/libio/tst-bz24153.c:71: warning: the `gets' function is dangerous and should not be used.
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process waitprocess wait primitive
+ primitive
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported rsched: unsupported pthread synchronization primitive
+Aborted
+Aborted
+process waitprocess wait primitive
+ primitive
+Aborted
+rsched: unsupported rsched: unsupported Aborted
+rsched: unsupported process wait primitive
+process wait primitive
+Aborted
+process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+rsched: unsupported process waitAborted
+ primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported Aborted
+pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+timeout: the monitored command dumped core
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+rsched: unsupported process waitrsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+ primitive
+Aborted
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+Aborted
+/usr/bin/ld: timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+Aborted
+timeout: the monitored command dumped core
+Aborted
+cmp: EOF on /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/libio/tst-fopenloc.out which is empty
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/dlfcn/tststatic.o: in function `do_test':
+/home/wolffd/git/PscHeD/rsched/glibc/glibc/dlfcn/tststatic.c:12: warning: Using 'dlopen' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/dlfcn/tststatic2.o: in function `do_test':
+/home/wolffd/git/PscHeD/rsched/glibc/glibc/dlfcn/tststatic2.c:154: warning: Using 'dlmopen' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/glibc/glibc/dlfcn/tststatic2.c:12: warning: Using 'dlopen' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/dlfcn/tststatic3.o: in function `do_test':
+/home/wolffd/git/PscHeD/rsched/glibc/glibc/dlfcn/tststatic3.c:40: warning: Using 'dlopen' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/dlfcn/tststatic5.o: in function `do_test':
+/home/wolffd/git/PscHeD/rsched/glibc/glibc/dlfcn/tststatic5.c:40: warning: Using 'dlopen' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/dlfcn/tststatic4.o: in function `do_test':
+/home/wolffd/git/PscHeD/rsched/glibc/glibc/dlfcn/tststatic4.c:49: warning: Using 'dlopen' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+/usr/bin/ld/usr/bin/ld: : timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+/usr/bin/ld: /usr/bin/ld: /usr/bin/ld: timeout: the monitored command dumped core
+Aborted
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nptl/tst-cancel4_1.o: in function `tf_sendmmsg':
+/home/wolffd/git/PscHeD/rsched/glibc/glibc/nptl/tst-cancel4_1.c:56: warning: the use of `mktemp' is dangerous, better use `mkstemp' or `mkdtemp'
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nptl/tst-cancel4_2.o: in function `tf_recvmmsg':
+/home/wolffd/git/PscHeD/rsched/glibc/glibc/nptl/tst-cancel4_2.c:51: warning: the use of `mktemp' is dangerous, better use `mkstemp' or `mkdtemp'
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported pthread synchronization primitive
+rsched: unsupported process wait primitive
+
+thread '<unnamed>' (742031) panicked at src/lib.rs:230:66:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process waitrsched: unsupported pthread synchronization primitive
+ primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported rsched: unsupported process wait primitive
+process wait primitive
+timeout: the monitored command dumped core
+Aborted
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported rsched: unsupported pthread synchronization primitive
+process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::pal::unix::os::home_dir::fallback':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/pal/unix/os.rs:649: warning: Using 'getpwuid_r' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+/usr/bin/ld: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/rsched-target/release/librsched.a(std-ad248a6e6fe48fd9.std.1e8bc1f935b91b92-cgu.0.rcgu.o): in function `std::sys::net::connection::socket::lookup_host::{closure#0}':
+/rustc/4f14395c37db4c1be874e6b0ace6721674223c22/library/std/src/sys/net/connection/socket/mod.rs:350: warning: Using 'getaddrinfo' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported pthread synchronization primitive
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+
+thread '<unnamed>' (743178) panicked at src/lib.rs:191:14:
+rsched: unknown thread
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported pthread synchronization primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+rsched: unsupported process wait primitive
+rsched: unsupported process wait primitive
+timeout: the monitored command dumped core
+Aborted
+../sysdeps/pthread/tst-basic5.c:73: fatal error: error writing to /tmp/cc91x6z5.s: No space left on device
+compilation terminated.
+make[2]: *** [/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/sysd-rules:281: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nptl/tst-basic5.o] Error 1
+../sysdeps/pthread/tst-basic6.c:131: fatal error: error writing to /tmp/cc9sx900.s: No space left on device
+compilation terminated.
+make[2]: *** [/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/sysd-rules:281: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nptl/tst-basic6.o] Error 1
+../sysdeps/pthread/tst-basic7.c:80: fatal error: error writing to /tmp/ccB070Iz.s: No space left on device
+compilation terminated.
+make[2]: *** [/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/sysd-rules:281: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nptl/tst-basic7.o] Error 1
+../sysdeps/pthread/tst-cancel-self.c:49: fatal error: error writing to /tmp/ccTeP8WH.s: No space left on device
+compilation terminated.
+make[2]: *** [/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/sysd-rules:281: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/nptl/tst-cancel-self.o] Error 1
+../sysdeps/pthread/tst-cancel-self-cancelstate.c:66: fatal error: error writing to /tmp/cc107bEO.s: No space left on device
+compilation terminated.
+make[2]: *** [/home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6f5b31/build/sysd-rules:281: /home/wolffd/git/PscHeD/rsched/target/rsched-artifacts/glibc/coro/release/rsched/b48a51f3f4ed925daf4c61fb1a6

@@ -108,6 +108,8 @@ fn run_in_process_group(command: &mut Command) -> std::io::Result<ExitStatus> {
     let child_pid = child.id() as libc::pid_t;
     let status = child.wait();
 
+    // SAFETY: `child_pid` is the process group leader because the child was
+    // spawned with `process_group(0)`. Negative pid targets that process group.
     unsafe {
         libc::kill(-child_pid, libc::SIGTERM);
         libc::kill(-child_pid, libc::SIGKILL);

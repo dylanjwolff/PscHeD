@@ -80,6 +80,8 @@ struct Thread {
 
 impl Thread {
     fn new(pt: PthreadT) -> Self {
+        // SAFETY: `SYS_gettid` takes no pointer arguments and returns the
+        // caller's kernel thread id.
         Self::new_with_tid(pt, unsafe {
             libc::syscall(libc::SYS_gettid) as libc::pid_t
         })
@@ -177,6 +179,8 @@ impl State {
         self.threads.retain(|&x| x != pt);
         if let Some(t) = self.info.get_mut(&pt) {
             t.is_exited = true;
+            // SAFETY: A task handle is created when the thread is registered
+            // and removed only while the global scheduler state is locked.
             unsafe {
                 t.task
                     .expect("rsched: registered thread has no task handle")
@@ -628,12 +632,16 @@ static mut STATE: Option<State> = None;
 static INITED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
+    // SAFETY: `pthread_t` is an opaque C value. Zero is used only as an
+    // impossible sentinel before non-instrumented startup stores `pthread_self`.
     static MY_PT: RefCell<PthreadT> = const { RefCell::new(unsafe { std::mem::zeroed() }) };
 }
 
 fn my_pt() -> PthreadT {
     #[cfg(feature = "instrumented-libc")]
     {
+        // SAFETY: `pthread_self` has no preconditions and returns the current
+        // thread's pthread identifier.
         unsafe { libc::pthread_self() }
     }
     #[cfg(not(feature = "instrumented-libc"))]
@@ -657,6 +665,9 @@ unsafe extern "C" {
 /// belongs to the outermost exported function frame, not an rsched helper.
 #[inline(always)]
 fn return_address() -> u64 {
+    // SAFETY: LLVM accepts level 0 for the current function's return address.
+    // This helper is inlined at instrumentation points so the address belongs
+    // to the caller frame.
     unsafe { llvm_returnaddress(0) as u64 }
 }
 
@@ -1009,6 +1020,8 @@ pub extern "C" fn rsched_activate_instrumented_libc() {
 
 #[cfg(feature = "instrumented-libc")]
 fn instrumented_depth_slot() -> usize {
+    // SAFETY: `gettid` takes no pointer arguments and cannot violate Rust
+    // aliasing or memory validity.
     let tid = unsafe { seccomp::raw_syscall6(libc::SYS_gettid, 0, 0, 0, 0, 0, 0) as libc::pid_t };
     for (idx, seen) in INSTRUMENTED_DEPTH_TIDS.iter().enumerate() {
         let value = seen.load(Ordering::Acquire);
@@ -1301,6 +1314,8 @@ pub unsafe extern "C" fn rsched_init() {
 
 fn ensure_init() {
     if !INITED.load(Ordering::SeqCst) {
+        // SAFETY: `rsched_init` is idempotent; `INITED` is checked here to
+        // avoid repeated initialization in the common path.
         unsafe {
             rsched_init();
         }
@@ -1367,6 +1382,8 @@ pub(crate) struct StartArg {
     pub(crate) ready_cond: CondT,
     pub(crate) ready: bool,
 }
+// SAFETY: Ownership of `StartArg` moves from the creating thread to exactly one
+// new pthread via `Box::into_raw`; the raw user argument remains opaque to Rust.
 unsafe impl Send for StartArg {}
 
 /// Shared cleanup logic for thread exit.  Must be called with GMTX *not* held.
@@ -1411,6 +1428,8 @@ pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
 // Safe fn required because libc::pthread_create takes a safe fn pointer.
 #[allow(dead_code)]
 pub(crate) extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void {
+    // SAFETY: `raw` is created by `rsched_pthread_create` as a `Box<StartArg>`
+    // and consumed by exactly one pthread start invocation.
     unsafe {
         let sa = &mut *(raw as *mut StartArg);
         let routine = sa.routine;
@@ -2026,6 +2045,9 @@ unsafe fn sem_timeout_expired(timeout: *const libc::timespec, clock_id: libc::cl
 // missing rsched semantics into a hang.
 
 fn abort_unsupported(kind: &str) -> ! {
+    // SAFETY: `kind`, `prefix`, and `suffix` point to valid byte buffers for
+    // the specified lengths. `write` and `abort` are used here to avoid Rust
+    // stdio/TLS during low-level libc interposition failure paths.
     unsafe {
         let prefix = b"rsched: unsupported ";
         let suffix = b" primitive\n";
