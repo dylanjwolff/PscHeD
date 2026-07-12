@@ -1,5 +1,5 @@
 use rsched_libc_build::{ArtifactManifest, InstrumentationMode};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -35,6 +35,14 @@ fn copy_libc_test_suite(source: &Path, destination: &Path) {
 }
 
 fn patch_copied_libc_test_suite(suite: &Path) {
+    let makefile = suite.join("Makefile");
+    let source = std::fs::read_to_string(&makefile).expect("read copied libc-test Makefile");
+    let source = source.replace(
+        "$(RUN_TEST) $< >$@ || true",
+        "$(RUN_TEST) $< >$@ 2>&1 || true",
+    );
+    std::fs::write(&makefile, source).expect("patch copied libc-test Makefile");
+
     let strptime = suite.join("src/functional/strptime.c");
     let source = std::fs::read_to_string(&strptime).expect("read copied strptime test");
     let glibc_extension_tests = "\
@@ -263,6 +271,133 @@ fn has_math_failure(report: &str) -> bool {
         .any(|line| line.starts_with("FAIL ") && line.contains("/build/math/"))
 }
 
+#[derive(Debug)]
+struct MuslIssue {
+    path: PathBuf,
+    kind: &'static str,
+    detail: String,
+}
+
+fn is_known_benign_musl_warning(text: &str) -> bool {
+    text.contains("warning: adding 'int' to a string does not append to the string")
+        && text.contains("1 warning generated.")
+        && !text.contains("error:")
+}
+
+fn classify_musl_issue(path: &Path, text: &str) -> Option<&'static str> {
+    if text.trim().is_empty() || is_known_benign_musl_warning(text) {
+        return None;
+    }
+    let unsupported = [
+        (
+            "unsupported process wait primitive",
+            "unsupported process wait primitive",
+        ),
+        (
+            "unsupported pthread synchronization primitive",
+            "unsupported pthread synchronization primitive",
+        ),
+        (
+            "unsupported pthread cancellation primitive",
+            "unsupported pthread cancellation primitive",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(pattern, kind)| text.find(pattern).map(|offset| (offset, kind)))
+    .min_by_key(|(offset, _)| *offset)
+    .map(|(_, kind)| kind);
+    if unsupported.is_some() {
+        return unsupported;
+    }
+    if text.contains("[timed out]") {
+        return Some("timeout");
+    }
+    if text.contains("undefined reference")
+        || text.contains("linker command failed")
+        || text.contains("ld returned")
+    {
+        return Some("link error");
+    }
+    if text.contains("BUILDERROR") || text.contains("error:") {
+        return Some("build error");
+    }
+    if text.contains("panicked at") || text.contains("rsched: unknown thread") {
+        return Some("rsched panic");
+    }
+    if path.extension().and_then(|extension| extension.to_str()) == Some("err")
+        && !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".o.err") || name.ends_with(".lo.err"))
+    {
+        return Some("test output");
+    }
+    None
+}
+
+fn first_musl_issue_line(text: &str) -> String {
+    text.lines()
+        .find(|line| {
+            let line = line.trim();
+            !line.is_empty() && !line.starts_with("warning:") && !line.starts_with("note:")
+        })
+        .unwrap_or_else(|| text.lines().next().unwrap_or(""))
+        .trim()
+        .to_string()
+}
+
+fn collect_musl_issues(build: &Path) -> Vec<MuslIssue> {
+    let mut files = Vec::new();
+    collect_err_files(build, &mut files);
+    files.extend(find_build_err_files(build));
+    files.sort();
+    files.dedup();
+
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let kind = classify_musl_issue(&path, &text)?;
+            Some(MuslIssue {
+                path,
+                kind,
+                detail: first_musl_issue_line(&text),
+            })
+        })
+        .collect()
+}
+
+fn find_build_err_files(build: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_all_err_files(build, &mut files);
+    files
+}
+
+fn collect_all_err_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        let entry = entry.expect("read musl libc-test build entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_all_err_files(&path, files);
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.ends_with(".err")
+                    || name.ends_with(".ld.err")
+                    || name.ends_with(".o.err")
+                    || name.ends_with(".lo.err")
+                    || name.ends_with(".so.err")
+            })
+        {
+            files.push(path);
+        }
+    }
+}
+
 fn summarize_musl_report(report_path: &Path, report: &str) -> String {
     const MAX_FAILURE_LINES: usize = 80;
 
@@ -299,6 +434,66 @@ fn summarize_musl_report(report_path: &Path, report: &str) -> String {
         summary.push_str(&format!(
             "\n... omitted {} additional FAIL lines; see REPORT above",
             failures.len() - MAX_FAILURE_LINES
+        ));
+    }
+    summary
+}
+
+fn summarize_musl_issues(build: &Path, report_path: &Path, report: &str) -> String {
+    const MAX_ISSUES: usize = 80;
+    let issues = collect_musl_issues(build);
+    let mut by_kind = BTreeMap::<&str, usize>::new();
+    let mut unsupported_occurrences = BTreeMap::<&str, usize>::new();
+    for issue in &issues {
+        *by_kind.entry(issue.kind).or_default() += 1;
+        let text = std::fs::read_to_string(&issue.path).unwrap_or_default();
+        for (pattern, kind) in [
+            (
+                "unsupported process wait primitive",
+                "unsupported process wait primitive",
+            ),
+            (
+                "unsupported pthread synchronization primitive",
+                "unsupported pthread synchronization primitive",
+            ),
+            (
+                "unsupported pthread cancellation primitive",
+                "unsupported pthread cancellation primitive",
+            ),
+        ] {
+            *unsupported_occurrences.entry(kind).or_default() += text.matches(pattern).count();
+        }
+    }
+
+    let mut summary = summarize_musl_report(report_path, report);
+    summary.push_str(&format!("\nclassified issue files: {}", issues.len()));
+    for (kind, count) in by_kind {
+        summary.push_str(&format!("\n  {kind}: {count}"));
+    }
+    if !unsupported_occurrences.is_empty() {
+        summary.push_str("\nunsupported primitive message occurrences:");
+        for (kind, count) in unsupported_occurrences {
+            summary.push_str(&format!("\n  {kind}: {count}"));
+        }
+    }
+    if issues.is_empty() {
+        return summary;
+    }
+
+    summary.push_str("\nfirst issue files:");
+    for issue in issues.iter().take(MAX_ISSUES) {
+        let relative = issue.path.strip_prefix(build).unwrap_or(&issue.path);
+        summary.push_str(&format!(
+            "\n{} [{}]: {}",
+            relative.display(),
+            issue.kind,
+            issue.detail
+        ));
+    }
+    if issues.len() > MAX_ISSUES {
+        summary.push_str(&format!(
+            "\n... omitted {} additional issue files; see REPORT above",
+            issues.len() - MAX_ISSUES
         ));
     }
     summary
@@ -342,7 +537,8 @@ fn musl_libc_test_with_instrumented_libc() {
     let report = String::from_utf8_lossy(&report);
     if artifact.instrumentation == InstrumentationMode::None {
         let normalized_report = normalize_musl_report(&report);
-        eprintln!("{}", summarize_musl_report(&build.join("REPORT"), &report));
+        let summary = summarize_musl_issues(&build, &build.join("REPORT"), &normalized_report);
+        eprintln!("{summary}");
         assert!(
             !normalized_report.contains("[timed out]"),
             "clang-only musl libc-test still has timed-out tests\nstdout:\n{}\nstderr:\n{}\nreport:\n{}",
@@ -357,14 +553,17 @@ fn musl_libc_test_with_instrumented_libc() {
             "clang-only musl libc-test has unexpected failures\nreport:\n{}",
             normalized_report
         );
+        let issues = collect_musl_issues(&build);
+        assert!(
+            issues.is_empty(),
+            "clang-only musl libc-test has build or runtime issues\n{summary}"
+        );
         return;
     }
 
     let normalized_report = normalize_musl_report(&report);
-    eprintln!(
-        "{}",
-        summarize_musl_report(&build.join("REPORT"), &normalized_report)
-    );
+    let summary = summarize_musl_issues(&build, &build.join("REPORT"), &normalized_report);
+    eprintln!("{summary}");
     assert!(
         !normalized_report.contains("[timed out]"),
         "musl libc-test still has timed-out tests\nstdout:\n{}\nstderr:\n{}\nreport:\n{}",
@@ -376,5 +575,10 @@ fn musl_libc_test_with_instrumented_libc() {
         !has_math_failure(&normalized_report),
         "musl libc-test has unexpected math failures\nreport:\n{}",
         normalized_report
+    );
+    let issues = collect_musl_issues(&build);
+    assert!(
+        issues.is_empty(),
+        "musl libc-test has build or runtime issues\n{summary}"
     );
 }

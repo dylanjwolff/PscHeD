@@ -2026,8 +2026,14 @@ unsafe fn sem_timeout_expired(timeout: *const libc::timespec, clock_id: libc::cl
 // missing rsched semantics into a hang.
 
 fn abort_unsupported(kind: &str) -> ! {
-    eprintln!("rsched: unsupported {kind} primitive");
-    std::process::abort();
+    unsafe {
+        let prefix = b"rsched: unsupported ";
+        let suffix = b" primitive\n";
+        let _ = libc::write(libc::STDERR_FILENO, prefix.as_ptr().cast(), prefix.len());
+        let _ = libc::write(libc::STDERR_FILENO, kind.as_ptr().cast(), kind.len());
+        let _ = libc::write(libc::STDERR_FILENO, suffix.as_ptr().cast(), suffix.len());
+        libc::abort();
+    }
 }
 
 fn unsupported_pthread() -> libc::c_int {

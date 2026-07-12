@@ -816,6 +816,7 @@ fn build_musl(
     if let Some(rsched) = &rsched {
         fs::copy(rsched, install_dir.join("lib/librsched.a"))?;
         patch_musl_compiler_for_static_rsched(&compiler)?;
+        patch_musl_compiler_for_clang_builtins(&compiler)?;
     } else {
         patch_musl_compiler_for_clang_builtins(&compiler)?;
     }
@@ -871,7 +872,16 @@ fn patch_musl_compiler_for_clang_builtins(compiler: &Path) -> Result<()> {
     if script.contains("libclang_rt.builtins") {
         return Ok(());
     }
-    let script = script.replace("sflags=\neflags=\n", "sflags=\neflags=\nstatic_builtins=\n");
+    let script = if script.contains("static_builtins=") {
+        script
+    } else {
+        script
+            .replace("sflags=\neflags=\n", "sflags=\neflags=\nstatic_builtins=\n")
+            .replace(
+                "sflags=\neflags=\nstatic_rsched=\n",
+                "sflags=\neflags=\nstatic_rsched=\nstatic_builtins=\n",
+            )
+    };
     let script = script.replace(
         "    case \"$x\" in\n        -l*) input=1 ;;\n        *) input= ;;\n    esac\n",
         &format!(
@@ -882,6 +892,10 @@ fn patch_musl_compiler_for_clang_builtins(compiler: &Path) -> Result<()> {
     let script = script.replace(
         "    \"$@\" \\\n    $eflags \\\n",
         "    \"$@\" \\\n    $static_builtins \\\n    $eflags \\\n",
+    );
+    let script = script.replace(
+        "    $static_rsched \\\n    $eflags \\\n",
+        "    $static_rsched \\\n    $static_builtins \\\n    $eflags \\\n",
     );
     fs::write(compiler, script)
         .with_context(|| format!("patch musl compiler wrapper {}", compiler.display()))?;
