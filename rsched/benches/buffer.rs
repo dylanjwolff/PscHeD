@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 const SEED: u64 = 0x12345678;
 const NUM_PRODUCERS: u32 = 3;

@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 const NARROW_TASKS: u32 = 5;
 const WIDE_TASKS: u32 = 100;

@@ -1,16 +1,166 @@
 use crate::event::{AccessKind, Event, EventKind};
 
+pub(crate) const DFS_MAX_EVENTS: usize = 256;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct DfsPath {
+    len: usize,
+    choices: [u16; DFS_MAX_EVENTS],
+}
+
+impl DfsPath {
+    const EMPTY: Self = Self {
+        len: 0,
+        choices: [0; DFS_MAX_EVENTS],
+    };
+
+    fn push(&mut self, choice: usize) {
+        assert!(
+            self.len < DFS_MAX_EVENTS,
+            "rsched: dfs execution exceeded DFS_MAX_EVENTS"
+        );
+        assert!(
+            choice <= u16::MAX as usize,
+            "rsched: dfs choice ordinal does not fit in u16"
+        );
+        self.choices[self.len] = choice as u16;
+        self.len += 1;
+    }
+
+    fn choice(&self, depth: usize) -> Option<usize> {
+        (depth < self.len).then_some(self.choices[depth] as usize)
+    }
+
+    fn truncate(&mut self, len: usize) {
+        assert!(len <= self.len, "rsched: invalid dfs path truncation");
+        self.len = len;
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct SharedDfsState {
+    initialized: u8,
+    in_progress: u8,
+    has_next: u8,
+    _pad: [u8; 5],
+    completed: usize,
+    path: DfsPath,
+    replay_depth: usize,
+    choices_at_depth: [u16; DFS_MAX_EVENTS],
+}
+
+impl SharedDfsState {
+    pub(crate) const EMPTY: Self = Self {
+        initialized: 0,
+        in_progress: 0,
+        has_next: 0,
+        _pad: [0; 5],
+        completed: 0,
+        path: DfsPath::EMPTY,
+        replay_depth: 0,
+        choices_at_depth: [0; DFS_MAX_EVENTS],
+    };
+
+    fn reset(&mut self) {
+        *self = Self::EMPTY;
+        self.initialized = 1;
+        self.has_next = 1;
+    }
+
+    fn ensure_initialized(&mut self) {
+        if self.initialized == 0 {
+            self.reset();
+        }
+    }
+
+    fn start_execution_if_needed(&mut self) {
+        self.ensure_initialized();
+        if self.in_progress != 0 {
+            return;
+        }
+        if self.has_next == 0 {
+            return;
+        }
+        self.replay_depth = 0;
+        self.choices_at_depth = [0; DFS_MAX_EVENTS];
+        self.has_next = 0;
+        self.in_progress = 1;
+    }
+
+    fn record_choice_count(&mut self, depth: usize, choices: usize) {
+        assert!(
+            depth < DFS_MAX_EVENTS,
+            "rsched: dfs execution exceeded DFS_MAX_EVENTS"
+        );
+        assert!(
+            choices <= u16::MAX as usize,
+            "rsched: dfs choice count does not fit in u16"
+        );
+        self.choices_at_depth[depth] = choices as u16;
+    }
+
+    fn next_choice(&mut self, choices: usize) -> usize {
+        let depth = self.replay_depth;
+        self.record_choice_count(depth, choices);
+        let choice = self.path.choice(depth).unwrap_or(0);
+        assert!(
+            choice < choices,
+            "rsched: dfs path chose ordinal {choice}, but only {choices} tasks are runnable"
+        );
+        if depth == self.path.len {
+            self.path.push(choice);
+        }
+        self.replay_depth += 1;
+        choice
+    }
+
+    fn finish_execution(&mut self) {
+        if self.in_progress == 0 {
+            return;
+        }
+        self.completed += 1;
+        self.in_progress = 0;
+
+        for depth in (0..self.replay_depth).rev() {
+            let choice = self.path.choices[depth] as usize;
+            let choices = self.choices_at_depth[depth] as usize;
+            if choice + 1 < choices {
+                self.path.choices[depth] = (choice + 1) as u16;
+                self.path.truncate(depth + 1);
+                self.has_next = 1;
+                return;
+            }
+        }
+        self.has_next = 0;
+        self.path = DfsPath::EMPTY;
+    }
+}
+
+fn dfs_state() -> &'static mut SharedDfsState {
+    unsafe { &mut *crate::task_provider::shared_dfs_state() }
+}
+
 /// Scheduling algorithm interface.
 ///
 /// Implementations receive the current blocking state of every registered
 /// thread and return the index of the thread that should run next.
 /// Returning `None` means every thread is blocked — i.e. deadlock.
-pub trait Scheduler {
+pub trait Scheduler: Sized {
     fn choose(&mut self, is_blocking: &[bool]) -> Option<usize>;
 
     /// Called just before each scheduling decision with the event the current
     /// thread is about to execute.  Default implementation is a no-op.
     fn on_event(&mut self, _event: Option<&Event>) {}
+
+    /// Called when the current execution is complete and the scheduler can
+    /// commit any run-local state.  Default implementation is a no-op.
+    fn finish(&mut self) {}
+
+    fn avoid_self_on_stutter(&self) -> bool {
+        false
+    }
 }
 
 // ── PRNG (xorshift64) ────────────────────────────────────────────────────────
@@ -73,6 +223,160 @@ impl Scheduler for RandomWalk {
     }
 }
 
+// ── Depth-first scheduler ────────────────────────────────────────────────────
+
+/// Deterministic exhaustive scheduler.
+///
+/// Each scheduling decision is represented by the ordinal of the selected
+/// runnable task.  The shared state stores one path plus per-depth choice
+/// counts; after each execution it backtracks to the deepest untried sibling.
+pub struct DfsScheduler {
+    should_branch: bool,
+    finished: bool,
+}
+
+pub enum SchedulerImpl {
+    Random(RandomWalk),
+    Dfs(DfsScheduler),
+    LoggingRandom(LoggingScheduler<RandomWalk>),
+    LoggingDfs(LoggingScheduler<DfsScheduler>),
+}
+
+impl SchedulerImpl {
+    pub fn new(seed: u64) -> Self {
+        let logging = env_is("RSCHED_LOG", "1");
+        let use_dfs = env_is("RSCHED_SCHEDULER", "dfs");
+        match (use_dfs, logging) {
+            (true, true) => Self::LoggingDfs(LoggingScheduler::new(DfsScheduler::new())),
+            (true, false) => Self::Dfs(DfsScheduler::new()),
+            (false, true) => Self::LoggingRandom(LoggingScheduler::new(RandomWalk::new(seed))),
+            (false, false) => Self::Random(RandomWalk::new(seed)),
+        }
+    }
+}
+
+#[cfg(feature = "instrumented-libc")]
+fn env_is(name: &str, value: &str) -> bool {
+    let Ok(name) = std::ffi::CString::new(name) else {
+        return false;
+    };
+    let ptr = unsafe { libc::getenv(name.as_ptr()) };
+    if ptr.is_null() {
+        return false;
+    }
+
+    let bytes = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_bytes();
+    bytes == value.as_bytes()
+}
+
+#[cfg(not(feature = "instrumented-libc"))]
+fn env_is(name: &str, value: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| v == value)
+}
+
+impl Scheduler for SchedulerImpl {
+    fn choose(&mut self, is_blocking: &[bool]) -> Option<usize> {
+        match self {
+            Self::Random(scheduler) => scheduler.choose(is_blocking),
+            Self::Dfs(scheduler) => scheduler.choose(is_blocking),
+            Self::LoggingRandom(scheduler) => scheduler.choose(is_blocking),
+            Self::LoggingDfs(scheduler) => scheduler.choose(is_blocking),
+        }
+    }
+
+    fn on_event(&mut self, event: Option<&Event>) {
+        match self {
+            Self::Random(scheduler) => scheduler.on_event(event),
+            Self::Dfs(scheduler) => scheduler.on_event(event),
+            Self::LoggingRandom(scheduler) => scheduler.on_event(event),
+            Self::LoggingDfs(scheduler) => scheduler.on_event(event),
+        }
+    }
+
+    fn finish(&mut self) {
+        match self {
+            Self::Random(scheduler) => scheduler.finish(),
+            Self::Dfs(scheduler) => scheduler.finish(),
+            Self::LoggingRandom(scheduler) => scheduler.finish(),
+            Self::LoggingDfs(scheduler) => scheduler.finish(),
+        }
+    }
+
+    fn avoid_self_on_stutter(&self) -> bool {
+        match self {
+            Self::Random(scheduler) => scheduler.avoid_self_on_stutter(),
+            Self::Dfs(scheduler) => scheduler.avoid_self_on_stutter(),
+            Self::LoggingRandom(scheduler) => scheduler.avoid_self_on_stutter(),
+            Self::LoggingDfs(scheduler) => scheduler.avoid_self_on_stutter(),
+        }
+    }
+}
+
+impl DfsScheduler {
+    pub fn new() -> Self {
+        dfs_state().start_execution_if_needed();
+        Self {
+            should_branch: false,
+            finished: false,
+        }
+    }
+}
+
+impl Scheduler for DfsScheduler {
+    fn choose(&mut self, is_blocking: &[bool]) -> Option<usize> {
+        let runnable: Vec<usize> = is_blocking
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, blocking)| (!*blocking).then_some(idx))
+            .collect();
+        if runnable.is_empty() {
+            return None;
+        }
+
+        if !self.should_branch || runnable.len() == 1 {
+            return runnable.last().copied();
+        }
+
+        let state = dfs_state();
+        let choice = state.next_choice(runnable.len());
+        Some(runnable[choice])
+    }
+
+    fn on_event(&mut self, event: Option<&Event>) {
+        self.should_branch = !matches!(
+            event.map(|event| event.kind),
+            None | Some(EventKind::SchedYield)
+        );
+    }
+
+    fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+
+        dfs_state().finish_execution();
+    }
+
+    fn avoid_self_on_stutter(&self) -> bool {
+        true
+    }
+}
+
+pub fn dfs_reset() {
+    dfs_state().reset();
+}
+
+pub fn dfs_has_next() -> bool {
+    let state = dfs_state();
+    state.ensure_initialized();
+    state.has_next != 0
+}
+
+pub fn dfs_completed_schedules() -> usize {
+    dfs_state().completed
+}
+
 // ── Logging scheduler ────────────────────────────────────────────────────────
 
 /// Wraps any `Scheduler` and prints each scheduling event to stderr before
@@ -131,5 +435,13 @@ impl<S: Scheduler> Scheduler for LoggingScheduler<S> {
             }
         }
         self.inner.on_event(event);
+    }
+
+    fn finish(&mut self) {
+        self.inner.finish();
+    }
+
+    fn avoid_self_on_stutter(&self) -> bool {
+        self.inner.avoid_self_on_stutter()
     }
 }

@@ -1,6 +1,10 @@
 #pragma once
 #include <pthread.h>
 #include <sched.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -13,6 +17,10 @@ void rsched_init(void);
 /* Re-initialise with a new seed.  Call after all threads from a previous run
    have been joined.  Used by tests to run multiple independent scenarios. */
 void rsched_reinit(unsigned long long seed);
+void rsched_dfs_reset(void);
+bool rsched_dfs_has_next(void);
+void rsched_dfs_finish_current(void);
+size_t rsched_dfs_completed_schedules(void);
 
 int rsched_fuzzer_test_one_input(const unsigned char *, unsigned long,
                                  int (*)(const unsigned char *, unsigned long));
@@ -36,6 +44,12 @@ int  rsched_pthread_barrier_init(pthread_barrier_t *,
 int  rsched_pthread_barrier_wait(pthread_barrier_t *);
 
 int  rsched_sched_yield(void);
+pid_t rsched_fork(void);
+long rsched_syscall(long, ...);
+void rsched_process_exit(void);
+int rsched_execv(const char *, char *const []);
+int rsched_execve(const char *, char *const [], char *const []);
+pid_t rsched_waitpid(pid_t, int *, int);
 
 /* Redirect standard pthread / sched calls to the scheduler wrappers so that
    existing C programs need only add `#include "rsched.h"`. */
@@ -51,6 +65,11 @@ int  rsched_sched_yield(void);
 #define pthread_barrier_init    rsched_pthread_barrier_init
 #define pthread_barrier_wait    rsched_pthread_barrier_wait
 #define sched_yield             rsched_sched_yield
+#define fork                    rsched_fork
+#define syscall                 rsched_syscall
+#define execv                   rsched_execv
+#define execve                  rsched_execve
+#define waitpid                 rsched_waitpid
 
 #ifdef __cplusplus
 }

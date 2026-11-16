@@ -15,9 +15,10 @@ Use with clang/opt from the matching LLVM version:
 clang -fpass-plugin=target/debug/librsched_llvm_pass.so ...
 ```
 
-The default pass mode assumes the program links dynamically against
-`librsched_preload.so`, so pthread symbols keep their normal names and the
-preload crate intercepts them. Atomic LLVM IR instructions are instrumented by
+The default pass mode instruments application atomic operations while leaving
+pthread symbols unchanged. Run the resulting program with an LLVM-instrumented
+glibc or musl build, which supplies the rsched runtime and intercepts pthread
+operations from inside libc. Atomic LLVM IR instructions are instrumented by
 inserting calls to:
 
 ```c
