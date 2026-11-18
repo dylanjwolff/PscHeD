@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prepares an Amp orb (Debian 13) with the toolchain the repository Dockerfile
-# installs: Rust nightly + musl target, Clang/LLVM 17, GCC plugin headers, and
+# installs: Rust nightly + musl target, Clang/LLVM 18, GCC plugin headers, and
 # the glibc/musl/e9patch submodules. Idempotent and safe on a warm snapshot.
 set -euo pipefail
 
@@ -17,8 +17,8 @@ step() {
 }
 
 apt_packages=(
-  build-essential bison ca-certificates clang-17 curl g++-13 gawk gcc-13
-  gcc-13-plugin-dev git libclang-rt-17-dev llvm-17-dev musl-tools pkg-config
+  build-essential bison ca-certificates clang-18 curl g++-13 gawk gcc-13
+  gcc-13-plugin-dev git libclang-rt-18-dev llvm-18-dev musl-tools pkg-config
   zstd
 )
 
@@ -34,8 +34,13 @@ install_apt_packages() {
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${missing[@]}"
   fi
   # Canonical names used by build scripts and tests (mirrors the Dockerfile).
-  [ -x /usr/bin/clang ] || sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100
-  [ -x /usr/bin/llvm-config ] || sudo update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-17 100
+  [ "$(readlink -f /usr/bin/clang)" = /usr/lib/llvm-18/bin/clang ] \
+    || sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 200
+  [ "$(readlink -f /usr/bin/llvm-config)" = /usr/lib/llvm-18/bin/llvm-config ] \
+    || sudo update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-18 200
+  # llvm-plugin links with -lLLVM. Ubuntu's llvm-18-dev ships libLLVM.so, but
+  # Debian's only ships libLLVM-18.so, so add the unversioned name.
+  [ -e /usr/lib/llvm-18/lib/libLLVM.so ] || sudo ln -s libLLVM-18.so /usr/lib/llvm-18/lib/libLLVM.so
   # CI builds on Ubuntu 24.04, whose default GCC is 13. Debian 13 defaults to
   # GCC 14, which rejects code GCC 13 accepts (e.g. implicit declarations in
   # c-examples), so put GCC 13 first on PATH under the unversioned names.
@@ -48,10 +53,8 @@ install_apt_packages() {
   done
 }
 
-# The repository uses unpinned nightly. Nightlies from 2026-11-14 onward ICE on
-# rsched's `#[link_name = "llvm.returnaddress"]` declaration, so orbs default
-# to the newest nightly known to build it.
-rust_toolchain=nightly-2026-11-10
+# Matches the Dockerfile, which installs the latest nightly.
+rust_toolchain=nightly
 
 install_rust() {
   if [ ! -x "$HOME/.cargo/bin/rustup" ]; then
@@ -64,34 +67,24 @@ install_rust() {
 }
 
 persist_environment() {
-  local marker="# rsched toolchain (added by .agents/setup)"
+  local marker="# rsched toolchain, LLVM 18 (added by .agents/setup)"
   if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
     cat >>"$HOME/.bash_profile" <<'EOF'
 
-# rsched toolchain (added by .agents/setup)
+# rsched toolchain, LLVM 18 (added by .agents/setup)
 case ":$PATH:" in *":$HOME/.cargo/bin:"*) ;; *) export PATH="$HOME/.cargo/bin:$PATH" ;; esac
-export LLVM_SYS_170_PREFIX=/usr/lib/llvm-17
+export LLVM_SYS_180_PREFIX=/usr/lib/llvm-18
 EOF
   fi
 }
 
 init_submodules() {
-  git submodule sync --quiet
-  git submodule init
-  # Shallow clones keep glibc fast; some hosts (repo.or.cz) refuse fetching an
-  # unadvertised commit shallowly, so fall back to full history for those.
-  local path
-  while read -r path; do
-    git submodule update --depth 1 -- "$path" 2>/dev/null && continue
-    echo "shallow fetch refused for $path; fetching full history"
-    git -C "$path" fetch --quiet --unshallow 2>/dev/null || git -C "$path" fetch --quiet
-    git submodule update -- "$path"
-  done < <(git config -f .gitmodules --get-regexp '\.path$' | awk '{print $2}')
+  "$repo_root/.github/fetch-submodules.sh"
 }
 
 warm_cargo() {
   export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
-  export LLVM_SYS_170_PREFIX=/usr/lib/llvm-17
+  export LLVM_SYS_180_PREFIX=/usr/lib/llvm-18
   cd "$repo_root/rsched"
   cargo fetch --locked
   # Precompile what `cargo xtask test source` builds so agents start warm.

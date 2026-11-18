@@ -8,4 +8,4 @@ name = "rsched_llvm_pass"
 crate-type = ["cdylib"]
 
 [dependencies]
-llvm-plugin = { version = "0.6", features = ["llvm17-0"] }
+llvm-plugin = { version = "0.6", features = ["llvm18-0"] }

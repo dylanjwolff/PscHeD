@@ -577,7 +577,7 @@ fn my_pt() -> PthreadT {
 
 // ── Return-address intrinsic ──────────────────────────────────────────────
 
-unsafe extern "C" {
+unsafe extern "llvm-intrinsic" {
     /// LLVM intrinsic: address in the caller that the current function will
     /// return to.  Level 0 = immediate caller; equivalent to
     /// `__builtin_return_address(0)` in GCC/Clang or `@returnAddress()` in Zig.

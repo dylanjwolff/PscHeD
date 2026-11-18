@@ -190,7 +190,7 @@ fn build_llvm_instrumented_case(source: &str, name: &str, sanitizer: &str) -> Pa
     let binary = temp_dir().join(name);
     std::fs::write(&c_path, source).expect("write LLVM pass sanitizer subject");
 
-    let output = Command::new("clang-17")
+    let output = Command::new("clang-18")
         .args(["-S", "-emit-llvm", "-g0", "-O0"])
         .arg(format!("-fsanitize={sanitizer}"))
         .arg("-o")
@@ -205,7 +205,7 @@ fn build_llvm_instrumented_case(source: &str, name: &str, sanitizer: &str) -> Pa
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let output = Command::new("opt-17")
+    let output = Command::new("opt-18")
         .arg("-load-pass-plugin")
         .arg(&glibc.plugin)
         .arg("-passes=rsched-atomics")
@@ -222,13 +222,17 @@ fn build_llvm_instrumented_case(source: &str, name: &str, sanitizer: &str) -> Pa
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let output = Command::new("clang-17")
+    let output = Command::new("clang-18")
         .arg(format!("-fsanitize={sanitizer}"))
         .args(["-static-libsan", "-static-libgcc"])
         .args(["-g", "-O0", "-o"])
         .arg(&binary)
         .arg(&transformed)
         .arg(glibc.build_dir.join("libc.so"))
+        // The link resolves libc.so's GLIBC_PRIVATE loader symbols against the
+        // host ld.so, which newer glibc releases no longer export. The binary
+        // runs under the instrumented loader, so skip that link-time check.
+        .arg("-Wl,--allow-shlib-undefined")
         .arg("-pthread")
         .output()
         .expect("link LLVM pass sanitizer subject");

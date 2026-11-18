@@ -20,17 +20,13 @@ fn plugin_path() -> PathBuf {
 fn build_plugin() -> PathBuf {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let target_dir = temp_dir().join("plugin-target");
-    let output = run_timeout(
-        cargo,
-        [
-            OsString::from("build"),
-            OsString::from("-p"),
-            OsString::from("rsched-llvm-pass"),
-            OsString::from("--lib"),
-            OsString::from("--target-dir"),
-            target_dir.as_os_str().to_owned(),
-        ],
-    );
+    // A cold build of the plugin and its LLVM bindings takes longer than the
+    // 30-second cap that run_timeout puts on clang and opt, so run it uncapped.
+    let output = Command::new(cargo)
+        .args(["build", "-p", "rsched-llvm-pass", "--lib", "--target-dir"])
+        .arg(&target_dir)
+        .output()
+        .expect("spawn cargo build for LLVM pass plugin");
     assert!(
         output.status.success(),
         "cargo build for LLVM pass plugin failed\nstdout:\n{}\nstderr:\n{}",
@@ -220,10 +216,10 @@ fn compile_source_to_ir(name: &str, source: &str, extra_args: &[&str]) -> PathBu
         ll.as_os_str().to_owned(),
         src.as_os_str().to_owned(),
     ]);
-    let output = run_timeout("clang-17", args);
+    let output = run_timeout("clang-18", args);
     assert!(
         output.status.success(),
-        "clang-17 failed\nstdout:\n{}\nstderr:\n{}",
+        "clang-18 failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -238,7 +234,7 @@ fn run_pass(pass: &str, input: &Path, output_name: &str) -> String {
 fn run_pass_to_file(pass: &str, input: &Path, output_name: &str) -> PathBuf {
     let out = temp_dir().join(output_name);
     let output = run_timeout(
-        "opt-17",
+        "opt-18",
         [
             OsString::from("-load-pass-plugin"),
             plugin_path().as_os_str().to_owned(),
@@ -251,7 +247,7 @@ fn run_pass_to_file(pass: &str, input: &Path, output_name: &str) -> PathBuf {
     );
     assert!(
         output.status.success(),
-        "opt-17 failed for {pass}\nstdout:\n{}\nstderr:\n{}",
+        "opt-18 failed for {pass}\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

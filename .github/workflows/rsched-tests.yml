@@ -12,8 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
+      - name: Fetch submodules
+        run: .github/fetch-submodules.sh
       - name: Build test image
         run: docker buildx build --progress=plain --cache-to type=gha,mode=max --cache-from type=gha -t rsched .
       - name: Run source and LLVM pass tests
@@ -28,8 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
+      - name: Fetch submodules
+        run: .github/fetch-submodules.sh
       - name: Restore instrumented libc cache
         uses: actions/cache@v4
         with:

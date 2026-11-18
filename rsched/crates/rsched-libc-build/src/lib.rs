@@ -527,10 +527,10 @@ fn build_musl(
     plugin: &Path,
     fingerprint: &str,
 ) -> Result<ArtifactManifest> {
-    require_program("clang-17")?;
+    require_program("clang-18")?;
     require_program("make")?;
     require_program("musl-gcc")?;
-    require_program("opt-17")?;
+    require_program("opt-18")?;
 
     let cargo_target = root.join("rsched-target");
     let rsched = build_embedded_rsched(options, &cargo_target, Some("x86_64-unknown-linux-musl"))?;
@@ -752,7 +752,7 @@ fn fingerprint(options: &BuildOptions) -> Result<String> {
             hash_source_checkout(&mut hash, &options.workspace_root.join("musl/musl"), "musl")?;
         }
     }
-    for program in ["cargo", "rustc", "clang-17", "opt-17", "gcc", "ld"] {
+    for program in ["cargo", "rustc", "clang-18", "opt-18", "gcc", "ld"] {
         hash.add(program.as_bytes());
         hash.add(&program_version(program));
     }
@@ -770,7 +770,7 @@ fn plugin_fingerprint(options: &BuildOptions, fallback: &str) -> Result<String> 
     }
     hash.add(options.profile.to_string().as_bytes());
     hash.add(&program_version("rustc"));
-    hash.add(&program_version("llvm-config-17"));
+    hash.add(&program_version("llvm-config-18"));
     let value = hash.finish();
     Ok(if value.is_empty() {
         fallback.to_owned()
@@ -906,7 +906,7 @@ fn prepare_clang_asan_runtime(
          local: *;\n\
          } CXXABI_1.3;\n",
     )?;
-    let mut command = Command::new("clang-17");
+    let mut command = Command::new("clang-18");
     command
         .args(["-shared", "-static-libgcc"])
         .arg("-Wl,-soname,libstdc++.so.6")

@@ -2,7 +2,7 @@
 
 /*
  * glibc assumes that a compiler advertising GNU C support recognizes
- * _Float128 as a built-in type. Clang 17 supports the ABI-compatible
+ * _Float128 as a built-in type. Clang 18 supports the ABI-compatible
  * __float128 extension but not the _Float128 spelling.
  */
 #ifdef __clang__

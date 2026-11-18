@@ -28,7 +28,7 @@ done
 if [[ "$RSCHED_LIBC_MODE" == glibc ]]; then
     fallback_compiler=${RSCHED_GLIBC_CC:-gcc}
 else
-    fallback_compiler=clang-17
+    fallback_compiler=clang-18
 fi
 
 if ! $compile || [[ -z "$source_file" || -z "$output_file" ]]; then
@@ -47,7 +47,7 @@ if [[ "$RSCHED_LIBC_MODE" == glibc ]]; then
 fi
 
 # glibc's x86_64 float128 implementation uses GCC's _Float128 language
-# extension, which Clang 17 cannot parse. These math-only sources do not
+# extension, which Clang 18 cannot parse. These math-only sources do not
 # implement synchronization or task creation, so compile them with GCC.
 if [[ "$RSCHED_LIBC_MODE" == glibc ]]; then
     case "$source_file:$output_file" in
@@ -136,7 +136,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
             ((i += 1))
             ;;
         -fno-toplevel-reorder|-fno-section-anchors|-msse2avx)
-            # GCC-only layout/code-generation controls rejected by Clang 17.
+            # GCC-only layout/code-generation controls rejected by Clang 18.
             ;;
         *)
             bc_args+=("${args[i]}")
@@ -153,10 +153,10 @@ if [[ "$RSCHED_LIBC_MODE" == glibc ]]; then
     )
 fi
 
-clang-17 -emit-llvm "${bc_args[@]}"
-opt-17 \
+clang-18 -emit-llvm "${bc_args[@]}"
+opt-18 \
     -load-pass-plugin "$RSCHED_LLVM_PLUGIN" \
     "-passes=rsched-atomics${pass_mode:+<$pass_mode>}" \
     "$input_bc" \
     -o "$instrumented_bc"
-clang-17 -c "$instrumented_bc" -o "$output_file"
+clang-18 -c "$instrumented_bc" -o "$output_file"

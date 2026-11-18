@@ -170,7 +170,7 @@ they preload the instrumented glibc or musl. It does not refer to a separate
 ## Building artifacts
 
 Prerequisites are documented by the repository `Dockerfile`. Native builds
-require Rust nightly, Clang and LLVM 17, a C toolchain, musl tools, `gawk`,
+require Rust nightly, Clang and LLVM 18, a C toolchain, musl tools, `gawk`,
 `bison`, `zstd`, and the Rust `x86_64-unknown-linux-musl` target.
 
 Use `xtask` to build artifacts:
