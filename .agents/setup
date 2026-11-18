@@ -40,8 +40,9 @@ install_apt_packages() {
   # GCC 14, which rejects code GCC 13 accepts (e.g. implicit declarations in
   # c-examples), so put GCC 13 first on PATH under the unversioned names.
   local name target
-  for name in gcc cc cpp g++ c++; do
-    case "$name" in g++|c++) target=g++-13 ;; cpp) target=cpp-13 ;; *) target=gcc-13 ;; esac
+  # musl-gcc wraps x86_64-linux-gnu-gcc, so pin the target-prefixed names too.
+  for name in gcc cc cpp g++ c++ x86_64-linux-gnu-gcc x86_64-linux-gnu-cpp x86_64-linux-gnu-g++; do
+    case "$name" in *g++|c++) target=g++-13 ;; *cpp) target=cpp-13 ;; *) target=gcc-13 ;; esac
     [ "$(readlink "/usr/local/bin/$name" 2>/dev/null)" = "/usr/bin/$target" ] \
       || sudo ln -sfn "/usr/bin/$target" "/usr/local/bin/$name"
   done
