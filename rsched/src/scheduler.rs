@@ -417,6 +417,12 @@ impl<S: Scheduler> Scheduler for LoggingScheduler<S> {
                 EventKind::SchedYield => {
                     eprintln!("[rsched] SchedYield @ 0x{:x}", ev.instr_addr);
                 }
+                EventKind::Io { fd, syscall } => {
+                    eprintln!(
+                        "[rsched] Io(syscall={syscall}, fd={fd}) @ 0x{:x}",
+                        ev.instr_addr
+                    );
+                }
                 EventKind::MemOp {
                     mem_addr,
                     size,

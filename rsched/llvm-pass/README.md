@@ -28,8 +28,9 @@ void rsched_atomic_instrument(const void *ptr, size_t size, unsigned access);
 Pass names:
 
 - `rsched-atomics`: instrument LLVM atomic instructions only.
-- `rsched-atomics<direct-pthread>`: also rewrite known pthread calls to the
-  `rsched_pthread_*` symbols for static/direct rsched linking.
+- `rsched-atomics<direct-pthread>`: also rewrite known pthread, file, and
+  socket calls (`read`, `send`, `accept`, `poll`, and so on) to their
+  `rsched_*` symbols for static/direct rsched linking.
 
 The pass instruments LLVM `load atomic`, `store atomic`, `atomicrmw`, and
 `cmpxchg` instructions. It does not replace the atomic instruction; it inserts a

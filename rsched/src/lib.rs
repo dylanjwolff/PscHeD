@@ -22,6 +22,7 @@ mod event;
 pub use event::{AccessKind, Event, EventKind};
 
 mod fuzzing;
+mod io;
 mod seccomp;
 mod task_provider;
 mod tsan;
@@ -815,6 +816,9 @@ pub unsafe extern "C" fn rsched_syscall(
         ensure_init();
         return st().task_provider.clone_process(a0, a1, a2, a3, a4).into();
     }
+    if io::is_modeled(number) {
+        return io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5]);
+    }
 
     libc::syscall(number, a0, a1, a2, a3, a4, a5)
 }
@@ -834,6 +838,8 @@ pub unsafe extern "C" fn rsched_libc_syscall(
     let outermost = rsched_try_enter();
     let result = if outermost && number == libc::SYS_clone {
         rsched_syscall(number, a0, a1, a2, a3, a4, a5)
+    } else if outermost && io::is_modeled(number) {
+        io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5])
     } else {
         rsched_raw_syscall(number, a0, a1, a2, a3, a4, a5)
     };
@@ -1161,6 +1167,24 @@ unsafe fn with_internal_depth<T>(f: impl FnOnce() -> T) -> T {
     let r = f();
     depth_exit();
     r
+}
+
+/// Runs a scheduling point reached straight from application code, such as
+/// an atomic or e9patch hook. With instrumented libc, rsched's own libc
+/// calls inside it, such as RSCHED_LOG's writes, must reach the real
+/// implementations instead of re-entering rsched through its wrappers. That
+/// depth is tracked per task. Source integration has no wrappers, and its
+/// depth is per OS thread, which coroutine tasks share, so it is left alone.
+#[inline]
+unsafe fn with_libc_wrappers_bypassed<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "instrumented-libc")]
+    {
+        with_internal_depth(f)
+    }
+    #[cfg(not(feature = "instrumented-libc"))]
+    {
+        f()
+    }
 }
 
 unsafe fn st() -> &'static mut State {
@@ -1974,22 +1998,24 @@ unsafe fn schedule_memop(
         return;
     }
     ensure_init();
-    rsched_glock();
-    let caller = my_pt();
-    st().set_event(
-        caller,
-        Event {
-            instr_addr,
-            kind: EventKind::MemOp {
-                mem_addr,
-                size,
-                access,
+    with_libc_wrappers_bypassed(|| {
+        rsched_glock();
+        let caller = my_pt();
+        st().set_event(
+            caller,
+            Event {
+                instr_addr,
+                kind: EventKind::MemOp {
+                    mem_addr,
+                    size,
+                    access,
+                },
             },
-        },
-    );
-    st().context_switch(caller);
-    st().clear_event(caller);
-    rsched_gunlock();
+        );
+        st().context_switch(caller);
+        st().clear_event(caller);
+        rsched_gunlock();
+    });
 }
 
 /// Generic hook used by the LLVM pass. It creates a scheduling point for an

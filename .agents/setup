@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prepares an Amp orb (Debian 13) with the toolchain the repository Dockerfile
 # installs: Rust nightly + musl target, Clang/LLVM 18, GCC plugin headers, and
-# the glibc/musl/e9patch submodules. Idempotent and safe on a warm snapshot.
+# the glibc/musl/e9patch submodules, then builds e9tool for the binary
+# instrumentation tests. Idempotent and safe on a warm snapshot.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,9 +18,9 @@ step() {
 }
 
 apt_packages=(
-  build-essential bison ca-certificates clang-18 curl g++-13 gawk gcc-13
-  gcc-13-plugin-dev git libclang-rt-18-dev llvm-18-dev musl-tools pkg-config
-  zstd
+  build-essential bison ca-certificates clang-18 curl file g++-13 gawk gcc-13
+  gcc-13-plugin-dev git libclang-rt-18-dev llvm-18-dev markdown musl-tools
+  pkg-config zstd
 )
 
 install_apt_packages() {
@@ -82,6 +83,12 @@ init_submodules() {
   "$repo_root/.github/fetch-submodules.sh"
 }
 
+# The binary-instrumentation tests skip without e9tool, so build it.
+build_e9patch() {
+  local dir="$repo_root/rsched/binary-instrumentation/e9patch"
+  [ -x "$dir/e9tool" ] || (cd "$dir" && CC=gcc CXX=g++ ./build.sh >/dev/null)
+}
+
 warm_cargo() {
   export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
   export LLVM_SYS_180_PREFIX=/usr/lib/llvm-18
@@ -98,4 +105,5 @@ step "apt packages" install_apt_packages
 step "rust nightly" install_rust
 step "login shell environment" persist_environment
 step "git submodules" init_submodules
+step "e9patch" build_e9patch
 step "cargo build cache" warm_cargo

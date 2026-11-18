@@ -10,6 +10,18 @@ const LIBC_TEST_CASES: &[(&str, &str)] = &[
     ("functional", "tls_init"),
     ("regression", "pthread_condattr_setclock"),
     ("regression", "pthread_rwlock-ebusy"),
+    // File and socket I/O through the instrumented read/write/socket wrappers.
+    ("functional", "socket"),
+    ("functional", "fcntl"),
+    ("functional", "fdopen"),
+    ("functional", "stat"),
+    ("functional", "ungetc"),
+    ("regression", "fflush-exit"),
+    ("regression", "fgets-eof"),
+    ("regression", "ftello-unflushed-append"),
+    ("regression", "lseek-large"),
+    ("regression", "rewind-clear-error"),
+    ("regression", "setvbuf-unget"),
 ];
 
 fn repo_root() -> PathBuf {

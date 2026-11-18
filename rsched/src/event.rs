@@ -25,6 +25,11 @@ pub enum EventKind {
     LockAcq { lock: *const libc::c_void },
     /// Mutex release (`pthread_mutex_unlock`).
     LockRel { lock: *const libc::c_void },
+    /// File or socket operation on `fd`, identified by its syscall number.
+    Io {
+        fd: libc::c_int,
+        syscall: libc::c_long,
+    },
 }
 
 /// Describes what a thread is about to execute at the next scheduling point.

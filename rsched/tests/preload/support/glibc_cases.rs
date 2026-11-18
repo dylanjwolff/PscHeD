@@ -526,6 +526,99 @@ int main(void)
 }
 
 #[test]
+fn instrumented_glibc_preload_binary_raw_syscall_io() {
+    // The subject's own syscall instructions bypass libc, so only the e9patch
+    // hook can keep the worker's blocking read from hanging the program.
+    let source = temp_dir().join("binary-raw-io.c");
+    std::fs::write(
+        &source,
+        r#"
+#include <pthread.h>
+#include <sched.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+static long raw_syscall3(long nr, long a, long b, long c)
+{
+    long ret;
+    __asm__ volatile("syscall"
+                     : "=a"(ret)
+                     : "a"(nr), "D"(a), "S"(b), "d"(c)
+                     : "rcx", "r11", "memory");
+    return ret;
+}
+
+static int to_worker[2], to_main[2];
+
+static void *worker(void *arg)
+{
+    (void)arg;
+    char buf[4];
+    if (raw_syscall3(SYS_read, to_worker[0], (long)buf, 4) != 4 || memcmp(buf, "ping", 4))
+        return (void *)1;
+    return (void *)(long)(raw_syscall3(SYS_write, to_main[1], (long)"pong", 4) != 4);
+}
+
+int main(void)
+{
+    pthread_t thread;
+    if (pipe(to_worker) || pipe(to_main) || pthread_create(&thread, 0, worker, 0))
+        return 2;
+    /* Let the worker reach its read on the empty pipe first. */
+    for (int i = 0; i < 4; i++)
+        sched_yield();
+    char buf[4];
+    if (raw_syscall3(SYS_write, to_worker[1], (long)"ping", 4) != 4 ||
+        raw_syscall3(SYS_read, to_main[0], (long)buf, 4) != 4 || memcmp(buf, "pong", 4))
+        return 1;
+    void *result;
+    pthread_join(thread, &result);
+    printf("reply=%.4s\n", buf);
+    return result != 0;
+}
+"#,
+    )
+    .expect("write binary raw I/O subject");
+    let binary =
+        build_binary_instrumentation_case(&source, "glibc-preload-binary-raw-io", &[], &[]);
+    let Some((instrumented, output_dir, log)) =
+        instrument_binary(&binary, "glibc-preload-binary-raw-io-instrumented")
+    else {
+        return;
+    };
+    assert!(
+        log.contains("num_patched           = 1 / 1"),
+        "expected the syscall instruction to be patched\n{log}"
+    );
+    let output = run_preloaded(
+        &instrumented,
+        &[],
+        &[
+            (
+                "RSCHED_EXTRA_LIBRARY_PATH",
+                output_dir.as_os_str().to_owned(),
+            ),
+            ("RSCHED_DIRECT_EXEC", OsString::from("1")),
+            ("RSCHED_LOG", OsString::from("1")),
+        ],
+    );
+    assert!(
+        output.stdout.contains("reply=pong"),
+        "raw I/O subject produced unexpected output\nstdout:\n{}\nstderr:\n{}",
+        output.stdout,
+        output.stderr,
+    );
+    assert!(
+        output.stderr.contains("[rsched] Io(syscall=0,"),
+        "raw read was not a scheduling point:\n{}",
+        output.stderr,
+    );
+    assert_clean("instrumented glibc preload binary raw I/O", output);
+}
+
+#[test]
 fn instrumented_glibc_preload_binary_sanitizers() {
     if !repo_root()
         .join("binary-instrumentation/e9patch/e9tool")

@@ -88,6 +88,7 @@ impl LlvmModulePass for RschedAtomicsPass {
         if self.musl_libc {
             changed |= redirect_syscall_definition(module);
             changed |= wrap_libc_pthread_implementations(module, MUSL_REWRITES, true);
+            changed |= wrap_libc_io_functions(module, MUSL_IO_REWRITES);
             changed |= rewrite_clone_calls(module);
         }
         if self.glibc_libc {
@@ -96,6 +97,7 @@ impl LlvmModulePass for RschedAtomicsPass {
             changed |= redirect_syscall_definition(module);
             changed |= wrap_libc_pthread_implementations(module, GLIBC_REWRITES, false);
             changed |= wrap_libc_pthread_implementations(module, GLIBC_PUBLIC_REWRITES, true);
+            changed |= wrap_libc_io_functions(module, GLIBC_IO_REWRITES);
             changed |=
                 wrap_glibc_hidden_implementations(module, GLIBC_REWRITES, GLIBC_HIDDEN_NAMES);
             changed |= wrap_glibc_hidden_implementations(
@@ -529,6 +531,20 @@ const PTHREAD_REWRITES: &[(&str, &str)] = &[
     ("pthread_barrier_init", "rsched_pthread_barrier_init"),
     ("pthread_barrier_wait", "rsched_pthread_barrier_wait"),
     ("sched_yield", "rsched_sched_yield"),
+    ("read", "rsched_read"),
+    ("write", "rsched_write"),
+    ("readv", "rsched_readv"),
+    ("writev", "rsched_writev"),
+    ("recv", "rsched_recv"),
+    ("recvfrom", "rsched_recvfrom"),
+    ("recvmsg", "rsched_recvmsg"),
+    ("send", "rsched_send"),
+    ("sendto", "rsched_sendto"),
+    ("sendmsg", "rsched_sendmsg"),
+    ("accept", "rsched_accept"),
+    ("accept4", "rsched_accept4"),
+    ("connect", "rsched_connect"),
+    ("poll", "rsched_poll"),
 ];
 
 #[derive(Clone, Copy)]
@@ -562,13 +578,65 @@ fn wrap_libc_pthread_implementations(
         let real = module
             .get_function(rewrite.real)
             .expect("renamed musl implementation");
-        build_guarded_wrapper(module, rewrite.implementation, real, rewrite, true);
+        build_guarded_wrapper(
+            module,
+            rewrite.implementation,
+            real,
+            rewrite.rsched,
+            rewrite.diverges,
+            true,
+        );
         if wrap_public && rewrite.public != rewrite.implementation {
-            build_guarded_wrapper(module, rewrite.public, real, rewrite, true);
+            build_guarded_wrapper(
+                module,
+                rewrite.public,
+                real,
+                rewrite.rsched,
+                rewrite.diverges,
+                true,
+            );
         }
         changed = true;
     }
     changed
+}
+
+/// File and socket operations: `(implementation, public, rsched)`.
+type IoRewrite = (&'static str, &'static str, &'static str);
+
+/// Wraps only the public I/O symbol that applications call. libc's own
+/// callers keep the implementation, and the wrapper does not activate rsched:
+/// musl's dynamic loader, which is part of libc, reads files before any task
+/// exists.
+fn wrap_libc_io_functions(module: &mut Module<'_>, rewrites: &[IoRewrite]) -> bool {
+    let mut changed = false;
+    for &(implementation, public, rsched) in rewrites {
+        let Some(real) = defined_function(module, implementation) else {
+            continue;
+        };
+        if implementation == public {
+            set_value_name(real.as_value_ref(), &format!("__rsched_real_{public}"));
+        } else {
+            rename_global_alias(module, public);
+        }
+        build_guarded_wrapper(module, public, real, rsched, false, false);
+        changed = true;
+    }
+    changed
+}
+
+/// The function defined under `name`, following an alias to its target.
+fn defined_function<'ctx>(module: &Module<'ctx>, name: &str) -> Option<FunctionValue<'ctx>> {
+    let function = module.get_function(name).or_else(|| {
+        let alias = unsafe {
+            LLVMGetNamedGlobalAlias(module.as_mut_ptr(), name.as_ptr().cast(), name.len())
+        };
+        if alias.is_null() {
+            return None;
+        }
+        unsafe { FunctionValue::new(LLVMAliasGetAliasee(alias)) }
+    })?;
+    (function.count_basic_blocks() > 0).then_some(function)
 }
 
 fn wrap_glibc_hidden_implementations(
@@ -582,7 +650,14 @@ fn wrap_glibc_hidden_implementations(
             continue;
         };
         rename_global_alias(module, hidden);
-        build_guarded_wrapper(module, hidden, real, rewrite, false);
+        build_guarded_wrapper(
+            module,
+            hidden,
+            real,
+            rewrite.rsched,
+            rewrite.diverges,
+            false,
+        );
         changed = true;
     }
     changed
@@ -720,15 +795,16 @@ fn build_guarded_wrapper<'ctx>(
     module: &mut Module<'ctx>,
     name: &str,
     real: FunctionValue<'ctx>,
-    rewrite: &LibcRewrite,
+    rsched_name: &str,
+    diverges: bool,
     activate_hooks: bool,
 ) {
     let context = module.get_context();
     let function_type = real.get_type();
     let wrapper = module.add_function(name, function_type, Some(real.get_linkage()));
     let rsched = module
-        .get_function(rewrite.rsched)
-        .unwrap_or_else(|| module.add_function(rewrite.rsched, function_type, None));
+        .get_function(rsched_name)
+        .unwrap_or_else(|| module.add_function(rsched_name, function_type, None));
     let try_enter_type = context.bool_type().fn_type(&[], false);
     let try_enter = module
         .get_function("rsched_try_enter")
@@ -770,8 +846,8 @@ fn build_guarded_wrapper<'ctx>(
         .into_iter()
         .map(BasicMetadataValueEnum::from)
         .collect();
-    build_guarded_call(&builder, outer, rsched, exit, &args, rewrite.diverges);
-    build_guarded_call(&builder, nested, real, exit, &args, rewrite.diverges);
+    build_guarded_call(&builder, outer, rsched, exit, &args, diverges);
+    build_guarded_call(&builder, nested, real, exit, &args, diverges);
 }
 
 fn build_guarded_call<'ctx>(
@@ -1069,6 +1145,40 @@ const GLIBC_REWRITES: &[LibcRewrite] = &[
         rsched: "rsched_process_exit_status",
         diverges: true,
     },
+];
+
+const MUSL_IO_REWRITES: &[IoRewrite] = &[
+    ("read", "read", "rsched_read"),
+    ("write", "write", "rsched_write"),
+    ("readv", "readv", "rsched_readv"),
+    ("writev", "writev", "rsched_writev"),
+    ("recv", "recv", "rsched_recv"),
+    ("recvfrom", "recvfrom", "rsched_recvfrom"),
+    ("recvmsg", "recvmsg", "rsched_recvmsg"),
+    ("send", "send", "rsched_send"),
+    ("sendto", "sendto", "rsched_sendto"),
+    ("sendmsg", "sendmsg", "rsched_sendmsg"),
+    ("accept", "accept", "rsched_accept"),
+    ("accept4", "accept4", "rsched_accept4"),
+    ("connect", "connect", "rsched_connect"),
+    ("poll", "poll", "rsched_poll"),
+];
+
+const GLIBC_IO_REWRITES: &[IoRewrite] = &[
+    ("__libc_read", "read", "rsched_read"),
+    ("__libc_write", "write", "rsched_write"),
+    ("__readv", "readv", "rsched_readv"),
+    ("__writev", "writev", "rsched_writev"),
+    ("__libc_recv", "recv", "rsched_recv"),
+    ("__libc_recvfrom", "recvfrom", "rsched_recvfrom"),
+    ("__libc_recvmsg", "recvmsg", "rsched_recvmsg"),
+    ("__libc_send", "send", "rsched_send"),
+    ("__libc_sendto", "sendto", "rsched_sendto"),
+    ("__libc_sendmsg", "sendmsg", "rsched_sendmsg"),
+    ("__libc_accept", "accept", "rsched_accept"),
+    ("accept4", "accept4", "rsched_accept4"),
+    ("__libc_connect", "connect", "rsched_connect"),
+    ("__poll", "poll", "rsched_poll"),
 ];
 
 const GLIBC_PUBLIC_REWRITES: &[LibcRewrite] = &[LibcRewrite {

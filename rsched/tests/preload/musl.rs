@@ -2,6 +2,9 @@ use rsched_libc_build::ArtifactManifest;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/io_cases.rs"]
+mod io_cases;
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
@@ -86,4 +89,12 @@ fn artifact_contains_application_instrumentation_plugin() {
         artifact.llvm_plugin.display()
     );
     assert!(repo_root().join("llvm-pass").is_dir());
+}
+
+#[test]
+fn io_message_passing_with_instrumented_musl_preloaded() {
+    let runner = artifact().runner.expect("musl artifact runner");
+    // RSCHED_LOG=1 crashes instrumented musl even without I/O, so this relies
+    // on the cases finishing: an unmodeled blocking read hangs.
+    io_cases::check_io_cases("musl-gcc", &runner, &temp_dir(), false);
 }

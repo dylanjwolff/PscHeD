@@ -2,8 +2,8 @@
 
 `rsched` is a controlled concurrency testing framework and concurrent model
 checker for C programs, written in Rust. It turns pthread operations, process
-creation, atomics, and explicit yields into cooperative scheduling points so
-that executions are deterministic and reproducible.
+creation, atomics, file and socket I/O, and explicit yields into cooperative
+scheduling points so that executions are deterministic and reproducible.
 
 The scheduler can either choose a seeded random execution or exhaustively
 explore bounded executions using depth-first search (DFS).
@@ -121,7 +121,34 @@ Useful environment variables:
 | `RSCHED_SCHEDULER` | random | Set to `dfs` for depth-first exploration |
 | `RSCHED_LOG` | unset | Set to `1` to log scheduling decisions |
 | `RSCHED_FUZZ_SCHEDULES` | `5` | Schedules executed for each libFuzzer input |
-| `RSCHED_SECCOMP` | unset | Set to `1` on Linux x86_64 to trap unsupported raw synchronization syscalls |
+| `RSCHED_SECCOMP` | unset | Set to `1` on Linux x86_64 to trap unsupported raw synchronization syscalls and route I/O issued outside rsched through the I/O model |
+
+## File and socket I/O
+
+`read`, `write`, `readv`, `writev`, `recv`, `recvfrom`, `recvmsg`, `send`,
+`sendto`, `sendmsg`, `accept`, `accept4`, `connect`, and `poll` are scheduling
+points. Only one task runs at a time, so a call that blocked in the kernel
+would stall the task that could unblock it. On a blocking descriptor, the
+calling task instead yields until the descriptor is ready, then performs the
+call. A `poll` with a positive timeout expires in virtual time: if no
+descriptor is ready after the other tasks have had a turn, it returns 0.
+
+Each integration mode reaches these operations differently:
+
+- Source annotations: `rsched.h` maps the calls to `rsched_*` wrappers, and
+  `syscall()` routes the matching syscall numbers.
+- Instrumented libc: the public glibc and musl functions and `syscall()` are
+  wrapped. libc-internal I/O, such as stdio buffering, is not modeled.
+- LLVM pass: `rsched-atomics<direct-pthread>` rewrites the calls to the
+  `rsched_*` wrappers.
+- Binary instrumentation: raw `syscall` instructions in the instrumented
+  binary call into the model first.
+- `RSCHED_SECCOMP=1`: I/O syscalls issued outside rsched, including stdio's,
+  trap and wait until they cannot block. They do not add scheduling points of
+  their own, because libc may hold internal locks around them.
+
+Writes are assumed to fit in the free buffer space once a descriptor reports
+writable. `select`, `epoll`, `ppoll`, and opening FIFOs are not modeled.
 
 ## Binary instrumentation
 

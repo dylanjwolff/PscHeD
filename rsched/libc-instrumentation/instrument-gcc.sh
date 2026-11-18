@@ -206,6 +206,28 @@ add_rewrite() {
     emit_wrapper "$impl" "$rsched" "$real" yes no
 }
 
+# File and socket operations wrap only the public symbol that applications
+# call. glibc's own callers, such as stdio, use the hidden __GI_* names and
+# keep the real implementation, so tasks never switch while libc holds an
+# internal lock. These wrappers do not activate rsched: the dynamic loader
+# and single-threaded startup perform I/O before any task exists.
+add_io_rewrite() {
+    local impl=$1
+    local public=$2
+    local rsched=$3
+
+    if ! symbol_defined "$public"; then
+        return
+    fi
+    if [[ "$impl" == "$public" ]]; then
+        objcopy_args+=(--redefine-sym "$public=__rsched_real_$public")
+        emit_wrapper "$public" "$rsched" "__rsched_real_$public" no no
+    else
+        objcopy_args+=(--redefine-sym "$public=__rsched_real_alias_$public")
+        emit_wrapper "$public" "$rsched" "$impl" no no
+    fi
+}
+
 objcopy_args=()
 : >"$wrapper_source"
 
@@ -233,6 +255,20 @@ add_rewrite "___pthread_barrier_wait" "pthread_barrier_wait" "__rsched_real_pthr
 add_rewrite "__sched_yield" "sched_yield" "__rsched_real_sched_yield" "rsched_sched_yield" "__GI___sched_yield"
 add_rewrite "_exit" "_exit" "__rsched_real_process_exit" "rsched_process_exit_status" "__GI__exit"
 add_rewrite "__waitpid" "waitpid" "__rsched_real_waitpid" "rsched_waitpid" "__GI___waitpid"
+add_io_rewrite "__libc_read" "read" "rsched_read"
+add_io_rewrite "__libc_write" "write" "rsched_write"
+add_io_rewrite "__readv" "readv" "rsched_readv"
+add_io_rewrite "__writev" "writev" "rsched_writev"
+add_io_rewrite "__libc_recv" "recv" "rsched_recv"
+add_io_rewrite "__libc_recvfrom" "recvfrom" "rsched_recvfrom"
+add_io_rewrite "__libc_recvmsg" "recvmsg" "rsched_recvmsg"
+add_io_rewrite "__libc_send" "send" "rsched_send"
+add_io_rewrite "__libc_sendto" "sendto" "rsched_sendto"
+add_io_rewrite "__libc_sendmsg" "sendmsg" "rsched_sendmsg"
+add_io_rewrite "__libc_accept" "accept" "rsched_accept"
+add_io_rewrite "accept4" "accept4" "rsched_accept4"
+add_io_rewrite "__libc_connect" "connect" "rsched_connect"
+add_io_rewrite "__poll" "poll" "rsched_poll"
 
 if [[ ${#objcopy_args[@]} -eq 0 ]]; then
     mv "$object" "$output_file"

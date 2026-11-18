@@ -6,6 +6,8 @@ use std::sync::OnceLock;
 #[cfg(not(feature = "coro"))]
 #[path = "support/glibc_cases.rs"]
 mod glibc_cases;
+#[path = "support/io_cases.rs"]
+mod io_cases;
 
 static INSTRUMENTED_GLIBC: OnceLock<InstrumentedGlibc> = OnceLock::new();
 
@@ -109,4 +111,10 @@ fn ordinary_binary_runs_with_instrumented_glibc_preloaded() {
         command,
         "run ordinary pthread binary with instrumented glibc preloaded",
     );
+}
+
+#[test]
+fn io_message_passing_with_instrumented_glibc_preloaded() {
+    let glibc = build_instrumented_glibc();
+    io_cases::check_io_cases("gcc", &glibc.preload_runner, &temp_dir(), true);
 }

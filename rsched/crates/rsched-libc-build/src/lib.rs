@@ -549,6 +549,7 @@ fn build_musl(
             "LDFLAGS",
             "-Wl,--export-dynamic-symbol=rsched_atomic_instrument \
              -Wl,--export-dynamic-symbol=rsched_atomic_instrument_ra \
+             -Wl,--export-dynamic-symbol=rsched_io_prepare_syscall \
              -Wl,--export-dynamic-symbol=rsched_fuzzer_test_one_input",
         )
         .arg(format!("--prefix={}", install_dir.display()))
@@ -906,11 +907,21 @@ fn prepare_clang_asan_runtime(
          local: *;\n\
          } CXXABI_1.3;\n",
     )?;
+    // A host libsupc++ built against glibc 2.38+ calls the C23 strtoul,
+    // which the instrumented glibc 2.35 does not export.
+    let compat = root.join("asan-cxxabi-compat.c");
+    fs::write(
+        &compat,
+        "#include <stdlib.h>\n\
+         unsigned long __isoc23_strtoul(const char *s, char **end, int base)\n\
+         {\n    return strtoul(s, end, base);\n}\n",
+    )?;
     let mut command = Command::new("clang-18");
     command
-        .args(["-shared", "-static-libgcc"])
+        .args(["-shared", "-static-libgcc", "-std=gnu17", "-fPIC"])
         .arg("-Wl,-soname,libstdc++.so.6")
         .arg(format!("-Wl,--version-script={}", cxxabi_map.display()))
+        .arg(&compat)
         .arg("-Wl,--whole-archive")
         .arg(&libsupcxx)
         .arg("-Wl,--no-whole-archive")
@@ -923,12 +934,13 @@ fn prepare_clang_asan_runtime(
 
 fn export_glibc_hooks(libc_map: &Path) -> Result<()> {
     let map = fs::read_to_string(libc_map)?;
-    if map.contains("rsched_atomic_instrument;") {
+    if map.contains("rsched_io_prepare_syscall;") {
         return Ok(());
     }
     let marker = "  local:\n    *;\n};";
     let replacement = "    rsched_atomic_instrument;\n\
                        rsched_atomic_instrument_ra;\n\
+                       rsched_io_prepare_syscall;\n\
                        rsched_fuzzer_test_one_input;\n\
                        local:\n    *;\n};";
     let index = map
