@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Prepares an Amp orb (Debian 13) with the toolchain the repository Dockerfile
+# installs: Rust nightly + musl target, Clang/LLVM 17, GCC plugin headers, and
+# the glibc/musl/e9patch submodules. Idempotent and safe on a warm snapshot.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+  local name="$1"
+  shift
+  local start=$SECONDS
+  echo "==> $name"
+  "$@"
+  echo "<== $name ($((SECONDS - start))s)"
+}
+
+apt_packages=(
+  build-essential bison ca-certificates clang-17 curl g++-13 gawk gcc-13
+  gcc-13-plugin-dev git libclang-rt-17-dev llvm-17-dev musl-tools pkg-config
+  zstd
+)
+
+install_apt_packages() {
+  local missing=()
+  for pkg in "${apt_packages[@]}"; do
+    dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' \
+      || missing+=("$pkg")
+  done
+  if ((${#missing[@]})); then
+    echo "installing: ${missing[*]}"
+    sudo apt-get update -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${missing[@]}"
+  fi
+  # Canonical names used by build scripts and tests (mirrors the Dockerfile).
+  [ -x /usr/bin/clang ] || sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100
+  [ -x /usr/bin/llvm-config ] || sudo update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-17 100
+  # CI builds on Ubuntu 24.04, whose default GCC is 13. Debian 13 defaults to
+  # GCC 14, which rejects code GCC 13 accepts (e.g. implicit declarations in
+  # c-examples), so put GCC 13 first on PATH under the unversioned names.
+  local name target
+  for name in gcc cc cpp g++ c++; do
+    case "$name" in g++|c++) target=g++-13 ;; cpp) target=cpp-13 ;; *) target=gcc-13 ;; esac
+    [ "$(readlink "/usr/local/bin/$name" 2>/dev/null)" = "/usr/bin/$target" ] \
+      || sudo ln -sfn "/usr/bin/$target" "/usr/local/bin/$name"
+  done
+}
+
+# The repository uses unpinned nightly. Nightlies from 2026-11-14 onward ICE on
+# rsched's `#[link_name = "llvm.returnaddress"]` declaration, so orbs default
+# to the newest nightly known to build it.
+rust_toolchain=nightly-2026-11-10
+
+install_rust() {
+  if [ ! -x "$HOME/.cargo/bin/rustup" ]; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+  fi
+  "$HOME/.cargo/bin/rustup" toolchain install "$rust_toolchain" --profile minimal \
+    --component clippy,rustfmt --target x86_64-unknown-linux-musl
+  "$HOME/.cargo/bin/rustup" default "$rust_toolchain"
+}
+
+persist_environment() {
+  local marker="# rsched toolchain (added by .agents/setup)"
+  if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+    cat >>"$HOME/.bash_profile" <<'EOF'
+
+# rsched toolchain (added by .agents/setup)
+case ":$PATH:" in *":$HOME/.cargo/bin:"*) ;; *) export PATH="$HOME/.cargo/bin:$PATH" ;; esac
+export LLVM_SYS_170_PREFIX=/usr/lib/llvm-17
+EOF
+  fi
+}
+
+init_submodules() {
+  git submodule sync --quiet
+  git submodule init
+  # Shallow clones keep glibc fast; some hosts (repo.or.cz) refuse fetching an
+  # unadvertised commit shallowly, so fall back to full history for those.
+  local path
+  while read -r path; do
+    git submodule update --depth 1 -- "$path" 2>/dev/null && continue
+    echo "shallow fetch refused for $path; fetching full history"
+    git -C "$path" fetch --quiet --unshallow 2>/dev/null || git -C "$path" fetch --quiet
+    git submodule update -- "$path"
+  done < <(git config -f .gitmodules --get-regexp '\.path$' | awk '{print $2}')
+}
+
+warm_cargo() {
+  export PATH="$HOME/.cargo/bin:/usr/local/bin:$PATH"
+  export LLVM_SYS_170_PREFIX=/usr/lib/llvm-17
+  cd "$repo_root/rsched"
+  cargo fetch --locked
+  # Precompile what `cargo xtask test source` builds so agents start warm.
+  cargo build --locked -p xtask
+  cargo test --locked --no-run -p rsched-llvm-pass
+  cargo test --locked --no-run -p rsched --tests
+  cargo test --locked --no-run -p rsched --tests --features coro
+}
+
+step "apt packages" install_apt_packages
+step "rust nightly" install_rust
+step "login shell environment" persist_environment
+step "git submodules" init_submodules
+step "cargo build cache" warm_cargo

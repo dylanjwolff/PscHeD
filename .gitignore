@@ -4,3 +4,6 @@ rsched/binary-instrumentation/instrumented
 shuttle
 sqlite
 
+
+# Amp orb portal metadata
+.amp/portals/*
