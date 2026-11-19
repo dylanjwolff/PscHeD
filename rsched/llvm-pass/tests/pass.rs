@@ -226,6 +226,29 @@ long syscall(long number, ...) {
 "#
 }
 
+/// musl's thread exit after `__syscall1` is inlined, next to a process exit
+/// (exit_group, 231) that must stay a real syscall.
+fn musl_thread_exit_input() -> &'static str {
+    r#"
+void __unmapself(void *, unsigned long);
+
+static long syscall1(long n, long a1) {
+    unsigned long ret;
+    __asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1) : "rcx", "r11", "memory");
+    return ret;
+}
+
+_Noreturn void thread_exit(void *map, unsigned long size) {
+    if (map) __unmapself(map, size);
+    for (;;) syscall1(60, 0);
+}
+
+_Noreturn void process_exit(int code) {
+    for (;;) syscall1(231, code);
+}
+"#
+}
+
 fn compile_to_ir(name: &str) -> PathBuf {
     compile_source_to_ir(name, atomic_pthread_input(), &[])
 }
@@ -336,6 +359,32 @@ fn musl_libc_mode_wraps_pthread_implementation_and_weak_alias() {
     assert!(
         ir.contains("@rsched_clone"),
         "musl mode did not rewrite __clone calls:\n{ir}"
+    );
+}
+
+#[test]
+fn musl_libc_mode_routes_thread_exit_syscalls_through_rsched() {
+    let input = compile_source_to_ir("musl-exit", musl_thread_exit_input(), &["-O2"]);
+    let ir = run_pass(
+        "rsched-atomics<musl-libc>",
+        &input,
+        "musl-exit.instrumented.ll",
+    );
+
+    assert!(
+        ir.contains("call void @rsched_thread_exit()")
+            && ir.contains("call void @rsched_unmapself(")
+            && !ir.contains("call void @__unmapself("),
+        "musl mode did not route thread exits through rsched:\n{ir}"
+    );
+    assert_eq!(
+        ir.matches("asm sideeffect \"syscall\"").count(),
+        1,
+        "only the exit_group syscall should remain inline assembly:\n{ir}"
+    );
+    assert!(
+        ir.contains("i64 231"),
+        "musl mode rewrote the process exit:\n{ir}"
     );
 }
 

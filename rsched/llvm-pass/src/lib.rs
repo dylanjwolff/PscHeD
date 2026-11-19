@@ -1,8 +1,10 @@
 use llvm_plugin::inkwell::llvm_sys::core::{
-    LLVMAddAlias2, LLVMAliasGetAliasee, LLVMGetFirstGlobal, LLVMGetFirstGlobalAlias,
-    LLVMGetNamedGlobalAlias, LLVMGetNextGlobal, LLVMGetNextGlobalAlias, LLVMGetValueName2,
-    LLVMGlobalGetValueType, LLVMIsAGlobalAlias, LLVMSetLinkage, LLVMSetOperand, LLVMSetValueName2,
-    LLVMSetVisibility,
+    LLVMAddAlias2, LLVMAliasGetAliasee, LLVMConstIntGetZExtValue, LLVMGetCalledValue,
+    LLVMGetFirstGlobal, LLVMGetFirstGlobalAlias, LLVMGetInlineAsmAsmString,
+    LLVMGetNamedGlobalAlias, LLVMGetNextGlobal, LLVMGetNextGlobalAlias, LLVMGetOperand,
+    LLVMGetUndef, LLVMGetValueName2, LLVMGlobalGetValueType, LLVMInstructionEraseFromParent,
+    LLVMIsAConstantInt, LLVMIsAGlobalAlias, LLVMIsAInlineAsm, LLVMReplaceAllUsesWith,
+    LLVMSetLinkage, LLVMSetOperand, LLVMSetValueName2, LLVMSetVisibility, LLVMTypeOf,
 };
 use llvm_plugin::inkwell::llvm_sys::{LLVMLinkage, LLVMVisibility};
 use llvm_plugin::inkwell::module::Module;
@@ -90,6 +92,7 @@ impl LlvmModulePass for RschedAtomicsPass {
             changed |= wrap_libc_pthread_implementations(module, MUSL_REWRITES, true);
             changed |= wrap_libc_io_functions(module, MUSL_IO_REWRITES);
             changed |= rewrite_clone_calls(module);
+            changed |= rewrite_thread_exits(module);
         }
         if self.glibc_libc {
             changed |= materialize_glibc_hidden_declarations(module);
@@ -486,6 +489,82 @@ fn rewrite_clone_calls(module: &mut Module<'_>) -> bool {
         .get_function("rsched_clone")
         .unwrap_or_else(|| module.add_function("rsched_clone", old.get_type(), None));
     rewrite_function_uses(module, old, new)
+}
+
+/// x86_64 `SYS_exit`, which ends one thread (process exit uses exit_group).
+const SYS_EXIT: u64 = 60;
+
+/// Routes musl's thread-ending `exit` syscalls, which are inline assembly by
+/// the time the pass sees them, and its `__unmapself` (unmap the stack, then
+/// exit) through rsched, which ends a coroutine task instead of the kernel
+/// thread every task shares.
+fn rewrite_thread_exits(module: &mut Module<'_>) -> bool {
+    let mut changed = false;
+    if let Some(old) = module.get_function("__unmapself") {
+        let new = module
+            .get_function("rsched_unmapself")
+            .unwrap_or_else(|| module.add_function("rsched_unmapself", old.get_type(), None));
+        changed |= rewrite_function_uses(module, old, new);
+    }
+
+    let mut exits = Vec::new();
+    let mut function = module.get_first_function();
+    while let Some(func) = function {
+        let mut block = func.get_first_basic_block();
+        while let Some(bb) = block {
+            let mut inst = bb.get_first_instruction();
+            while let Some(i) = inst {
+                inst = i.get_next_instruction();
+                if i.get_opcode() == InstructionOpcode::Call && is_exit_syscall_asm(i) {
+                    exits.push(i);
+                }
+            }
+            block = bb.get_next_basic_block();
+        }
+        function = func.get_next_function();
+    }
+    if exits.is_empty() {
+        return changed;
+    }
+
+    let context = module.get_context();
+    let exit_type = context.void_type().fn_type(&[], false);
+    let thread_exit = module
+        .get_function("rsched_thread_exit")
+        .unwrap_or_else(|| module.add_function("rsched_thread_exit", exit_type, None));
+    let builder = context.create_builder();
+    for exit in exits {
+        builder.position_before(&exit);
+        builder
+            .build_call(thread_exit, &[], "")
+            .expect("call rsched_thread_exit");
+        unsafe {
+            let value = exit.as_value_ref();
+            LLVMReplaceAllUsesWith(value, LLVMGetUndef(LLVMTypeOf(value)));
+            LLVMInstructionEraseFromParent(value);
+        }
+    }
+    true
+}
+
+fn is_exit_syscall_asm(call: InstructionValue<'_>) -> bool {
+    unsafe {
+        let value = call.as_value_ref();
+        let callee = LLVMGetCalledValue(value);
+        if callee.is_null() || LLVMIsAInlineAsm(callee).is_null() {
+            return false;
+        }
+        let mut len = 0;
+        let text = LLVMGetInlineAsmAsmString(callee, &mut len);
+        let text = std::slice::from_raw_parts(text.cast::<u8>(), len);
+        if text.trim_ascii() != b"syscall" {
+            return false;
+        }
+        let number = LLVMGetOperand(value, 0);
+        !number.is_null()
+            && !LLVMIsAConstantInt(number).is_null()
+            && LLVMConstIntGetZExtValue(number) == SYS_EXIT
+    }
 }
 
 fn rewrite_clone_internal_calls(module: &mut Module<'_>) -> bool {
@@ -898,13 +977,6 @@ const MUSL_REWRITES: &[LibcRewrite] = &[
         diverges: false,
     },
     LibcRewrite {
-        implementation: "__pthread_exit",
-        public: "pthread_exit",
-        real: "__rsched_real_pthread_exit",
-        rsched: "rsched_pthread_exit",
-        diverges: true,
-    },
-    LibcRewrite {
         implementation: "pthread_mutexattr_init",
         public: "pthread_mutexattr_init",
         real: "__rsched_real_pthread_mutexattr_init",
@@ -1032,13 +1104,6 @@ const GLIBC_REWRITES: &[LibcRewrite] = &[
         real: "__rsched_real_pthread_join",
         rsched: "rsched_pthread_join",
         diverges: false,
-    },
-    LibcRewrite {
-        implementation: "__pthread_exit",
-        public: "pthread_exit",
-        real: "__rsched_real_pthread_exit",
-        rsched: "rsched_pthread_exit",
-        diverges: true,
     },
     LibcRewrite {
         implementation: "___pthread_mutexattr_init",
@@ -1194,7 +1259,6 @@ const GLIBC_PUBLIC_HIDDEN_NAMES: &[&str] = &["__GI___waitpid"];
 const GLIBC_HIDDEN_NAMES: &[&str] = &[
     "__GI___pthread_create",
     "__GI___pthread_join",
-    "__GI___pthread_exit",
     "__GI___pthread_mutexattr_init",
     "__GI___pthread_mutexattr_settype",
     "__GI___pthread_mutexattr_destroy",

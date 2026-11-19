@@ -79,18 +79,42 @@ fn build_preload_smoke(temp: &Path) -> PathBuf {
         &source,
         r#"
 #include <pthread.h>
+#include <sched.h>
+#include <stdio.h>
 
 static void *worker(void *arg)
 {
     return arg;
 }
 
+static void *exiting_worker(void *arg)
+{
+    pthread_exit(arg);
+}
+
 int main(void)
 {
     pthread_t thread;
-    if (pthread_create(&thread, 0, worker, 0) != 0)
+    void *result = 0, *exited = 0, *later = 0;
+    pthread_attr_t detached;
+    if (pthread_create(&thread, 0, worker, (void *)42) != 0 || pthread_join(thread, &result) != 0)
         return 1;
-    return pthread_join(thread, 0);
+    if (pthread_create(&thread, 0, exiting_worker, (void *)9) != 0 ||
+        pthread_join(thread, &exited) != 0)
+        return 2;
+    /* Detached threads exit unjoined; libc then reuses their descriptors. */
+    pthread_attr_init(&detached);
+    pthread_attr_setdetachstate(&detached, PTHREAD_CREATE_DETACHED);
+    for (int i = 0; i < 3; i++)
+        if (pthread_create(&thread, &detached, worker, 0) != 0)
+            return 3;
+    for (int i = 0; i < 10; i++)
+        sched_yield();
+    if (pthread_create(&thread, 0, worker, (void *)6) != 0 || pthread_join(thread, &later) != 0)
+        return 4;
+    /* Printing after the joins shows no worker's exit ended the process. */
+    printf("joined=%ld exited=%ld later=%ld\n", (long)result, (long)exited, (long)later);
+    return 0;
 }
 "#,
     )
@@ -107,9 +131,14 @@ fn ordinary_binary_runs_with_instrumented_glibc_preloaded() {
     let smoke = build_preload_smoke(&temp_dir());
     let mut command = Command::new(&glibc.preload_runner);
     command.arg(&smoke);
-    run(
+    let output = run(
         command,
         "run ordinary pthread binary with instrumented glibc preloaded",
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("joined=42 exited=9 later=6"),
+        "main did not continue after the worker exited:\n{stdout}"
     );
 }
 

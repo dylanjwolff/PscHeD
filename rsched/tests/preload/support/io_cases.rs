@@ -18,12 +18,6 @@ const SEEDS: u32 = 4;
 
 /// With `check_log`, each run must also log an I/O scheduling point.
 pub fn check_io_cases(compiler: &str, runner: &Path, temp: &Path, check_log: bool) {
-    if cfg!(feature = "coro") {
-        // Under the coro provider a libc thread's exit syscall ends the whole
-        // process, so main never prints its trace. That predates I/O support.
-        eprintln!("skipping I/O preload cases; coro thread exit ends the process");
-        return;
-    }
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("c-examples/io_cases.c");
     for &(case, scheduled) in CASES {
         let binary = temp.join(case);

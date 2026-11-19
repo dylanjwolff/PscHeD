@@ -1671,14 +1671,64 @@ pub unsafe extern "C" fn rsched_pthread_join(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_pthread_exit(retval: *mut libc::c_void) -> ! {
-    let _ = retval;
     ensure_init();
+    task_provider::coro_exit_current(Some(retval), None);
     do_thread_exit(my_pt());
     // Use the raw exit syscall to terminate this thread without going through
     // glibc's pthread_exit, which uses _Unwind_ForcedUnwind and conflicts with
     // Rust's own unwinding infrastructure.
-    libc::syscall(libc::SYS_exit, 0i64);
-    std::hint::unreachable_unchecked()
+    rsched_thread_exit()
+}
+
+// ── Thread exit syscalls ──────────────────────────────────────────────────
+
+/// Instrumented libcs call this in place of the `exit` syscall that ends a
+/// thread. Under the coro provider every task shares one kernel thread, so
+/// that syscall would end the process; the calling coroutine ends instead.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_thread_exit() -> ! {
+    task_provider::coro_exit_current(None, None);
+    // A thread that returned from rsched's trampoline is already gone from the
+    // scheduler; one that ended through libc's pthread_exit is not.
+    if INITED.load(Ordering::SeqCst) {
+        let caller = my_pt();
+        rsched_glock();
+        let registered = st().info.contains_key(&caller);
+        rsched_gunlock();
+        if registered {
+            do_thread_exit(caller);
+        }
+    }
+    loop {
+        seccomp::raw_syscall6(libc::SYS_exit, 0, 0, 0, 0, 0, 0);
+    }
+}
+
+/// musl's `__unmapself`: unmaps a detached thread's stack and exits without
+/// touching the stack again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_unmapself(base: *mut libc::c_void, size: usize) -> ! {
+    task_provider::coro_exit_current(None, Some((base as usize, size)));
+    rsched_raw_unmapself(base, size)
+}
+
+core::arch::global_asm!(
+    ".pushsection .text.rsched_raw_unmapself,\"ax\",@progbits",
+    ".hidden rsched_raw_unmapself",
+    ".type rsched_raw_unmapself,@function",
+    "rsched_raw_unmapself:",
+    "mov eax, {munmap}",
+    "syscall",
+    "xor edi, edi",
+    "mov eax, {exit}",
+    "syscall",
+    ".popsection",
+    munmap = const libc::SYS_munmap,
+    exit = const libc::SYS_exit,
+);
+
+unsafe extern "C" {
+    fn rsched_raw_unmapself(base: *mut libc::c_void, size: usize) -> !;
 }
 
 // ── rsched_pthread_mutex_lock ─────────────────────────────────────────────

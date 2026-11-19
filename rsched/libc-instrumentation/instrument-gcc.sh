@@ -238,7 +238,6 @@ fi
 
 add_rewrite "__pthread_create_2_1" "pthread_create" "__rsched_real_pthread_create" "rsched_pthread_create" "__GI___pthread_create"
 add_rewrite "___pthread_join" "pthread_join" "__rsched_real_pthread_join" "rsched_pthread_join" "__GI___pthread_join"
-add_rewrite "__pthread_exit" "pthread_exit" "__rsched_real_pthread_exit" "rsched_pthread_exit" "__GI___pthread_exit"
 add_rewrite "___pthread_mutexattr_init" "pthread_mutexattr_init" "__rsched_real_pthread_mutexattr_init" "rsched_pthread_mutexattr_init" "__GI___pthread_mutexattr_init"
 add_rewrite "___pthread_mutexattr_settype" "pthread_mutexattr_settype" "__rsched_real_pthread_mutexattr_settype" "rsched_pthread_mutexattr_settype" "__GI___pthread_mutexattr_settype"
 add_rewrite "___pthread_mutexattr_destroy" "pthread_mutexattr_destroy" "__rsched_real_pthread_mutexattr_destroy" "rsched_pthread_mutexattr_destroy" "__GI___pthread_mutexattr_destroy"
