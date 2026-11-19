@@ -944,7 +944,7 @@ unsafe fn envp_with_rsched_vars(
 
 fn process_log(args: core::fmt::Arguments<'_>) {
     if std::env::var("RSCHED_PROCESS_LOG").is_ok_and(|v| v == "1") {
-        eprintln!("[rsched-process] {args}");
+        crate::log_line!("[rsched-process] {args}");
     }
 }
 

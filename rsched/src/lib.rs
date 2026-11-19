@@ -576,6 +576,60 @@ fn my_pt() -> PthreadT {
     }
 }
 
+// ── Logging ───────────────────────────────────────────────────────────────
+
+/// Writes one log line to stderr with a single raw `write` syscall.
+///
+/// rsched logs from inside libc, including from constructors that run before
+/// the dynamic linker has set up thread-local storage. `eprintln!` takes
+/// std's stderr lock, which reads a Rust thread-local and faults there (and
+/// would re-enter libc's wrapped `write`). Lines longer than the buffer are
+/// truncated.
+pub(crate) fn write_log_line(args: core::fmt::Arguments<'_>) {
+    struct Buf {
+        bytes: [u8; 512],
+        len: usize,
+    }
+    impl core::fmt::Write for Buf {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            // Keep the last byte for the newline.
+            let room = self.bytes.len() - 1 - self.len;
+            let n = s.len().min(room);
+            self.bytes[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+            self.len += n;
+            Ok(())
+        }
+    }
+    let mut buf = Buf {
+        bytes: [0; 512],
+        len: 0,
+    };
+    let _ = core::fmt::Write::write_fmt(&mut buf, args);
+    buf.bytes[buf.len] = b'\n';
+    buf.len += 1;
+    unsafe {
+        seccomp::raw_syscall6(
+            libc::SYS_write,
+            2,
+            buf.bytes.as_ptr() as libc::c_long,
+            buf.len as libc::c_long,
+            0,
+            0,
+            0,
+        );
+    }
+}
+
+/// `eprintln!` replacement that is safe inside instrumented libc; see
+/// [`write_log_line`].
+#[macro_export]
+#[doc(hidden)]
+macro_rules! log_line {
+    ($($arg:tt)*) => {
+        $crate::write_log_line(format_args!($($arg)*))
+    };
+}
+
 // ── Return-address intrinsic ──────────────────────────────────────────────
 
 unsafe extern "llvm-intrinsic" {

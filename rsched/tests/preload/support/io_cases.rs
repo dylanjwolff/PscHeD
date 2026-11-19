@@ -16,8 +16,8 @@ const CASES: &[(&str, bool)] = &[
 ];
 const SEEDS: u32 = 4;
 
-/// With `check_log`, each run must also log an I/O scheduling point.
-pub fn check_io_cases(compiler: &str, runner: &Path, temp: &Path, check_log: bool) {
+/// Each scheduled run must also log an I/O scheduling point.
+pub fn check_io_cases(compiler: &str, runner: &Path, temp: &Path) {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("c-examples/io_cases.c");
     for &(case, scheduled) in CASES {
         let binary = temp.join(case);
@@ -37,10 +37,8 @@ pub fn check_io_cases(compiler: &str, runner: &Path, temp: &Path, check_log: boo
                 .args(["--kill-after=5s", "30s"])
                 .arg(runner)
                 .arg(&binary)
-                .env("RANDOM_SEED", seed.to_string());
-            if check_log {
-                command.env("RSCHED_LOG", "1");
-            }
+                .env("RANDOM_SEED", seed.to_string())
+                .env("RSCHED_LOG", "1");
             let output = command
                 .output()
                 .expect("run io case under instrumented libc");
@@ -54,7 +52,7 @@ pub fn check_io_cases(compiler: &str, runner: &Path, temp: &Path, check_log: boo
                 tail(&stderr),
             );
             assert!(
-                !check_log || !scheduled || stderr.contains("[rsched] Io("),
+                !scheduled || stderr.contains("[rsched] Io("),
                 "{case} with seed {seed} reached no I/O scheduling point\nstderr tail:\n{}",
                 tail(&stderr),
             );

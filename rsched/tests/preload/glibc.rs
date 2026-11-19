@@ -145,5 +145,5 @@ fn ordinary_binary_runs_with_instrumented_glibc_preloaded() {
 #[test]
 fn io_message_passing_with_instrumented_glibc_preloaded() {
     let glibc = build_instrumented_glibc();
-    io_cases::check_io_cases("gcc", &glibc.preload_runner, &temp_dir(), true);
+    io_cases::check_io_cases("gcc", &glibc.preload_runner, &temp_dir());
 }

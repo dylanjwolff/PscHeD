@@ -115,7 +115,5 @@ fn artifact_contains_application_instrumentation_plugin() {
 #[test]
 fn io_message_passing_with_instrumented_musl_preloaded() {
     let runner = artifact().runner.expect("musl artifact runner");
-    // RSCHED_LOG=1 crashes instrumented musl even without I/O, so this relies
-    // on the cases finishing: an unmodeled blocking read hangs.
-    io_cases::check_io_cases("musl-gcc", &runner, &temp_dir(), false);
+    io_cases::check_io_cases("musl-gcc", &runner, &temp_dir());
 }
