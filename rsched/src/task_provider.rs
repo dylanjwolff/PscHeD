@@ -443,7 +443,7 @@ mod coro {
         // is never resumed after that.
         (*ctx).exit.set(Some(ExitRequest { retval, unmap }));
         let task = (*ctx).task_key.get() as PthreadT;
-        if crate::st().info.contains_key(&task) {
+        if crate::st().threads.contains(&task) {
             crate::do_thread_exit(task);
         }
         loop {

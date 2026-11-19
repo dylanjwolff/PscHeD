@@ -1743,11 +1743,13 @@ pub unsafe extern "C" fn rsched_pthread_exit(retval: *mut libc::c_void) -> ! {
 pub unsafe extern "C" fn rsched_thread_exit() -> ! {
     task_provider::coro_exit_current(None, None);
     // A thread that returned from rsched's trampoline is already gone from the
-    // scheduler; one that ended through libc's pthread_exit is not.
+    // scheduler; one that ended through libc's pthread_exit is not. `info`
+    // keeps exited threads, so ask `threads`: exiting twice would wake a
+    // second task while the first still runs.
     if INITED.load(Ordering::SeqCst) {
         let caller = my_pt();
         rsched_glock();
-        let registered = st().info.contains_key(&caller);
+        let registered = st().threads.contains(&caller);
         rsched_gunlock();
         if registered {
             do_thread_exit(caller);
