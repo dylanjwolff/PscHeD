@@ -263,22 +263,42 @@ mod coro {
 
     static CORO_CONTEXT: AtomicPtr<CoroContext> = AtomicPtr::new(core::ptr::null_mut());
 
+    /// A task's request to end, recorded before it suspends for the last time.
+    #[derive(Clone, Copy)]
+    struct ExitRequest {
+        /// The `pthread_exit` value, when rsched ends the task itself rather
+        /// than libc's own exit path.
+        retval: Option<*mut libc::c_void>,
+        /// A mapping libc asked to unmap along with the exit (musl's detached
+        /// threads); unmapped once the task is off its stack.
+        unmap: Option<(usize, usize)>,
+    }
+
     struct CoroContext {
         yielder: Cell<*const corosensei::Yielder<(), CoroYield>>,
         fs_base: Cell<usize>,
         host_fs_base: Cell<usize>,
         task_key: Cell<usize>,
+        /// Whether libc created this task through `clone` and owns its thread
+        /// descriptor, so libc's own join must reap it.
+        libc_thread: bool,
+        /// `CLONE_CHILD_CLEARTID` address the kernel would clear on exit.
+        clear_tid: usize,
+        exit: Cell<Option<ExitRequest>>,
         #[cfg(feature = "instrumented-libc")]
         call_depth: Cell<u32>,
     }
 
     impl CoroContext {
-        fn new(fs_base: usize, task_key: usize) -> Self {
+        fn new(fs_base: usize, task_key: usize, libc_thread: bool, clear_tid: usize) -> Self {
             Self {
                 yielder: Cell::new(core::ptr::null()),
                 fs_base: Cell::new(fs_base),
                 host_fs_base: Cell::new(0),
                 task_key: Cell::new(task_key),
+                libc_thread,
+                clear_tid,
+                exit: Cell::new(None),
                 #[cfg(feature = "instrumented-libc")]
                 call_depth: Cell::new(0),
             }
@@ -348,14 +368,16 @@ mod coro {
         }
 
         fn libc(base: *mut libc::c_void, size: usize) -> Result<Self, libc::c_int> {
-            let base = base as usize;
-            let Some(limit) = base.checked_sub(size) else {
+            let Some(limit) = (base as usize).checked_sub(size) else {
                 return Err(libc::EINVAL);
             };
-            if size < corosensei::stack::MIN_STACK_SIZE
-                || !base.is_multiple_of(STACK_ALIGNMENT)
-                || !limit.is_multiple_of(STACK_ALIGNMENT)
-            {
+            // Callers may pass any stack (pthread_attr_setstack takes an
+            // unaligned one), so use the aligned region inside it.
+            let base = (base as usize) & !(STACK_ALIGNMENT - 1);
+            let Some(limit) = limit.checked_next_multiple_of(STACK_ALIGNMENT) else {
+                return Err(libc::EINVAL);
+            };
+            if base < limit || base - limit < corosensei::stack::MIN_STACK_SIZE {
                 return Err(libc::EINVAL);
             }
             let Some(base) = NonZeroUsize::new(base) else {
@@ -390,7 +412,76 @@ mod coro {
         coroutine: Coroutine<(), CoroYield, *mut libc::c_void, CoroStack>,
         context: Rc<CoroContext>,
         retval: Option<*mut libc::c_void>,
+        /// Set when the task ended through `rsched_pthread_exit`.
+        exit_retval: Option<*mut libc::c_void>,
         tid: libc::pid_t,
+    }
+
+    unsafe fn raw(nr: libc::c_long, a0: usize, a1: usize, a2: usize, a3: usize) -> libc::c_long {
+        crate::seccomp::raw_syscall6(
+            nr,
+            a0 as libc::c_long,
+            a1 as libc::c_long,
+            a2 as libc::c_long,
+            a3 as libc::c_long,
+            0,
+            0,
+        )
+    }
+
+    /// Ends the calling coroutine for good, the way a thread's exit syscall
+    /// ends a kernel thread. Returns only when the caller is not a coroutine.
+    pub(crate) unsafe fn exit_current(
+        retval: Option<*mut libc::c_void>,
+        unmap: Option<(usize, usize)>,
+    ) {
+        let ctx = CORO_CONTEXT.load(Ordering::Acquire);
+        if ctx.is_null() {
+            return;
+        }
+        // Record the exit first: do_thread_exit may switch away and this task
+        // is never resumed after that.
+        (*ctx).exit.set(Some(ExitRequest { retval, unmap }));
+        let task = (*ctx).task_key.get() as PthreadT;
+        if crate::st().threads.contains(&task) {
+            crate::do_thread_exit(task);
+        }
+        loop {
+            CoroTaskProvider::suspend_current();
+        }
+    }
+
+    /// Does what the kernel does when a thread exits, now that the task is
+    /// off its stack: clear and wake its clear-tid word, which libc's join
+    /// (and musl's thread-list lock) wait on, and undo the signal mask libc
+    /// blocked on the way out, since every task shares this kernel thread.
+    unsafe fn finish_exit(
+        context: &CoroContext,
+        request: ExitRequest,
+        host_sigmask: Option<libc::sigset_t>,
+    ) {
+        if context.clear_tid != 0 {
+            core::ptr::write_volatile(context.clear_tid as *mut libc::c_int, 0);
+            raw(
+                libc::SYS_futex,
+                context.clear_tid,
+                libc::FUTEX_WAKE as usize,
+                libc::c_int::MAX as usize,
+                0,
+            );
+        }
+        if let Some((base, size)) = request.unmap {
+            raw(libc::SYS_munmap, base, size, 0, 0);
+        }
+        if let Some(mask) = host_sigmask {
+            raw(
+                libc::SYS_rt_sigprocmask,
+                libc::SIG_SETMASK as usize,
+                &mask as *const _ as usize,
+                0,
+                8,
+            );
+        }
     }
 
     pub(crate) struct CoroTaskProvider {
@@ -420,6 +511,18 @@ mod coro {
                 *c.borrow_mut() = task_key as PthreadT;
                 previous
             });
+            // libc blocks every signal before a thread exits.
+            let host_sigmask = task.context.libc_thread.then(|| {
+                let mut mask = core::mem::zeroed::<libc::sigset_t>();
+                raw(
+                    libc::SYS_rt_sigprocmask,
+                    libc::SIG_BLOCK as usize,
+                    0,
+                    &mut mask as *mut _ as usize,
+                    8,
+                );
+                mask
+            });
             let host_fs_base = get_fs_base();
             task.context.host_fs_base.set(host_fs_base);
             set_fs_base(task.context.fs_base.get());
@@ -430,6 +533,11 @@ mod coro {
                 }
             }
             set_fs_base(host_fs_base);
+            if let Some(request) = task.context.exit.take() {
+                finish_exit(&task.context, request, host_sigmask);
+                task.exit_retval = request.retval;
+                task.retval = Some(request.retval.unwrap_or(core::ptr::null_mut()));
+            }
             #[cfg(not(feature = "instrumented-libc"))]
             crate::MY_PT.with(|c| *c.borrow_mut() = previous_pt);
             self.tasks.insert(task_key, task);
@@ -486,7 +594,7 @@ mod coro {
             // Directly wrapped pthread_create calls do not have a libc-created
             // TLS block. They remain on the host TLS while MY_PT supplies the
             // scheduler-controlled task identity.
-            let context = Rc::new(CoroContext::new(get_fs_base(), task_key));
+            let context = Rc::new(CoroContext::new(get_fs_base(), task_key, false, 0));
             let context_for_coro = context.clone();
             let coroutine =
                 Coroutine::with_stack(CoroStack::owned(2 * 1024 * 1024), move |yielder, ()| {
@@ -506,6 +614,7 @@ mod coro {
                     coroutine,
                     context,
                     retval: None,
+                    exit_retval: None,
                     tid,
                 },
             );
@@ -517,11 +626,11 @@ mod coro {
                 func,
                 stack,
                 stack_size,
-                flags: _flags,
+                flags,
                 arg,
                 ptid,
                 tls,
-                ctid: _ctid,
+                ctid,
             } = args;
             if tls.is_null() {
                 return Err(libc::EINVAL);
@@ -534,7 +643,12 @@ mod coro {
             if !ptid.is_null() {
                 *ptid = tid;
             }
-            let context = Rc::new(CoroContext::new(tls as usize, task_key));
+            let clear_tid = if flags & libc::CLONE_CHILD_CLEARTID != 0 {
+                ctid as usize
+            } else {
+                0
+            };
+            let context = Rc::new(CoroContext::new(tls as usize, task_key, true, clear_tid));
             let context_for_coro = context.clone();
 
             let coroutine_stack = if stack_size == 0 {
@@ -561,6 +675,7 @@ mod coro {
                     coroutine,
                     context,
                     retval: None,
+                    exit_retval: None,
                     tid,
                 },
             );
@@ -572,7 +687,12 @@ mod coro {
                 return;
             };
             task.context.task_key.set(pthread as usize);
-            self.tasks.insert(pthread as usize, task);
+            // A detached thread that exited is never joined, and libc reuses
+            // its descriptor. Its coroutine stays suspended, and dropping a
+            // suspended coroutine would unwind its stack.
+            if let Some(stale) = self.tasks.insert(pthread as usize, task) {
+                self.finish_task(stale);
+            }
             if self.requested_next == Some(task_key) {
                 self.requested_next = Some(pthread as usize);
             }
@@ -582,6 +702,12 @@ mod coro {
             let Some(task) = self.tasks.remove(&(thread as usize)) else {
                 return crate::with_internal_depth(|| (crate::rpt().join)(thread, retval));
             };
+            if task.context.libc_thread && task.exit_retval.is_none() {
+                // libc ran its own exit path, so its join collects the result
+                // and frees the descriptor; the clear-tid word is already 0.
+                self.finish_task(task);
+                return crate::with_internal_depth(|| (crate::rpt().join)(thread, retval));
+            }
             if !retval.is_null() {
                 *retval = task.retval.unwrap_or(core::ptr::null_mut());
             }
@@ -660,6 +786,7 @@ pub(crate) use coro::{
 };
 
 pub(crate) use coro::CoroTaskProvider;
+pub(crate) use coro::exit_current as coro_exit_current;
 
 static PROCESS_SHARED: AtomicPtr<ProcessShared> = AtomicPtr::new(core::ptr::null_mut());
 static PROCESS_SLOT: AtomicI32 = AtomicI32::new(-1);
@@ -817,7 +944,7 @@ unsafe fn envp_with_rsched_vars(
 
 fn process_log(args: core::fmt::Arguments<'_>) {
     if std::env::var("RSCHED_PROCESS_LOG").is_ok_and(|v| v == "1") {
-        eprintln!("[rsched-process] {args}");
+        crate::log_line!("[rsched-process] {args}");
     }
 }
 

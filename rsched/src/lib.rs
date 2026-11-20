@@ -22,6 +22,7 @@ mod event;
 pub use event::{AccessKind, Event, EventKind};
 
 mod fuzzing;
+mod io;
 mod seccomp;
 mod task_provider;
 mod tsan;
@@ -575,6 +576,60 @@ fn my_pt() -> PthreadT {
     }
 }
 
+// ── Logging ───────────────────────────────────────────────────────────────
+
+/// Writes one log line to stderr with a single raw `write` syscall.
+///
+/// rsched logs from inside libc, including from constructors that run before
+/// the dynamic linker has set up thread-local storage. `eprintln!` takes
+/// std's stderr lock, which reads a Rust thread-local and faults there (and
+/// would re-enter libc's wrapped `write`). Lines longer than the buffer are
+/// truncated.
+pub(crate) fn write_log_line(args: core::fmt::Arguments<'_>) {
+    struct Buf {
+        bytes: [u8; 512],
+        len: usize,
+    }
+    impl core::fmt::Write for Buf {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            // Keep the last byte for the newline.
+            let room = self.bytes.len() - 1 - self.len;
+            let n = s.len().min(room);
+            self.bytes[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+            self.len += n;
+            Ok(())
+        }
+    }
+    let mut buf = Buf {
+        bytes: [0; 512],
+        len: 0,
+    };
+    let _ = core::fmt::Write::write_fmt(&mut buf, args);
+    buf.bytes[buf.len] = b'\n';
+    buf.len += 1;
+    unsafe {
+        seccomp::raw_syscall6(
+            libc::SYS_write,
+            2,
+            buf.bytes.as_ptr() as libc::c_long,
+            buf.len as libc::c_long,
+            0,
+            0,
+            0,
+        );
+    }
+}
+
+/// `eprintln!` replacement that is safe inside instrumented libc; see
+/// [`write_log_line`].
+#[macro_export]
+#[doc(hidden)]
+macro_rules! log_line {
+    ($($arg:tt)*) => {
+        $crate::write_log_line(format_args!($($arg)*))
+    };
+}
+
 // ── Return-address intrinsic ──────────────────────────────────────────────
 
 unsafe extern "llvm-intrinsic" {
@@ -798,7 +853,17 @@ pub unsafe extern "C" fn rsched_process_exit_status(status: libc::c_int) -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_fork() -> libc::pid_t {
     ensure_init();
-    st().task_provider.fork()
+    // The instrumented-libc depth is keyed by thread id, so the child starts
+    // at 0; give it the caller's depth so the libc fork wrapper's exit does
+    // not underflow it.
+    #[cfg(feature = "instrumented-libc")]
+    let depth = instrumented_depth_load();
+    let pid = st().task_provider.fork();
+    #[cfg(feature = "instrumented-libc")]
+    if pid == 0 {
+        instrumented_depth_store(depth);
+    }
+    pid
 }
 
 #[unsafe(no_mangle)]
@@ -815,8 +880,46 @@ pub unsafe extern "C" fn rsched_syscall(
         ensure_init();
         return st().task_provider.clone_process(a0, a1, a2, a3, a4).into();
     }
+    if number == libc::SYS_fork {
+        return rsched_fork().into();
+    }
+    if io::is_modeled(number) {
+        return io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5]);
+    }
 
     libc::syscall(number, a0, a1, a2, a3, a4, a5)
+}
+
+/// Runs a process-creating syscall instruction reached outside rsched, such
+/// as a raw `fork` in the program seen by the seccomp trap or the e9patch
+/// hook, as a scheduled process clone. Stores the raw syscall result (a pid,
+/// 0 in the child, or -errno) in `ret` and returns true; returns false when
+/// the instruction should run unchanged, including thread-style clones.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_process_syscall(
+    number: libc::c_long,
+    args: *const libc::c_long,
+    ret: *mut libc::c_long,
+) -> bool {
+    if is_in_rsched() {
+        return false;
+    }
+    let args = std::slice::from_raw_parts(args, 5);
+    let pid = match number {
+        libc::SYS_fork => rsched_fork(),
+        libc::SYS_clone if args[0] & libc::c_long::from(libc::CLONE_VM) == 0 => {
+            ensure_init();
+            st().task_provider
+                .clone_process(args[0], args[1], args[2], args[3], args[4])
+        }
+        _ => return false,
+    };
+    *ret = if pid < 0 {
+        -libc::c_long::from(*libc::__errno_location())
+    } else {
+        pid.into()
+    };
+    true
 }
 
 #[cfg(feature = "instrumented-libc")]
@@ -834,6 +937,8 @@ pub unsafe extern "C" fn rsched_libc_syscall(
     let outermost = rsched_try_enter();
     let result = if outermost && number == libc::SYS_clone {
         rsched_syscall(number, a0, a1, a2, a3, a4, a5)
+    } else if outermost && io::is_modeled(number) {
+        io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5])
     } else {
         rsched_raw_syscall(number, a0, a1, a2, a3, a4, a5)
     };
@@ -1161,6 +1266,24 @@ unsafe fn with_internal_depth<T>(f: impl FnOnce() -> T) -> T {
     let r = f();
     depth_exit();
     r
+}
+
+/// Runs a scheduling point reached straight from application code, such as
+/// an atomic or e9patch hook. With instrumented libc, rsched's own libc
+/// calls inside it, such as RSCHED_LOG's writes, must reach the real
+/// implementations instead of re-entering rsched through its wrappers. That
+/// depth is tracked per task. Source integration has no wrappers, and its
+/// depth is per OS thread, which coroutine tasks share, so it is left alone.
+#[inline]
+unsafe fn with_libc_wrappers_bypassed<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "instrumented-libc")]
+    {
+        with_internal_depth(f)
+    }
+    #[cfg(not(feature = "instrumented-libc"))]
+    {
+        f()
+    }
 }
 
 unsafe fn st() -> &'static mut State {
@@ -1647,14 +1770,66 @@ pub unsafe extern "C" fn rsched_pthread_join(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_pthread_exit(retval: *mut libc::c_void) -> ! {
-    let _ = retval;
     ensure_init();
+    task_provider::coro_exit_current(Some(retval), None);
     do_thread_exit(my_pt());
     // Use the raw exit syscall to terminate this thread without going through
     // glibc's pthread_exit, which uses _Unwind_ForcedUnwind and conflicts with
     // Rust's own unwinding infrastructure.
-    libc::syscall(libc::SYS_exit, 0i64);
-    std::hint::unreachable_unchecked()
+    rsched_thread_exit()
+}
+
+// ── Thread exit syscalls ──────────────────────────────────────────────────
+
+/// Instrumented libcs call this in place of the `exit` syscall that ends a
+/// thread. Under the coro provider every task shares one kernel thread, so
+/// that syscall would end the process; the calling coroutine ends instead.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_thread_exit() -> ! {
+    task_provider::coro_exit_current(None, None);
+    // A thread that returned from rsched's trampoline is already gone from the
+    // scheduler; one that ended through libc's pthread_exit is not. `info`
+    // keeps exited threads, so ask `threads`: exiting twice would wake a
+    // second task while the first still runs.
+    if INITED.load(Ordering::SeqCst) {
+        let caller = my_pt();
+        rsched_glock();
+        let registered = st().threads.contains(&caller);
+        rsched_gunlock();
+        if registered {
+            do_thread_exit(caller);
+        }
+    }
+    loop {
+        seccomp::raw_syscall6(libc::SYS_exit, 0, 0, 0, 0, 0, 0);
+    }
+}
+
+/// musl's `__unmapself`: unmaps a detached thread's stack and exits without
+/// touching the stack again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_unmapself(base: *mut libc::c_void, size: usize) -> ! {
+    task_provider::coro_exit_current(None, Some((base as usize, size)));
+    rsched_raw_unmapself(base, size)
+}
+
+core::arch::global_asm!(
+    ".pushsection .text.rsched_raw_unmapself,\"ax\",@progbits",
+    ".hidden rsched_raw_unmapself",
+    ".type rsched_raw_unmapself,@function",
+    "rsched_raw_unmapself:",
+    "mov eax, {munmap}",
+    "syscall",
+    "xor edi, edi",
+    "mov eax, {exit}",
+    "syscall",
+    ".popsection",
+    munmap = const libc::SYS_munmap,
+    exit = const libc::SYS_exit,
+);
+
+unsafe extern "C" {
+    fn rsched_raw_unmapself(base: *mut libc::c_void, size: usize) -> !;
 }
 
 // ── rsched_pthread_mutex_lock ─────────────────────────────────────────────
@@ -1974,22 +2149,24 @@ unsafe fn schedule_memop(
         return;
     }
     ensure_init();
-    rsched_glock();
-    let caller = my_pt();
-    st().set_event(
-        caller,
-        Event {
-            instr_addr,
-            kind: EventKind::MemOp {
-                mem_addr,
-                size,
-                access,
+    with_libc_wrappers_bypassed(|| {
+        rsched_glock();
+        let caller = my_pt();
+        st().set_event(
+            caller,
+            Event {
+                instr_addr,
+                kind: EventKind::MemOp {
+                    mem_addr,
+                    size,
+                    access,
+                },
             },
-        },
-    );
-    st().context_switch(caller);
-    st().clear_event(caller);
-    rsched_gunlock();
+        );
+        st().context_switch(caller);
+        st().clear_event(caller);
+        rsched_gunlock();
+    });
 }
 
 /// Generic hook used by the LLVM pass. It creates a scheduling point for an

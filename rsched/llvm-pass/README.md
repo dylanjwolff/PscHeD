@@ -28,8 +28,14 @@ void rsched_atomic_instrument(const void *ptr, size_t size, unsigned access);
 Pass names:
 
 - `rsched-atomics`: instrument LLVM atomic instructions only.
-- `rsched-atomics<direct-pthread>`: also rewrite known pthread calls to the
-  `rsched_pthread_*` symbols for static/direct rsched linking.
+- `rsched-atomics<direct-pthread>`: also rewrite known pthread, file, and
+  socket calls (`read`, `send`, `accept`, `poll`, and so on) to their
+  `rsched_*` symbols for static/direct rsched linking.
+- `rsched-atomics<musl-libc>` and `rsched-atomics<glibc-libc>`: used when
+  building the instrumented libcs. They wrap libc's own pthread, file, and
+  socket implementations. In musl mode the pass also routes the `exit` syscall
+  that ends a thread, and `__unmapself`, through `rsched_thread_exit` and
+  `rsched_unmapself`, so the coro provider ends only the calling task.
 
 The pass instruments LLVM `load atomic`, `store atomic`, `atomicrmw`, and
 `cmpxchg` instructions. It does not replace the atomic instruction; it inserts a

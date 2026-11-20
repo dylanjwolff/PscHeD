@@ -1,8 +1,11 @@
 #pragma once
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -51,6 +54,25 @@ int rsched_execv(const char *, char *const []);
 int rsched_execve(const char *, char *const [], char *const []);
 pid_t rsched_waitpid(pid_t, int *, int);
 
+/* File and socket operations.  Each is a scheduling point; on a blocking
+   descriptor, the calling task yields until the operation can proceed. */
+ssize_t rsched_read(int, void *, size_t);
+ssize_t rsched_write(int, const void *, size_t);
+ssize_t rsched_readv(int, const struct iovec *, int);
+ssize_t rsched_writev(int, const struct iovec *, int);
+ssize_t rsched_recv(int, void *, size_t, int);
+ssize_t rsched_recvfrom(int, void *, size_t, int, struct sockaddr *,
+                        socklen_t *);
+ssize_t rsched_recvmsg(int, struct msghdr *, int);
+ssize_t rsched_send(int, const void *, size_t, int);
+ssize_t rsched_sendto(int, const void *, size_t, int,
+                      const struct sockaddr *, socklen_t);
+ssize_t rsched_sendmsg(int, const struct msghdr *, int);
+int rsched_accept(int, struct sockaddr *, socklen_t *);
+int rsched_accept4(int, struct sockaddr *, socklen_t *, int);
+int rsched_connect(int, const struct sockaddr *, socklen_t);
+int rsched_poll(struct pollfd *, nfds_t, int);
+
 /* Redirect standard pthread / sched calls to the scheduler wrappers so that
    existing C programs need only add `#include "rsched.h"`. */
 #define pthread_create          rsched_pthread_create
@@ -70,6 +92,20 @@ pid_t rsched_waitpid(pid_t, int *, int);
 #define execv                   rsched_execv
 #define execve                  rsched_execve
 #define waitpid                 rsched_waitpid
+#define read                    rsched_read
+#define write                   rsched_write
+#define readv                   rsched_readv
+#define writev                  rsched_writev
+#define recv                    rsched_recv
+#define recvfrom                rsched_recvfrom
+#define recvmsg                 rsched_recvmsg
+#define send                    rsched_send
+#define sendto                  rsched_sendto
+#define sendmsg                 rsched_sendmsg
+#define accept                  rsched_accept
+#define accept4                 rsched_accept4
+#define connect                 rsched_connect
+#define poll                    rsched_poll
 
 #ifdef __cplusplus
 }

@@ -1,8 +1,10 @@
 use llvm_plugin::inkwell::llvm_sys::core::{
-    LLVMAddAlias2, LLVMAliasGetAliasee, LLVMGetFirstGlobal, LLVMGetFirstGlobalAlias,
-    LLVMGetNamedGlobalAlias, LLVMGetNextGlobal, LLVMGetNextGlobalAlias, LLVMGetValueName2,
-    LLVMGlobalGetValueType, LLVMIsAGlobalAlias, LLVMSetLinkage, LLVMSetOperand, LLVMSetValueName2,
-    LLVMSetVisibility,
+    LLVMAddAlias2, LLVMAliasGetAliasee, LLVMConstIntGetZExtValue, LLVMGetCalledValue,
+    LLVMGetFirstGlobal, LLVMGetFirstGlobalAlias, LLVMGetInlineAsmAsmString,
+    LLVMGetNamedGlobalAlias, LLVMGetNextGlobal, LLVMGetNextGlobalAlias, LLVMGetOperand,
+    LLVMGetUndef, LLVMGetValueName2, LLVMGlobalGetValueType, LLVMInstructionEraseFromParent,
+    LLVMIsAConstantInt, LLVMIsAGlobalAlias, LLVMIsAInlineAsm, LLVMReplaceAllUsesWith,
+    LLVMSetLinkage, LLVMSetOperand, LLVMSetValueName2, LLVMSetVisibility, LLVMTypeOf,
 };
 use llvm_plugin::inkwell::llvm_sys::{LLVMLinkage, LLVMVisibility};
 use llvm_plugin::inkwell::module::Module;
@@ -88,7 +90,9 @@ impl LlvmModulePass for RschedAtomicsPass {
         if self.musl_libc {
             changed |= redirect_syscall_definition(module);
             changed |= wrap_libc_pthread_implementations(module, MUSL_REWRITES, true);
+            changed |= wrap_libc_io_functions(module, MUSL_IO_REWRITES);
             changed |= rewrite_clone_calls(module);
+            changed |= rewrite_thread_exits(module);
         }
         if self.glibc_libc {
             changed |= materialize_glibc_hidden_declarations(module);
@@ -96,6 +100,7 @@ impl LlvmModulePass for RschedAtomicsPass {
             changed |= redirect_syscall_definition(module);
             changed |= wrap_libc_pthread_implementations(module, GLIBC_REWRITES, false);
             changed |= wrap_libc_pthread_implementations(module, GLIBC_PUBLIC_REWRITES, true);
+            changed |= wrap_libc_io_functions(module, GLIBC_IO_REWRITES);
             changed |=
                 wrap_glibc_hidden_implementations(module, GLIBC_REWRITES, GLIBC_HIDDEN_NAMES);
             changed |= wrap_glibc_hidden_implementations(
@@ -486,6 +491,82 @@ fn rewrite_clone_calls(module: &mut Module<'_>) -> bool {
     rewrite_function_uses(module, old, new)
 }
 
+/// x86_64 `SYS_exit`, which ends one thread (process exit uses exit_group).
+const SYS_EXIT: u64 = 60;
+
+/// Routes musl's thread-ending `exit` syscalls, which are inline assembly by
+/// the time the pass sees them, and its `__unmapself` (unmap the stack, then
+/// exit) through rsched, which ends a coroutine task instead of the kernel
+/// thread every task shares.
+fn rewrite_thread_exits(module: &mut Module<'_>) -> bool {
+    let mut changed = false;
+    if let Some(old) = module.get_function("__unmapself") {
+        let new = module
+            .get_function("rsched_unmapself")
+            .unwrap_or_else(|| module.add_function("rsched_unmapself", old.get_type(), None));
+        changed |= rewrite_function_uses(module, old, new);
+    }
+
+    let mut exits = Vec::new();
+    let mut function = module.get_first_function();
+    while let Some(func) = function {
+        let mut block = func.get_first_basic_block();
+        while let Some(bb) = block {
+            let mut inst = bb.get_first_instruction();
+            while let Some(i) = inst {
+                inst = i.get_next_instruction();
+                if i.get_opcode() == InstructionOpcode::Call && is_exit_syscall_asm(i) {
+                    exits.push(i);
+                }
+            }
+            block = bb.get_next_basic_block();
+        }
+        function = func.get_next_function();
+    }
+    if exits.is_empty() {
+        return changed;
+    }
+
+    let context = module.get_context();
+    let exit_type = context.void_type().fn_type(&[], false);
+    let thread_exit = module
+        .get_function("rsched_thread_exit")
+        .unwrap_or_else(|| module.add_function("rsched_thread_exit", exit_type, None));
+    let builder = context.create_builder();
+    for exit in exits {
+        builder.position_before(&exit);
+        builder
+            .build_call(thread_exit, &[], "")
+            .expect("call rsched_thread_exit");
+        unsafe {
+            let value = exit.as_value_ref();
+            LLVMReplaceAllUsesWith(value, LLVMGetUndef(LLVMTypeOf(value)));
+            LLVMInstructionEraseFromParent(value);
+        }
+    }
+    true
+}
+
+fn is_exit_syscall_asm(call: InstructionValue<'_>) -> bool {
+    unsafe {
+        let value = call.as_value_ref();
+        let callee = LLVMGetCalledValue(value);
+        if callee.is_null() || LLVMIsAInlineAsm(callee).is_null() {
+            return false;
+        }
+        let mut len = 0;
+        let text = LLVMGetInlineAsmAsmString(callee, &mut len);
+        let text = std::slice::from_raw_parts(text.cast::<u8>(), len);
+        if text.trim_ascii() != b"syscall" {
+            return false;
+        }
+        let number = LLVMGetOperand(value, 0);
+        !number.is_null()
+            && !LLVMIsAConstantInt(number).is_null()
+            && LLVMConstIntGetZExtValue(number) == SYS_EXIT
+    }
+}
+
 fn rewrite_clone_internal_calls(module: &mut Module<'_>) -> bool {
     let Some(old) = module.get_function("__clone_internal") else {
         return false;
@@ -529,6 +610,26 @@ const PTHREAD_REWRITES: &[(&str, &str)] = &[
     ("pthread_barrier_init", "rsched_pthread_barrier_init"),
     ("pthread_barrier_wait", "rsched_pthread_barrier_wait"),
     ("sched_yield", "rsched_sched_yield"),
+    ("fork", "rsched_fork"),
+    ("waitpid", "rsched_waitpid"),
+    ("execv", "rsched_execv"),
+    ("execve", "rsched_execve"),
+    ("_exit", "rsched_process_exit_status"),
+    ("syscall", "rsched_syscall"),
+    ("read", "rsched_read"),
+    ("write", "rsched_write"),
+    ("readv", "rsched_readv"),
+    ("writev", "rsched_writev"),
+    ("recv", "rsched_recv"),
+    ("recvfrom", "rsched_recvfrom"),
+    ("recvmsg", "rsched_recvmsg"),
+    ("send", "rsched_send"),
+    ("sendto", "rsched_sendto"),
+    ("sendmsg", "rsched_sendmsg"),
+    ("accept", "rsched_accept"),
+    ("accept4", "rsched_accept4"),
+    ("connect", "rsched_connect"),
+    ("poll", "rsched_poll"),
 ];
 
 #[derive(Clone, Copy)]
@@ -562,13 +663,65 @@ fn wrap_libc_pthread_implementations(
         let real = module
             .get_function(rewrite.real)
             .expect("renamed musl implementation");
-        build_guarded_wrapper(module, rewrite.implementation, real, rewrite, true);
+        build_guarded_wrapper(
+            module,
+            rewrite.implementation,
+            real,
+            rewrite.rsched,
+            rewrite.diverges,
+            true,
+        );
         if wrap_public && rewrite.public != rewrite.implementation {
-            build_guarded_wrapper(module, rewrite.public, real, rewrite, true);
+            build_guarded_wrapper(
+                module,
+                rewrite.public,
+                real,
+                rewrite.rsched,
+                rewrite.diverges,
+                true,
+            );
         }
         changed = true;
     }
     changed
+}
+
+/// File and socket operations: `(implementation, public, rsched)`.
+type IoRewrite = (&'static str, &'static str, &'static str);
+
+/// Wraps only the public I/O symbol that applications call. libc's own
+/// callers keep the implementation, and the wrapper does not activate rsched:
+/// musl's dynamic loader, which is part of libc, reads files before any task
+/// exists.
+fn wrap_libc_io_functions(module: &mut Module<'_>, rewrites: &[IoRewrite]) -> bool {
+    let mut changed = false;
+    for &(implementation, public, rsched) in rewrites {
+        let Some(real) = defined_function(module, implementation) else {
+            continue;
+        };
+        if implementation == public {
+            set_value_name(real.as_value_ref(), &format!("__rsched_real_{public}"));
+        } else {
+            rename_global_alias(module, public);
+        }
+        build_guarded_wrapper(module, public, real, rsched, false, false);
+        changed = true;
+    }
+    changed
+}
+
+/// The function defined under `name`, following an alias to its target.
+fn defined_function<'ctx>(module: &Module<'ctx>, name: &str) -> Option<FunctionValue<'ctx>> {
+    let function = module.get_function(name).or_else(|| {
+        let alias = unsafe {
+            LLVMGetNamedGlobalAlias(module.as_mut_ptr(), name.as_ptr().cast(), name.len())
+        };
+        if alias.is_null() {
+            return None;
+        }
+        unsafe { FunctionValue::new(LLVMAliasGetAliasee(alias)) }
+    })?;
+    (function.count_basic_blocks() > 0).then_some(function)
 }
 
 fn wrap_glibc_hidden_implementations(
@@ -582,7 +735,14 @@ fn wrap_glibc_hidden_implementations(
             continue;
         };
         rename_global_alias(module, hidden);
-        build_guarded_wrapper(module, hidden, real, rewrite, false);
+        build_guarded_wrapper(
+            module,
+            hidden,
+            real,
+            rewrite.rsched,
+            rewrite.diverges,
+            false,
+        );
         changed = true;
     }
     changed
@@ -720,15 +880,16 @@ fn build_guarded_wrapper<'ctx>(
     module: &mut Module<'ctx>,
     name: &str,
     real: FunctionValue<'ctx>,
-    rewrite: &LibcRewrite,
+    rsched_name: &str,
+    diverges: bool,
     activate_hooks: bool,
 ) {
     let context = module.get_context();
     let function_type = real.get_type();
     let wrapper = module.add_function(name, function_type, Some(real.get_linkage()));
     let rsched = module
-        .get_function(rewrite.rsched)
-        .unwrap_or_else(|| module.add_function(rewrite.rsched, function_type, None));
+        .get_function(rsched_name)
+        .unwrap_or_else(|| module.add_function(rsched_name, function_type, None));
     let try_enter_type = context.bool_type().fn_type(&[], false);
     let try_enter = module
         .get_function("rsched_try_enter")
@@ -770,8 +931,8 @@ fn build_guarded_wrapper<'ctx>(
         .into_iter()
         .map(BasicMetadataValueEnum::from)
         .collect();
-    build_guarded_call(&builder, outer, rsched, exit, &args, rewrite.diverges);
-    build_guarded_call(&builder, nested, real, exit, &args, rewrite.diverges);
+    build_guarded_call(&builder, outer, rsched, exit, &args, diverges);
+    build_guarded_call(&builder, nested, real, exit, &args, diverges);
 }
 
 fn build_guarded_call<'ctx>(
@@ -820,13 +981,6 @@ const MUSL_REWRITES: &[LibcRewrite] = &[
         real: "__rsched_real_pthread_join",
         rsched: "rsched_pthread_join",
         diverges: false,
-    },
-    LibcRewrite {
-        implementation: "__pthread_exit",
-        public: "pthread_exit",
-        real: "__rsched_real_pthread_exit",
-        rsched: "rsched_pthread_exit",
-        diverges: true,
     },
     LibcRewrite {
         implementation: "pthread_mutexattr_init",
@@ -934,9 +1088,25 @@ const MUSL_REWRITES: &[LibcRewrite] = &[
         diverges: false,
     },
     LibcRewrite {
+        implementation: "fork",
+        public: "fork",
+        real: "__rsched_real_fork",
+        rsched: "rsched_fork",
+        diverges: false,
+    },
+    LibcRewrite {
         implementation: "_exit",
         public: "_exit",
         real: "__rsched_real_process_exit",
+        rsched: "rsched_process_exit_status",
+        diverges: true,
+    },
+    // exit() ends in _Exit, not _exit, so a forked child that calls exit()
+    // must hand the schedule back here too.
+    LibcRewrite {
+        implementation: "_Exit",
+        public: "_Exit",
+        real: "__rsched_real_Exit",
         rsched: "rsched_process_exit_status",
         diverges: true,
     },
@@ -956,13 +1126,6 @@ const GLIBC_REWRITES: &[LibcRewrite] = &[
         real: "__rsched_real_pthread_join",
         rsched: "rsched_pthread_join",
         diverges: false,
-    },
-    LibcRewrite {
-        implementation: "__pthread_exit",
-        public: "pthread_exit",
-        real: "__rsched_real_pthread_exit",
-        rsched: "rsched_pthread_exit",
-        diverges: true,
     },
     LibcRewrite {
         implementation: "___pthread_mutexattr_init",
@@ -1071,20 +1234,62 @@ const GLIBC_REWRITES: &[LibcRewrite] = &[
     },
 ];
 
-const GLIBC_PUBLIC_REWRITES: &[LibcRewrite] = &[LibcRewrite {
-    implementation: "__waitpid",
-    public: "waitpid",
-    real: "__rsched_real_waitpid",
-    rsched: "rsched_waitpid",
-    diverges: false,
-}];
+const MUSL_IO_REWRITES: &[IoRewrite] = &[
+    ("read", "read", "rsched_read"),
+    ("write", "write", "rsched_write"),
+    ("readv", "readv", "rsched_readv"),
+    ("writev", "writev", "rsched_writev"),
+    ("recv", "recv", "rsched_recv"),
+    ("recvfrom", "recvfrom", "rsched_recvfrom"),
+    ("recvmsg", "recvmsg", "rsched_recvmsg"),
+    ("send", "send", "rsched_send"),
+    ("sendto", "sendto", "rsched_sendto"),
+    ("sendmsg", "sendmsg", "rsched_sendmsg"),
+    ("accept", "accept", "rsched_accept"),
+    ("accept4", "accept4", "rsched_accept4"),
+    ("connect", "connect", "rsched_connect"),
+    ("poll", "poll", "rsched_poll"),
+];
 
-const GLIBC_PUBLIC_HIDDEN_NAMES: &[&str] = &["__GI___waitpid"];
+const GLIBC_IO_REWRITES: &[IoRewrite] = &[
+    ("__libc_read", "read", "rsched_read"),
+    ("__libc_write", "write", "rsched_write"),
+    ("__readv", "readv", "rsched_readv"),
+    ("__writev", "writev", "rsched_writev"),
+    ("__libc_recv", "recv", "rsched_recv"),
+    ("__libc_recvfrom", "recvfrom", "rsched_recvfrom"),
+    ("__libc_recvmsg", "recvmsg", "rsched_recvmsg"),
+    ("__libc_send", "send", "rsched_send"),
+    ("__libc_sendto", "sendto", "rsched_sendto"),
+    ("__libc_sendmsg", "sendmsg", "rsched_sendmsg"),
+    ("__libc_accept", "accept", "rsched_accept"),
+    ("accept4", "accept4", "rsched_accept4"),
+    ("__libc_connect", "connect", "rsched_connect"),
+    ("__poll", "poll", "rsched_poll"),
+];
+
+const GLIBC_PUBLIC_REWRITES: &[LibcRewrite] = &[
+    LibcRewrite {
+        implementation: "__waitpid",
+        public: "waitpid",
+        real: "__rsched_real_waitpid",
+        rsched: "rsched_waitpid",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__libc_fork",
+        public: "fork",
+        real: "__rsched_real_fork",
+        rsched: "rsched_fork",
+        diverges: false,
+    },
+];
+
+const GLIBC_PUBLIC_HIDDEN_NAMES: &[&str] = &["__GI___waitpid", "__GI___fork"];
 
 const GLIBC_HIDDEN_NAMES: &[&str] = &[
     "__GI___pthread_create",
     "__GI___pthread_join",
-    "__GI___pthread_exit",
     "__GI___pthread_mutexattr_init",
     "__GI___pthread_mutexattr_settype",
     "__GI___pthread_mutexattr_destroy",

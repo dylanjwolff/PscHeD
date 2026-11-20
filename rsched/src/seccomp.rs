@@ -77,16 +77,36 @@ extern "C" fn sigsys_handler(
         let regs = &mut ctx.uc_mcontext.gregs;
         let nr = regs[libc::REG_RAX as usize] as libc::c_long;
 
+        let mut args = [
+            regs[libc::REG_RDI as usize] as libc::c_long,
+            regs[libc::REG_RSI as usize] as libc::c_long,
+            regs[libc::REG_RDX as usize] as libc::c_long,
+            regs[libc::REG_R10 as usize] as libc::c_long,
+            regs[libc::REG_R8 as usize] as libc::c_long,
+            regs[libc::REG_R9 as usize] as libc::c_long,
+        ];
+        if !crate::is_in_rsched() && crate::io::is_modeled(nr) {
+            // Usually libc internals such as stdio, which may hold their own
+            // locks: yield only while the call would block, without adding
+            // an unconditional scheduling point.
+            let ip = regs[libc::REG_RIP as usize] as u64;
+            crate::io::prepare(ip, nr, &mut args, false);
+            regs[libc::REG_RAX as usize] =
+                raw_syscall6(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
+            return;
+        }
+
+        // A process fork from outside rsched, such as a raw syscall in the
+        // program: run it as a scheduled process clone. Thread-style clones
+        // (CLONE_VM) still trip the wire below.
+        let mut ret = 0;
+        if crate::rsched_process_syscall(nr, args.as_ptr(), &mut ret) {
+            regs[libc::REG_RAX as usize] = ret as libc::greg_t;
+            return;
+        }
+
         if crate::is_in_rsched() {
-            let ret = raw_syscall6(
-                nr,
-                regs[libc::REG_RDI as usize] as libc::c_long,
-                regs[libc::REG_RSI as usize] as libc::c_long,
-                regs[libc::REG_RDX as usize] as libc::c_long,
-                regs[libc::REG_R10 as usize] as libc::c_long,
-                regs[libc::REG_R8 as usize] as libc::c_long,
-                regs[libc::REG_R9 as usize] as libc::c_long,
-            );
+            let ret = raw_syscall6(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
             regs[libc::REG_RAX as usize] = ret;
             return;
         }
@@ -127,7 +147,9 @@ pub(crate) unsafe fn install_tripwire_if_requested() {
 unsafe fn install_sigsys_handler() {
     let mut sa: libc::sigaction = core::mem::zeroed();
     sa.sa_sigaction = sigsys_handler as *const () as usize;
-    sa.sa_flags = libc::SA_SIGINFO;
+    // Modeled I/O can switch tasks inside the handler, and rsched's own
+    // futexes there trap again, so SIGSYS must stay deliverable.
+    sa.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
     libc::sigemptyset(&mut sa.sa_mask);
     let r = libc::sigaction(libc::SIGSYS, &sa, core::ptr::null_mut());
     assert_eq!(r, 0, "rsched: sigaction(SIGSYS) failed");
@@ -172,67 +194,39 @@ unsafe fn install_filter() {
         u32::MAX - 1
     };
 
-    let mut filter = [
-        stmt(
-            (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-            SECCOMP_DATA_ARCH,
-        ),
-        jump(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            AUDIT_ARCH_X86_64,
-            1,
-            0,
-        ),
-        stmt(
-            (libc::BPF_RET | libc::BPF_K) as u16,
-            SECCOMP_RET_KILL_PROCESS,
-        ),
-        stmt(
-            (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-            SECCOMP_DATA_NR,
-        ),
-        jump(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            libc::SYS_futex as u32,
-            3,
-            0,
-        ),
-        jump(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            clone_syscall,
-            2,
-            0,
-        ),
-        jump(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            clone3_syscall,
-            1,
-            0,
-        ),
-        stmt((libc::BPF_RET | libc::BPF_K) as u16, SECCOMP_RET_ALLOW),
-        stmt(
-            (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-            SECCOMP_DATA_IP_LO,
-        ),
-        jump(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            syscall_ip_lo,
-            0,
-            2,
-        ),
-        stmt(
-            (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-            SECCOMP_DATA_IP_HI,
-        ),
-        jump(
-            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            syscall_ip_hi,
-            1,
-            0,
-        ),
-        stmt((libc::BPF_RET | libc::BPF_K) as u16, SECCOMP_RET_TRAP),
-        stmt((libc::BPF_RET | libc::BPF_K) as u16, SECCOMP_RET_ALLOW),
+    // Trap futex, fork, optionally clone, and modeled I/O unless they come
+    // from rsched's own syscall instruction. fork is always routed to the
+    // scheduler, never tripped, so it needs no opt-in.
+    let mut trapped = vec![
+        libc::SYS_futex as u32,
+        libc::SYS_fork as u32,
+        clone_syscall,
+        clone3_syscall,
     ];
+    trapped.extend(crate::io::MODELED_SYSCALLS.iter().map(|&nr| nr as u32));
+    let ld = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
+    let jeq = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
+    let ret = (libc::BPF_RET | libc::BPF_K) as u16;
+    let mut filter = vec![
+        stmt(ld, SECCOMP_DATA_ARCH),
+        jump(jeq, AUDIT_ARCH_X86_64, 1, 0),
+        stmt(ret, SECCOMP_RET_KILL_PROCESS),
+        stmt(ld, SECCOMP_DATA_NR),
+    ];
+    let count = trapped.len();
+    for (idx, nr) in trapped.into_iter().enumerate() {
+        // On a match, skip the remaining comparisons and the allow below.
+        filter.push(jump(jeq, nr, (count - idx) as u8, 0));
+    }
+    filter.extend([
+        stmt(ret, SECCOMP_RET_ALLOW),
+        stmt(ld, SECCOMP_DATA_IP_LO),
+        jump(jeq, syscall_ip_lo, 0, 2),
+        stmt(ld, SECCOMP_DATA_IP_HI),
+        jump(jeq, syscall_ip_hi, 1, 0),
+        stmt(ret, SECCOMP_RET_TRAP),
+        stmt(ret, SECCOMP_RET_ALLOW),
+    ]);
     let mut prog = libc::sock_fprog {
         len: filter.len() as u16,
         filter: filter.as_mut_ptr(),

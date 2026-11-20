@@ -400,22 +400,30 @@ impl<S: Scheduler> Scheduler for LoggingScheduler<S> {
         if let Some(ev) = event {
             match ev.kind {
                 EventKind::ThreadCreate => {
-                    eprintln!("[rsched] ThreadCreate @ 0x{:x}", ev.instr_addr);
+                    crate::log_line!("[rsched] ThreadCreate @ 0x{:x}", ev.instr_addr);
                 }
                 EventKind::LockAcq { lock } => {
-                    eprintln!(
+                    crate::log_line!(
                         "[rsched] LockAcq(lock=0x{:x}) @ 0x{:x}",
-                        lock as usize, ev.instr_addr
+                        lock as usize,
+                        ev.instr_addr
                     );
                 }
                 EventKind::LockRel { lock } => {
-                    eprintln!(
+                    crate::log_line!(
                         "[rsched] LockRel(lock=0x{:x}) @ 0x{:x}",
-                        lock as usize, ev.instr_addr
+                        lock as usize,
+                        ev.instr_addr
                     );
                 }
                 EventKind::SchedYield => {
-                    eprintln!("[rsched] SchedYield @ 0x{:x}", ev.instr_addr);
+                    crate::log_line!("[rsched] SchedYield @ 0x{:x}", ev.instr_addr);
+                }
+                EventKind::Io { fd, syscall } => {
+                    crate::log_line!(
+                        "[rsched] Io(syscall={syscall}, fd={fd}) @ 0x{:x}",
+                        ev.instr_addr
+                    );
                 }
                 EventKind::MemOp {
                     mem_addr,
@@ -427,9 +435,10 @@ impl<S: Scheduler> Scheduler for LoggingScheduler<S> {
                         AccessKind::Write => "W",
                         AccessKind::ReadWrite => "RW",
                     };
-                    eprintln!(
+                    crate::log_line!(
                         "[rsched] MemOp({kind}, mem=0x{:x}, size={size}) @ 0x{:x}",
-                        mem_addr as usize, ev.instr_addr
+                        mem_addr as usize,
+                        ev.instr_addr
                     );
                 }
             }

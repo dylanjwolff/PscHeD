@@ -189,10 +189,97 @@ static const char __rsched_hidden_ref_9_public_name
 "#
 }
 
+fn musl_io_input() -> &'static str {
+    r#"
+long read(int fd, void *buf, unsigned long count) {
+    return fd + count;
+}
+"#
+}
+
+fn glibc_io_input() -> &'static str {
+    r#"
+long __libc_read(int fd, void *buf, unsigned long count) {
+    return fd + count;
+}
+
+extern __typeof(__libc_read) read __attribute__((weak, alias("__libc_read")));
+"#
+}
+
+fn direct_io_input() -> &'static str {
+    r#"
+#include <unistd.h>
+
+int main(void) {
+    char c;
+    return read(0, &c, 1) + write(1, &c, 1);
+}
+"#
+}
+
+fn direct_process_input() -> &'static str {
+    r#"
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+int main(void) {
+    pid_t pid = fork();
+    if (pid == 0) _exit(3);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return (int)syscall(SYS_getpid) + status;
+}
+"#
+}
+
+fn musl_fork_input() -> &'static str {
+    r#"
+int fork(void) {
+    return 7;
+}
+"#
+}
+
+fn glibc_fork_input() -> &'static str {
+    r#"
+int __libc_fork(void) {
+    return 7;
+}
+
+extern __typeof(__libc_fork) __fork __attribute__((alias("__libc_fork")));
+extern __typeof(__libc_fork) fork __attribute__((weak, alias("__libc_fork")));
+"#
+}
+
 fn syscall_input() -> &'static str {
     r#"
 long syscall(long number, ...) {
     return number;
+}
+"#
+}
+
+/// musl's thread exit after `__syscall1` is inlined, next to a process exit
+/// (exit_group, 231) that must stay a real syscall.
+fn musl_thread_exit_input() -> &'static str {
+    r#"
+void __unmapself(void *, unsigned long);
+
+static long syscall1(long n, long a1) {
+    unsigned long ret;
+    __asm__ __volatile__ ("syscall" : "=a"(ret) : "a"(n), "D"(a1) : "rcx", "r11", "memory");
+    return ret;
+}
+
+_Noreturn void thread_exit(void *map, unsigned long size) {
+    if (map) __unmapself(map, size);
+    for (;;) syscall1(60, 0);
+}
+
+_Noreturn void process_exit(int code) {
+    for (;;) syscall1(231, code);
 }
 "#
 }
@@ -307,6 +394,32 @@ fn musl_libc_mode_wraps_pthread_implementation_and_weak_alias() {
     assert!(
         ir.contains("@rsched_clone"),
         "musl mode did not rewrite __clone calls:\n{ir}"
+    );
+}
+
+#[test]
+fn musl_libc_mode_routes_thread_exit_syscalls_through_rsched() {
+    let input = compile_source_to_ir("musl-exit", musl_thread_exit_input(), &["-O2"]);
+    let ir = run_pass(
+        "rsched-atomics<musl-libc>",
+        &input,
+        "musl-exit.instrumented.ll",
+    );
+
+    assert!(
+        ir.contains("call void @rsched_thread_exit()")
+            && ir.contains("call void @rsched_unmapself(")
+            && !ir.contains("call void @__unmapself("),
+        "musl mode did not route thread exits through rsched:\n{ir}"
+    );
+    assert_eq!(
+        ir.matches("asm sideeffect \"syscall\"").count(),
+        1,
+        "only the exit_group syscall should remain inline assembly:\n{ir}"
+    );
+    assert!(
+        ir.contains("i64 231"),
+        "musl mode rewrote the process exit:\n{ir}"
     );
 }
 
@@ -428,6 +541,38 @@ fn glibc_libc_mode_preserves_hidden_alias_chains() {
 }
 
 #[test]
+fn libc_modes_wrap_public_io_functions_without_activating() {
+    for (mode, source, implementation) in [
+        ("musl-libc", musl_io_input(), "__rsched_real_read"),
+        ("glibc-libc", glibc_io_input(), "__libc_read"),
+    ] {
+        let input = compile_source_to_ir(&format!("{mode}-io"), source, &[]);
+        let ir = run_pass(
+            &format!("rsched-atomics<{mode}>"),
+            &input,
+            &format!("{mode}-io.instrumented.ll"),
+        );
+
+        assert!(
+            ir.contains(&format!("define dso_local i64 @{implementation}")),
+            "{mode} mode did not keep the read implementation:\n{ir}"
+        );
+        assert!(
+            ir.contains("define i64 @read(")
+                && ir.contains("call i64 @rsched_read")
+                && ir.contains(&format!("call i64 @{implementation}")),
+            "{mode} mode did not dispatch read through rsched and the implementation:\n{ir}"
+        );
+        // The dynamic loader and single-threaded startup read files before
+        // any task exists, so I/O wrappers must not switch rsched on.
+        assert!(
+            !ir.contains("rsched_activate_instrumented_libc"),
+            "{mode} mode's read wrapper activates rsched:\n{ir}"
+        );
+    }
+}
+
+#[test]
 fn libc_modes_redirect_the_syscall_definition() {
     for mode in ["musl-libc", "glibc-libc"] {
         let input = compile_source_to_ir(&format!("{mode}-syscall"), syscall_input(), &[]);
@@ -465,6 +610,57 @@ fn direct_pthread_mode_rewrites_libc_pthread_calls() {
         ir.contains("@rsched_pthread_join"),
         "direct mode did not rewrite pthread_join:\n{ir}"
     );
+
+    let input = compile_source_to_ir("direct_io", direct_io_input(), &[]);
+    let ir = run_pass("rsched-atomics<direct-pthread>", &input, "direct_io.out.ll");
+    assert!(
+        ir.contains("call i64 @rsched_read") && ir.contains("call i64 @rsched_write"),
+        "direct mode did not rewrite read and write:\n{ir}"
+    );
+
+    let input = compile_source_to_ir("direct_process", direct_process_input(), &[]);
+    let ir = run_pass(
+        "rsched-atomics<direct-pthread>",
+        &input,
+        "direct_process.out.ll",
+    );
+    for (libc_name, rsched_name) in [
+        ("fork", "rsched_fork"),
+        ("waitpid", "rsched_waitpid"),
+        ("_exit", "rsched_process_exit_status"),
+        ("syscall", "rsched_syscall"),
+    ] {
+        assert!(
+            ir.lines()
+                .any(|line| line.contains("call ") && line.contains(&format!("@{rsched_name}(")))
+                && !ir
+                    .lines()
+                    .any(|line| line.contains("call ") && line.contains(&format!("@{libc_name}("))),
+            "direct mode did not rewrite {libc_name} to {rsched_name}:\n{ir}"
+        );
+    }
+}
+
+#[test]
+fn libc_modes_wrap_fork() {
+    for (mode, source) in [
+        ("musl-libc", musl_fork_input()),
+        ("glibc-libc", glibc_fork_input()),
+    ] {
+        let input = compile_source_to_ir(&format!("{mode}-fork"), source, &[]);
+        let ir = run_pass(
+            &format!("rsched-atomics<{mode}>"),
+            &input,
+            &format!("{mode}-fork.instrumented.ll"),
+        );
+
+        assert!(
+            ir.contains("define i32 @fork(")
+                && ir.contains("call i32 @rsched_fork")
+                && ir.contains("call i32 @__rsched_real_fork"),
+            "{mode} mode did not dispatch fork through rsched and the implementation:\n{ir}"
+        );
+    }
 }
 
 #[test]

@@ -9,6 +9,19 @@ const GLIBC_TEST_CASES: &[&str] = &[
     "nptl/tst-barrier1",
     "nptl/tst-tsd3",
     "nptl/tst-pt-tls1",
+    "socket/tst-accept4",
+    "socket/tst-cmsghdr",
+    "socket/tst-socket-timestamp",
+    "posix/tst-preadwrite",
+    "posix/tst-preadwrite64",
+    "misc/tst-preadvwritev",
+    "misc/tst-preadvwritev64",
+    "misc/tst-ppoll",
+    "io/tst-fcntl",
+    "stdio-common/tst-fdopen",
+    "stdio-common/tst-fseek",
+    "stdio-common/tst-fwrite",
+    "stdio-common/tst-ungetc",
 ];
 
 fn artifact() -> ArtifactManifest {
@@ -41,7 +54,7 @@ fn tail(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn glibc_nptl_tests_with_instrumented_libc() {
+fn glibc_tests_with_instrumented_libc() {
     let artifact = artifact();
     let build_dir = artifact
         .build_dir

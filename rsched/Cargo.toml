@@ -58,6 +58,10 @@ name = "sanitizers_static"
 path = "tests/source/sanitizers_static.rs"
 
 [[test]]
+name = "io"
+path = "tests/source/io.rs"
+
+[[test]]
 name = "seccomp"
 path = "tests/source/seccomp.rs"
 

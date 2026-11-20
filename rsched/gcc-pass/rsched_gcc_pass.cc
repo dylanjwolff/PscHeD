@@ -38,6 +38,42 @@ const char *replacement_for(const char *name) {
     return nullptr;
 }
 
+// x86_64 SYS_exit ends one thread; process exit uses exit_group.
+const HOST_WIDE_INT sys_exit = 60;
+
+bool is_space(char c) { return c == ' ' || c == '\t' || c == '\n'; }
+
+// glibc ends each thread with INTERNAL_SYSCALL_CALL (exit, 0): a "syscall"
+// asm whose first input is the syscall number.
+bool is_thread_exit_syscall(gasm *asm_stmt) {
+    const char *text = gimple_asm_string(asm_stmt);
+    while (is_space(*text)) {
+        ++text;
+    }
+    if (std::strncmp(text, "syscall", 7) != 0) {
+        return false;
+    }
+    for (text += 7; *text != '\0'; ++text) {
+        if (!is_space(*text)) {
+            return false;
+        }
+    }
+    if (gimple_asm_ninputs(asm_stmt) == 0) {
+        return false;
+    }
+    tree number = TREE_VALUE(gimple_asm_input_op(asm_stmt, 0));
+    return TREE_CODE(number) == INTEGER_CST && tree_fits_shwi_p(number) &&
+           tree_to_shwi(number) == sys_exit;
+}
+
+tree thread_exit_decl() {
+    tree decl =
+        build_fn_decl("rsched_thread_exit", build_function_type_list(void_type_node, NULL_TREE));
+    TREE_PUBLIC(decl) = 1;
+    DECL_EXTERNAL(decl) = 1;
+    return decl;
+}
+
 tree replacement_decl(const char *name, tree original) {
     tree decl = build_fn_decl(name, TREE_TYPE(original));
     TREE_PUBLIC(decl) = 1;
@@ -55,6 +91,16 @@ struct rsched_pass final : gimple_opt_pass {
             for (gimple_stmt_iterator gsi = gsi_start_bb(bb); !gsi_end_p(gsi);
                  gsi_next(&gsi)) {
                 gimple *stmt = gsi_stmt(gsi);
+                // Under the coro provider every task shares one kernel
+                // thread, so rsched ends the task instead. The call does not
+                // return; the asm stays so its outputs remain defined.
+                if (gimple_code(stmt) == GIMPLE_ASM &&
+                    is_thread_exit_syscall(as_a<gasm *>(stmt))) {
+                    gsi_insert_before(&gsi, gimple_build_call(thread_exit_decl(), 0),
+                                      GSI_SAME_STMT);
+                    changed = true;
+                    continue;
+                }
                 if (!is_gimple_call(stmt)) {
                     continue;
                 }

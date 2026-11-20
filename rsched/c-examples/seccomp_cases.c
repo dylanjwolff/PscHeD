@@ -41,6 +41,51 @@ int main(void) {
     return 0;
 }
 
+#elif defined(CASE_SECCOMP_RAW_FORK)
+
+#include <stdio.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+/* A fork syscall instruction in the program, which neither rsched_fork nor
+ * rsched_syscall sees: seccomp must route it through the scheduler, so the
+ * child runs as a scheduled process. */
+static long raw_fork(void) {
+    long ret;
+    __asm__ __volatile__("syscall"
+                         : "=a"(ret)
+                         : "a"((long)SYS_fork)
+                         : "rcx", "r11", "memory");
+    return ret;
+}
+
+int main(void) {
+    int fds[2];
+    char byte = 0;
+    int status = 0;
+
+    rsched_init();
+    if (pipe(fds) != 0)
+        return 2;
+    long pid = raw_fork();
+    if (pid < 0)
+        return 3;
+    if (pid == 0) {
+        byte = 'k';
+        write(fds[1], &byte, 1);
+        rsched_process_exit();
+        _exit(7);
+    }
+    if (read(fds[0], &byte, 1) != 1 || byte != 'k')
+        return 4;
+    if (waitpid((pid_t)pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 7)
+        return 5;
+    printf("child exited 7\n");
+    return 0;
+}
+
 #else
 #error "define one seccomp CASE_* variant"
 #endif

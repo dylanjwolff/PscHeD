@@ -85,6 +85,8 @@ fn test_command(root: &Path, mut args: Vec<String>) -> Result<()> {
                     "--test",
                     "benchmarks",
                     "--test",
+                    "io",
+                    "--test",
                     "sanitizers_static",
                     "--test",
                     "seccomp",
