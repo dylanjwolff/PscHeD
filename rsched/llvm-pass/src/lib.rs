@@ -616,6 +616,11 @@ const PTHREAD_REWRITES: &[(&str, &str)] = &[
     ("execve", "rsched_execve"),
     ("_exit", "rsched_process_exit_status"),
     ("syscall", "rsched_syscall"),
+    ("close", "rsched_close"),
+    ("close_range", "rsched_close_range"),
+    ("closefrom", "rsched_closefrom"),
+    ("dup2", "rsched_dup2"),
+    ("dup3", "rsched_dup3"),
     ("read", "rsched_read"),
     ("write", "rsched_write"),
     ("readv", "rsched_readv"),
@@ -1249,6 +1254,9 @@ const MUSL_IO_REWRITES: &[IoRewrite] = &[
     ("accept4", "accept4", "rsched_accept4"),
     ("connect", "connect", "rsched_connect"),
     ("poll", "poll", "rsched_poll"),
+    ("close", "close", "rsched_close"),
+    ("dup2", "dup2", "rsched_dup2"),
+    ("__dup3", "dup3", "rsched_dup3"),
 ];
 
 const GLIBC_IO_REWRITES: &[IoRewrite] = &[
@@ -1266,6 +1274,9 @@ const GLIBC_IO_REWRITES: &[IoRewrite] = &[
     ("accept4", "accept4", "rsched_accept4"),
     ("__libc_connect", "connect", "rsched_connect"),
     ("__poll", "poll", "rsched_poll"),
+    ("__close", "close", "rsched_close"),
+    // glibc's closefrom calls the hidden __close_range, not the public one.
+    ("__closefrom", "closefrom", "rsched_closefrom"),
 ];
 
 const GLIBC_PUBLIC_REWRITES: &[LibcRewrite] = &[

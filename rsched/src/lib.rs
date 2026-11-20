@@ -289,7 +289,26 @@ impl State {
         }
     }
 
+    /// Picks the next task to run. Tasks blocked on I/O become candidates
+    /// once their descriptors are ready; when no task can run but some wait
+    /// on I/O, this waits in the kernel for one of them.
     unsafe fn choose_task(&mut self, caller: PthreadT, avoid_self: bool) -> Option<TaskChoice> {
+        task_provider::wake_io_waiters(false);
+        loop {
+            if let Some(choice) = self.choose_runnable_task(caller, avoid_self) {
+                return Some(choice);
+            }
+            if !task_provider::wake_io_waiters(true) {
+                return None;
+            }
+        }
+    }
+
+    unsafe fn choose_runnable_task(
+        &mut self,
+        caller: PthreadT,
+        avoid_self: bool,
+    ) -> Option<TaskChoice> {
         if self.info.contains_key(&caller) {
             self.task(caller).set_waiting(true);
         }
@@ -838,6 +857,10 @@ pub unsafe extern "C" fn rsched_process_exit() {
     }
 
     rsched_glock();
+    // This process's tasks end with it, so only another process's task can
+    // run next. Retire them first so that one of them blocked on I/O does
+    // not make the scheduler wait for a descriptor nobody will touch.
+    task_provider::deactivate_current_domain_tasks();
     let next = st().choose_task(0 as PthreadT, false);
     st().task_provider.process_exit(next);
     rsched_gunlock();
@@ -886,15 +909,19 @@ pub unsafe extern "C" fn rsched_syscall(
     if io::is_modeled(number) {
         return io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5]);
     }
+    if let Some(r) = io::guarded_syscall(number, &[a0, a1, a2, a3, a4, a5]) {
+        return io::libc_result(r);
+    }
 
     libc::syscall(number, a0, a1, a2, a3, a4, a5)
 }
 
-/// Runs a process-creating syscall instruction reached outside rsched, such
-/// as a raw `fork` in the program seen by the seccomp trap or the e9patch
-/// hook, as a scheduled process clone. Stores the raw syscall result (a pid,
-/// 0 in the child, or -errno) in `ret` and returns true; returns false when
-/// the instruction should run unchanged, including thread-style clones.
+/// Runs a syscall instruction reached outside rsched that rsched must run
+/// itself, seen by the seccomp trap or the e9patch hook: a raw `fork` or
+/// process-style `clone` runs as a scheduled process clone, and a call that
+/// closes descriptors spares rsched's reserved ones. Stores the raw syscall
+/// result (or -errno) in `ret` and returns true; returns false when the
+/// instruction should run unchanged, including thread-style clones.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_process_syscall(
     number: libc::c_long,
@@ -904,7 +931,11 @@ pub unsafe extern "C" fn rsched_process_syscall(
     if is_in_rsched() {
         return false;
     }
-    let args = std::slice::from_raw_parts(args, 5);
+    let args = &*(args as *const [libc::c_long; 6]);
+    if let Some(r) = io::guarded_syscall(number, args) {
+        *ret = r;
+        return true;
+    }
     let pid = match number {
         libc::SYS_fork => rsched_fork(),
         libc::SYS_clone if args[0] & libc::c_long::from(libc::CLONE_VM) == 0 => {
@@ -939,6 +970,10 @@ pub unsafe extern "C" fn rsched_libc_syscall(
         rsched_syscall(number, a0, a1, a2, a3, a4, a5)
     } else if outermost && io::is_modeled(number) {
         io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5])
+    } else if let Some(r) = io::guarded_syscall(number, &[a0, a1, a2, a3, a4, a5])
+        && outermost
+    {
+        io::libc_result(r)
     } else {
         rsched_raw_syscall(number, a0, a1, a2, a3, a4, a5)
     };
@@ -1428,6 +1463,7 @@ pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
         st().task(joiner).set_blocking(false);
     }
     st().remove(caller);
+    task_provider::wake_io_waiters(false);
     let mut local_tasks = Vec::new();
     for pt in st().threads.iter().copied() {
         let task = st().task(pt);

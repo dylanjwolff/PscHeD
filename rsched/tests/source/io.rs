@@ -42,22 +42,40 @@ fn static_lib() -> PathBuf {
         .clone()
 }
 
-/// Builds one case and runs it with `env`, returning its stdout.
+/// Builds one case of c-examples/io_cases.c and runs it with `env`,
+/// returning its stdout.
 fn run_case(case: &str, env: &[(&str, &str)]) -> String {
+    run_case_with_stderr(case, env).0
+}
+
+/// Like [`run_case`], also returning stderr.
+fn run_case_with_stderr(case: &str, env: &[(&str, &str)]) -> (String, String) {
+    run_source_case("io_cases.c", case, env)
+}
+
+/// Builds one case of the C file `source` in c-examples and runs it with
+/// `env`, returning its stdout and stderr.
+fn run_source_case(source: &str, case: &str, env: &[(&str, &str)]) -> (String, String) {
     let root = repo_root();
-    let binary = temp_dir().join(case);
+    // Tests run in parallel, so a case run with a different env gets its own
+    // binary.
+    let suffix: String = env
+        .iter()
+        .map(|(key, value)| format!("-{key}={value}"))
+        .collect();
+    let binary = temp_dir().join(format!("{case}{suffix}"));
     let status = Command::new("clang")
         .args(["-g", "-O0", "-Wall", "-Wextra", "-Werror", "-DRSCHED"])
         .arg(format!("-D{case}"))
         .arg(format!("-I{}", root.join("include").display()))
         .arg("-o")
         .arg(&binary)
-        .arg(root.join("c-examples/io_cases.c"))
+        .arg(root.join("c-examples").join(source))
         .arg("-Wl,--start-group")
         .arg(static_lib())
         .args(["-Wl,--end-group", "-lpthread", "-ldl", "-lm"])
         .status()
-        .expect("invoke clang for io_cases.c");
+        .unwrap_or_else(|error| panic!("invoke clang for {source}: {error}"));
     assert!(status.success(), "failed to build {case}");
 
     let output = Command::new("timeout")
@@ -73,7 +91,7 @@ fn run_case(case: &str, env: &[(&str, &str)]) -> String {
         output.status,
         String::from_utf8_lossy(&output.stderr),
     );
-    stdout
+    (stdout, String::from_utf8_lossy(&output.stderr).into_owned())
 }
 
 #[test]
@@ -107,4 +125,66 @@ fn seccomp_routes_io_from_libc_internals() {
     // filter traps them and routes them through the model.
     let stdout = run_case("CASE_IO_STDIO_PIPE_THREADS", &[("RSCHED_SECCOMP", "1")]);
     assert!(stdout.contains("traces=1"), "{stdout}");
+}
+
+#[test]
+fn blocked_waiters_are_not_runnable() {
+    // Only the main thread and the helper yield, BLOCKED_YIELDS (6) times
+    // each per schedule. A worker that busy-waited on the empty pipe would
+    // add yields of its own while it waits.
+    let (stdout, stderr) = run_case_with_stderr("CASE_IO_BLOCKED_WAITER", &[("RSCHED_LOG", "1")]);
+    assert!(stdout.contains("traces=1: E"), "{stdout}");
+    let runs: usize = stdout
+        .strip_prefix("runs=")
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|runs| runs.parse().ok())
+        .unwrap_or_else(|| panic!("no run count in {stdout}"));
+    let yields = stderr
+        .lines()
+        .filter(|line| line.contains("] SchedYield"))
+        .count();
+    assert_eq!(yields, runs * 2 * 6, "a blocked waiter yielded:\n{stdout}");
+}
+
+/// Runs one case of c-examples/io_edge_cases.c, which prints "ok".
+fn assert_edge_case(case: &str) {
+    assert_edge_case_with(case, &[]);
+}
+
+fn assert_edge_case_with(case: &str, env: &[(&str, &str)]) {
+    let (stdout, _) = run_source_case("io_edge_cases.c", case, env);
+    assert_eq!(stdout, "ok\n", "{case}");
+}
+
+#[test]
+fn exit_does_not_wait_for_its_own_blocked_readers() {
+    assert_edge_case("CASE_IO_EDGE_EXIT_WITH_BLOCKED_READER");
+}
+
+#[test]
+fn poll_without_descriptors_blocks() {
+    assert_edge_case("CASE_IO_EDGE_POLL_NO_FDS");
+}
+
+#[test]
+fn poll_on_deeply_nested_epolls_completes() {
+    assert_edge_case("CASE_IO_EDGE_NESTED_EPOLL");
+}
+
+#[test]
+fn program_cannot_close_reserved_descriptors() {
+    assert_edge_case("CASE_IO_EDGE_RESERVED_FDS_SURVIVE");
+}
+
+#[test]
+fn seccomp_keeps_reserved_descriptors_from_raw_close() {
+    assert_edge_case_with(
+        "CASE_IO_EDGE_RESERVED_FDS_SURVIVE",
+        &[("RSCHED_SECCOMP", "1")],
+    );
+}
+
+#[test]
+fn kernel_wait_releases_the_global_lock() {
+    assert_edge_case("CASE_IO_EDGE_UNPARKED_THREAD_NEEDS_LOCK");
 }

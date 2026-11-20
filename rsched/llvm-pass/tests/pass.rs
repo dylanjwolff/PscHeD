@@ -229,6 +229,8 @@ int main(void) {
     if (pid == 0) _exit(3);
     int status = 0;
     waitpid(pid, &status, 0);
+    dup2(1, 9);
+    close(9);
     return (int)syscall(SYS_getpid) + status;
 }
 "#
@@ -629,6 +631,8 @@ fn direct_pthread_mode_rewrites_libc_pthread_calls() {
         ("waitpid", "rsched_waitpid"),
         ("_exit", "rsched_process_exit_status"),
         ("syscall", "rsched_syscall"),
+        ("dup2", "rsched_dup2"),
+        ("close", "rsched_close"),
     ] {
         assert!(
             ir.lines()

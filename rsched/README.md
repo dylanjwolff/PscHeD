@@ -128,10 +128,13 @@ Useful environment variables:
 `read`, `write`, `readv`, `writev`, `recv`, `recvfrom`, `recvmsg`, `send`,
 `sendto`, `sendmsg`, `accept`, `accept4`, `connect`, and `poll` are scheduling
 points. Only one task runs at a time, so a call that blocked in the kernel
-would stall the task that could unblock it. On a blocking descriptor, the
-calling task instead yields until the descriptor is ready, then performs the
-call. A `poll` with a positive timeout expires in virtual time: if no
-descriptor is ready after the other tasks have had a turn, it returns 0.
+would stall the task that could unblock it. On a blocking descriptor that is
+not ready, the calling task instead blocks, like a task waiting for a mutex:
+it is not runnable, so it adds no scheduling points, until the descriptor is
+ready, and then performs the call. When every task is blocked and some wait
+on I/O, rsched waits in the kernel for one of their descriptors. A `poll`
+with a positive timeout expires in virtual time: if no descriptor is ready
+after the other tasks have had a turn, it returns 0.
 
 Each integration mode reaches these operations differently:
 
@@ -144,8 +147,15 @@ Each integration mode reaches these operations differently:
 - Binary instrumentation: raw `syscall` instructions in the instrumented
   binary call into the model first.
 - `RSCHED_SECCOMP=1`: I/O syscalls issued outside rsched, including stdio's,
-  trap and wait until they cannot block. They do not add scheduling points of
-  their own, because libc may hold internal locks around them.
+  trap and block until the call can no longer block. They do not add
+  scheduling points of their own, because libc may hold internal locks
+  around them.
+
+rsched keeps two descriptors open for itself, a memfd and an epoll, at
+numbers of 900 or more when the descriptor limit allows. The program cannot
+close or replace them: `close` of one reports success, `close_range` and
+`closefrom` skip them, and `dup2` or `dup3` onto one fails with `EBADF`. Every
+integration mode guards these calls the way it reaches I/O.
 
 Writes are assumed to fit in the free buffer space once a descriptor reports
 writable. `select`, `epoll`, `ppoll`, and opening FIFOs are not modeled.
