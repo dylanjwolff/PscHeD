@@ -619,6 +619,79 @@ int main(void)
 }
 
 #[test]
+fn instrumented_glibc_preload_binary_raw_fork() {
+    // A fork syscall instruction in the subject bypasses libc's fork, so only
+    // the e9patch hook can run the child as a scheduled process.
+    let source = temp_dir().join("binary-raw-fork.c");
+    std::fs::write(
+        &source,
+        r#"
+#include <stdio.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static long raw_fork(void)
+{
+    long ret;
+    __asm__ volatile("syscall" : "=a"(ret) : "a"((long)SYS_fork) : "rcx", "r11", "memory");
+    return ret;
+}
+
+int main(void)
+{
+    long pid = raw_fork();
+    if (pid < 0)
+        return 2;
+    if (pid == 0)
+        _exit(7);
+    int status = 0;
+    if (waitpid((pid_t)pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 7)
+        return 1;
+    printf("child exited 7\n");
+    return 0;
+}
+"#,
+    )
+    .expect("write binary raw fork subject");
+    let binary =
+        build_binary_instrumentation_case(&source, "glibc-preload-binary-raw-fork", &[], &[]);
+    let Some((instrumented, output_dir, log)) =
+        instrument_binary(&binary, "glibc-preload-binary-raw-fork-instrumented")
+    else {
+        return;
+    };
+    assert!(
+        log.contains("num_patched           = 1 / 1"),
+        "expected the syscall instruction to be patched\n{log}"
+    );
+    let output = run_preloaded(
+        &instrumented,
+        &[],
+        &[
+            (
+                "RSCHED_EXTRA_LIBRARY_PATH",
+                output_dir.as_os_str().to_owned(),
+            ),
+            ("RSCHED_DIRECT_EXEC", OsString::from("1")),
+            ("RSCHED_PROCESS_LOG", OsString::from("1")),
+        ],
+    );
+    assert!(
+        output.stdout.contains("child exited 7"),
+        "raw fork subject produced unexpected output\nstdout:\n{}\nstderr:\n{}",
+        output.stdout,
+        output.stderr,
+    );
+    assert!(
+        output.stderr.contains("child resumed"),
+        "raw fork child was not scheduled:\n{}",
+        output.stderr,
+    );
+    assert_clean("instrumented glibc preload binary raw fork", output);
+}
+
+#[test]
 fn instrumented_glibc_preload_binary_sanitizers() {
     if !repo_root()
         .join("binary-instrumentation/e9patch/e9tool")

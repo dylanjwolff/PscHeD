@@ -218,6 +218,41 @@ int main(void) {
 "#
 }
 
+fn direct_process_input() -> &'static str {
+    r#"
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+int main(void) {
+    pid_t pid = fork();
+    if (pid == 0) _exit(3);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return (int)syscall(SYS_getpid) + status;
+}
+"#
+}
+
+fn musl_fork_input() -> &'static str {
+    r#"
+int fork(void) {
+    return 7;
+}
+"#
+}
+
+fn glibc_fork_input() -> &'static str {
+    r#"
+int __libc_fork(void) {
+    return 7;
+}
+
+extern __typeof(__libc_fork) __fork __attribute__((alias("__libc_fork")));
+extern __typeof(__libc_fork) fork __attribute__((weak, alias("__libc_fork")));
+"#
+}
+
 fn syscall_input() -> &'static str {
     r#"
 long syscall(long number, ...) {
@@ -582,6 +617,50 @@ fn direct_pthread_mode_rewrites_libc_pthread_calls() {
         ir.contains("call i64 @rsched_read") && ir.contains("call i64 @rsched_write"),
         "direct mode did not rewrite read and write:\n{ir}"
     );
+
+    let input = compile_source_to_ir("direct_process", direct_process_input(), &[]);
+    let ir = run_pass(
+        "rsched-atomics<direct-pthread>",
+        &input,
+        "direct_process.out.ll",
+    );
+    for (libc_name, rsched_name) in [
+        ("fork", "rsched_fork"),
+        ("waitpid", "rsched_waitpid"),
+        ("_exit", "rsched_process_exit_status"),
+        ("syscall", "rsched_syscall"),
+    ] {
+        assert!(
+            ir.lines()
+                .any(|line| line.contains("call ") && line.contains(&format!("@{rsched_name}(")))
+                && !ir
+                    .lines()
+                    .any(|line| line.contains("call ") && line.contains(&format!("@{libc_name}("))),
+            "direct mode did not rewrite {libc_name} to {rsched_name}:\n{ir}"
+        );
+    }
+}
+
+#[test]
+fn libc_modes_wrap_fork() {
+    for (mode, source) in [
+        ("musl-libc", musl_fork_input()),
+        ("glibc-libc", glibc_fork_input()),
+    ] {
+        let input = compile_source_to_ir(&format!("{mode}-fork"), source, &[]);
+        let ir = run_pass(
+            &format!("rsched-atomics<{mode}>"),
+            &input,
+            &format!("{mode}-fork.instrumented.ll"),
+        );
+
+        assert!(
+            ir.contains("define i32 @fork(")
+                && ir.contains("call i32 @rsched_fork")
+                && ir.contains("call i32 @__rsched_real_fork"),
+            "{mode} mode did not dispatch fork through rsched and the implementation:\n{ir}"
+        );
+    }
 }
 
 #[test]

@@ -610,6 +610,12 @@ const PTHREAD_REWRITES: &[(&str, &str)] = &[
     ("pthread_barrier_init", "rsched_pthread_barrier_init"),
     ("pthread_barrier_wait", "rsched_pthread_barrier_wait"),
     ("sched_yield", "rsched_sched_yield"),
+    ("fork", "rsched_fork"),
+    ("waitpid", "rsched_waitpid"),
+    ("execv", "rsched_execv"),
+    ("execve", "rsched_execve"),
+    ("_exit", "rsched_process_exit_status"),
+    ("syscall", "rsched_syscall"),
     ("read", "rsched_read"),
     ("write", "rsched_write"),
     ("readv", "rsched_readv"),
@@ -1082,9 +1088,25 @@ const MUSL_REWRITES: &[LibcRewrite] = &[
         diverges: false,
     },
     LibcRewrite {
+        implementation: "fork",
+        public: "fork",
+        real: "__rsched_real_fork",
+        rsched: "rsched_fork",
+        diverges: false,
+    },
+    LibcRewrite {
         implementation: "_exit",
         public: "_exit",
         real: "__rsched_real_process_exit",
+        rsched: "rsched_process_exit_status",
+        diverges: true,
+    },
+    // exit() ends in _Exit, not _exit, so a forked child that calls exit()
+    // must hand the schedule back here too.
+    LibcRewrite {
+        implementation: "_Exit",
+        public: "_Exit",
+        real: "__rsched_real_Exit",
         rsched: "rsched_process_exit_status",
         diverges: true,
     },
@@ -1246,15 +1268,24 @@ const GLIBC_IO_REWRITES: &[IoRewrite] = &[
     ("__poll", "poll", "rsched_poll"),
 ];
 
-const GLIBC_PUBLIC_REWRITES: &[LibcRewrite] = &[LibcRewrite {
-    implementation: "__waitpid",
-    public: "waitpid",
-    real: "__rsched_real_waitpid",
-    rsched: "rsched_waitpid",
-    diverges: false,
-}];
+const GLIBC_PUBLIC_REWRITES: &[LibcRewrite] = &[
+    LibcRewrite {
+        implementation: "__waitpid",
+        public: "waitpid",
+        real: "__rsched_real_waitpid",
+        rsched: "rsched_waitpid",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__libc_fork",
+        public: "fork",
+        real: "__rsched_real_fork",
+        rsched: "rsched_fork",
+        diverges: false,
+    },
+];
 
-const GLIBC_PUBLIC_HIDDEN_NAMES: &[&str] = &["__GI___waitpid"];
+const GLIBC_PUBLIC_HIDDEN_NAMES: &[&str] = &["__GI___waitpid", "__GI___fork"];
 
 const GLIBC_HIDDEN_NAMES: &[&str] = &[
     "__GI___pthread_create",

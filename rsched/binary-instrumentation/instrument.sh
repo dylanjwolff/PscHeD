@@ -100,7 +100,7 @@ instrument_one() {
             -M 'bytes[0] == 0xF0 && mem[1].access == w && mem[1].base != %rsp && mem[1].seg == nil' \
             -P 'mem_wi((static)addr, &mem[1], mem[1].size)@schedule_memops' \
             -M 'mnemonic == "syscall"' \
-            -P 'io_syscall((static)addr, rax, rdi, rsi, &rdx, r10, r8, r9)@schedule_memops' \
+            -P 'if io_syscall((static)addr, &rax, rdi, rsi, &rdx, r10, r8, r9)@schedule_memops break' \
             --option --log=false "${extra[@]}" "${EXTRA_ARGS[@]}" -- "$input"
     else
         "${E9_DIR}/e9tool" \
@@ -120,7 +120,7 @@ instrument_one() {
             -M 'bytes[0] == 0xF0 && mem[1].access == w && mem[1].base != %rsp && mem[1].seg == nil' \
             -P 'mem_wi((static)addr, &mem[1], mem[1].size)@schedule_memops' \
             -M 'mnemonic == "syscall"' \
-            -P 'io_syscall((static)addr, rax, rdi, rsi, &rdx, r10, r8, r9)@schedule_memops' \
+            -P 'if io_syscall((static)addr, &rax, rdi, rsi, &rdx, r10, r8, r9)@schedule_memops break' \
             --option --log=false "${extra[@]}" "${EXTRA_ARGS[@]}" -- "$input"
     fi
     popd >/dev/null

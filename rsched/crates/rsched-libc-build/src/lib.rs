@@ -550,6 +550,7 @@ fn build_musl(
             "-Wl,--export-dynamic-symbol=rsched_atomic_instrument \
              -Wl,--export-dynamic-symbol=rsched_atomic_instrument_ra \
              -Wl,--export-dynamic-symbol=rsched_io_prepare_syscall \
+             -Wl,--export-dynamic-symbol=rsched_process_syscall \
              -Wl,--export-dynamic-symbol=rsched_fuzzer_test_one_input",
         )
         .arg(format!("--prefix={}", install_dir.display()))
@@ -934,20 +935,27 @@ fn prepare_clang_asan_runtime(
 
 fn export_glibc_hooks(libc_map: &Path) -> Result<()> {
     let map = fs::read_to_string(libc_map)?;
-    if map.contains("rsched_io_prepare_syscall;") {
+    // Add only the hooks a reused build directory's map still lacks.
+    let missing: String = [
+        "rsched_atomic_instrument",
+        "rsched_atomic_instrument_ra",
+        "rsched_io_prepare_syscall",
+        "rsched_process_syscall",
+        "rsched_fuzzer_test_one_input",
+    ]
+    .iter()
+    .filter(|hook| !map.contains(&format!("{hook};")))
+    .map(|hook| format!("    {hook};\n"))
+    .collect();
+    if missing.is_empty() {
         return Ok(());
     }
     let marker = "  local:\n    *;\n};";
-    let replacement = "    rsched_atomic_instrument;\n\
-                       rsched_atomic_instrument_ra;\n\
-                       rsched_io_prepare_syscall;\n\
-                       rsched_fuzzer_test_one_input;\n\
-                       local:\n    *;\n};";
     let index = map
         .rfind(marker)
         .context("find final GLIBC_PRIVATE local block in libc.map")?;
     let mut output = map;
-    output.replace_range(index..index + marker.len(), replacement);
+    output.insert_str(index, &missing);
     fs::write(libc_map, output)?;
     Ok(())
 }

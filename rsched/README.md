@@ -150,6 +150,26 @@ Each integration mode reaches these operations differently:
 Writes are assumed to fit in the free buffer space once a descriptor reports
 writable. `select`, `epoll`, `ppoll`, and opening FIFOs are not modeled.
 
+## Processes
+
+`fork`, `waitpid`, `_exit`, and `execv`/`execve` are scheduled: a forked child
+runs as another task, and only one process runs at a time. Each integration
+mode reaches `fork` differently:
+
+- Source annotations: `rsched.h` maps `fork` to `rsched_fork`, and
+  `syscall()` routes `SYS_fork` and process-style `SYS_clone`.
+- Instrumented libc: the glibc and musl `fork` and `_exit` functions are
+  wrapped, and libc's clone boundary routes process-style clones.
+- LLVM pass: `rsched-atomics<direct-pthread>` rewrites `fork`, `waitpid`,
+  `_exit`, `execv`, `execve`, and `syscall`.
+- Binary instrumentation: a raw `fork` or process-style `clone` instruction
+  runs through the scheduler instead.
+- `RSCHED_SECCOMP=1`: a `fork` syscall issued outside rsched is trapped and
+  run through the scheduler. With `RSCHED_SECCOMP_TRAP_CLONE=1`, process-style
+  `clone` is too, while thread-style clones still abort.
+
+`vfork` and `clone` with `CLONE_VM` are not modeled.
+
 ## Binary instrumentation
 
 The repository includes an e9patch-based binary instrumentation tool for

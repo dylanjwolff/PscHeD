@@ -85,6 +85,7 @@ fn seccomp_case_define(name: &str) -> &'static str {
     match name {
         "seccomp_ok" => "CASE_SECCOMP_OK",
         "seccomp_raw_futex" => "CASE_SECCOMP_RAW_FUTEX",
+        "seccomp_raw_fork" => "CASE_SECCOMP_RAW_FORK",
         other => panic!("unknown seccomp example: {other}"),
     }
 }
@@ -154,6 +155,33 @@ fn seccomp_rejects_raw_futex_outside_rsched() {
             .stderr
             .contains("rsched: intercepted raw futex/clone syscall outside rsched"),
         "seccomp_raw_futex did not print expected diagnostic\nstdout:\n{}\nstderr:\n{}",
+        output.stdout,
+        output.stderr
+    );
+}
+
+#[test]
+fn seccomp_routes_raw_fork_through_the_scheduler() {
+    let program = build_example("seccomp_raw_fork");
+    let output = run_with_timeout(
+        &program,
+        &[("RSCHED_SECCOMP", "1"), ("RSCHED_PROCESS_LOG", "1")],
+    );
+    assert!(
+        !output.timed_out,
+        "seccomp_raw_fork timed out\nstdout:\n{}\nstderr:\n{}",
+        output.stdout, output.stderr
+    );
+    assert!(
+        output.status.success() && output.stdout.contains("child exited 7"),
+        "seccomp_raw_fork failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        output.stdout,
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("child resumed"),
+        "seccomp_raw_fork did not schedule the child process\nstdout:\n{}\nstderr:\n{}",
         output.stdout,
         output.stderr
     );

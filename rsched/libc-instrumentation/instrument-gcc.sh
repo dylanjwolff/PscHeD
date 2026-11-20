@@ -254,6 +254,7 @@ add_rewrite "___pthread_barrier_wait" "pthread_barrier_wait" "__rsched_real_pthr
 add_rewrite "__sched_yield" "sched_yield" "__rsched_real_sched_yield" "rsched_sched_yield" "__GI___sched_yield"
 add_rewrite "_exit" "_exit" "__rsched_real_process_exit" "rsched_process_exit_status" "__GI__exit"
 add_rewrite "__waitpid" "waitpid" "__rsched_real_waitpid" "rsched_waitpid" "__GI___waitpid"
+add_rewrite "__libc_fork" "fork" "__rsched_real_fork" "rsched_fork" "__GI___fork"
 add_io_rewrite "__libc_read" "read" "rsched_read"
 add_io_rewrite "__libc_write" "write" "rsched_write"
 add_io_rewrite "__readv" "readv" "rsched_readv"

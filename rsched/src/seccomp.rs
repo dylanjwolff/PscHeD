@@ -96,6 +96,15 @@ extern "C" fn sigsys_handler(
             return;
         }
 
+        // A process fork from outside rsched, such as a raw syscall in the
+        // program: run it as a scheduled process clone. Thread-style clones
+        // (CLONE_VM) still trip the wire below.
+        let mut ret = 0;
+        if crate::rsched_process_syscall(nr, args.as_ptr(), &mut ret) {
+            regs[libc::REG_RAX as usize] = ret as libc::greg_t;
+            return;
+        }
+
         if crate::is_in_rsched() {
             let ret = raw_syscall6(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
             regs[libc::REG_RAX as usize] = ret;
@@ -185,9 +194,15 @@ unsafe fn install_filter() {
         u32::MAX - 1
     };
 
-    // Trap futex, optionally clone, and modeled I/O unless they come from
-    // rsched's own syscall instruction.
-    let mut trapped = vec![libc::SYS_futex as u32, clone_syscall, clone3_syscall];
+    // Trap futex, fork, optionally clone, and modeled I/O unless they come
+    // from rsched's own syscall instruction. fork is always routed to the
+    // scheduler, never tripped, so it needs no opt-in.
+    let mut trapped = vec![
+        libc::SYS_futex as u32,
+        libc::SYS_fork as u32,
+        clone_syscall,
+        clone3_syscall,
+    ];
     trapped.extend(crate::io::MODELED_SYSCALLS.iter().map(|&nr| nr as u32));
     let ld = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
     let jeq = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;

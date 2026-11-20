@@ -853,7 +853,17 @@ pub unsafe extern "C" fn rsched_process_exit_status(status: libc::c_int) -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_fork() -> libc::pid_t {
     ensure_init();
-    st().task_provider.fork()
+    // The instrumented-libc depth is keyed by thread id, so the child starts
+    // at 0; give it the caller's depth so the libc fork wrapper's exit does
+    // not underflow it.
+    #[cfg(feature = "instrumented-libc")]
+    let depth = instrumented_depth_load();
+    let pid = st().task_provider.fork();
+    #[cfg(feature = "instrumented-libc")]
+    if pid == 0 {
+        instrumented_depth_store(depth);
+    }
+    pid
 }
 
 #[unsafe(no_mangle)]
@@ -870,11 +880,46 @@ pub unsafe extern "C" fn rsched_syscall(
         ensure_init();
         return st().task_provider.clone_process(a0, a1, a2, a3, a4).into();
     }
+    if number == libc::SYS_fork {
+        return rsched_fork().into();
+    }
     if io::is_modeled(number) {
         return io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5]);
     }
 
     libc::syscall(number, a0, a1, a2, a3, a4, a5)
+}
+
+/// Runs a process-creating syscall instruction reached outside rsched, such
+/// as a raw `fork` in the program seen by the seccomp trap or the e9patch
+/// hook, as a scheduled process clone. Stores the raw syscall result (a pid,
+/// 0 in the child, or -errno) in `ret` and returns true; returns false when
+/// the instruction should run unchanged, including thread-style clones.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_process_syscall(
+    number: libc::c_long,
+    args: *const libc::c_long,
+    ret: *mut libc::c_long,
+) -> bool {
+    if is_in_rsched() {
+        return false;
+    }
+    let args = std::slice::from_raw_parts(args, 5);
+    let pid = match number {
+        libc::SYS_fork => rsched_fork(),
+        libc::SYS_clone if args[0] & libc::c_long::from(libc::CLONE_VM) == 0 => {
+            ensure_init();
+            st().task_provider
+                .clone_process(args[0], args[1], args[2], args[3], args[4])
+        }
+        _ => return false,
+    };
+    *ret = if pid < 0 {
+        -libc::c_long::from(*libc::__errno_location())
+    } else {
+        pid.into()
+    };
+    true
 }
 
 #[cfg(feature = "instrumented-libc")]

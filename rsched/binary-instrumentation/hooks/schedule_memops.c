@@ -16,6 +16,9 @@ static schedule_memop_t schedule_memop_fn = NULL;
 typedef void (*io_prepare_t)(const void *, long, long *);
 static io_prepare_t io_prepare_fn = NULL;
 
+typedef _Bool (*process_syscall_t)(long, const long *, long *);
+static process_syscall_t process_syscall_fn = NULL;
+
 void mem_wri(const void *instr_addr, const void *mem_addr, size_t size)
 {
     if (schedule_memop_fn == NULL)
@@ -38,18 +41,24 @@ void mem_wi(const void *instr_addr, const void *mem_addr, size_t size)
     dlcall(schedule_memop_fn, instr_addr, mem_addr, size, WRITE);
 }
 
-/* Runs before each raw syscall instruction. rsched turns file and socket
+/* Runs before each raw syscall instruction. A process fork runs through
+ * rsched instead of the instruction: the result goes to rax and a non-zero
+ * return skips the original instruction. rsched turns file and socket
  * syscalls into scheduling points and waits until they cannot block; the
  * original instruction then executes. rsched may shorten a poll timeout
  * (the third argument), so that register is passed by pointer. */
-void io_syscall(const void *instr_addr, long nr, long a0, long a1, long *a2, long a3,
-                long a4, long a5)
+int io_syscall(const void *instr_addr, long *rax, long a0, long a1, long *a2, long a3,
+               long a4, long a5)
 {
-    if (io_prepare_fn == NULL)
-        return;
+    long nr = *rax;
     long args[6] = {a0, a1, *a2, a3, a4, a5};
+    if (process_syscall_fn != NULL && (_Bool)dlcall(process_syscall_fn, nr, args, rax))
+        return 1;
+    if (io_prepare_fn == NULL)
+        return 0;
     dlcall(io_prepare_fn, instr_addr, nr, args);
     *a2 = args[2];
+    return 0;
 }
 
 void init(int argc, const char **argv, char **envp, void *dynp)
@@ -61,4 +70,5 @@ void init(int argc, const char **argv, char **envp, void *dynp)
 
     schedule_memop_fn = dlsym(NULL, "rsched_atomic_instrument_ra");
     io_prepare_fn = dlsym(NULL, "rsched_io_prepare_syscall");
+    process_syscall_fn = dlsym(NULL, "rsched_process_syscall");
 }

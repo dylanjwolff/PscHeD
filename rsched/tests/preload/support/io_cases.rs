@@ -5,21 +5,19 @@
 use std::path::Path;
 use std::process::Command;
 
-/// `(case, scheduled)`: whether rsched schedules the case's tasks. Preload
-/// mode does not intercept libc's fork(), so the socketpair processes run
-/// unscheduled and their I/O passes straight through.
-const CASES: &[(&str, bool)] = &[
-    ("CASE_IO_PIPE_THREADS", true),
-    ("CASE_IO_SOCKETPAIR_PROCESSES", false),
-    ("CASE_IO_TCP_THREADS", true),
-    ("CASE_IO_FILE_THREADS", true),
+const CASES: &[&str] = &[
+    "CASE_IO_PIPE_THREADS",
+    "CASE_IO_SOCKETPAIR_PROCESSES",
+    "CASE_IO_TCP_THREADS",
+    "CASE_IO_FILE_THREADS",
 ];
 const SEEDS: u32 = 4;
 
-/// Each scheduled run must also log an I/O scheduling point.
+/// Each run must also log an I/O scheduling point, including the
+/// socketpair case's forked child.
 pub fn check_io_cases(compiler: &str, runner: &Path, temp: &Path) {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("c-examples/io_cases.c");
-    for &(case, scheduled) in CASES {
+    for &case in CASES {
         let binary = temp.join(case);
         let status = Command::new(compiler)
             .args(["-O0", "-pthread", "-Wall", "-Wextra", "-Werror"])
@@ -52,7 +50,7 @@ pub fn check_io_cases(compiler: &str, runner: &Path, temp: &Path) {
                 tail(&stderr),
             );
             assert!(
-                !scheduled || stderr.contains("[rsched] Io("),
+                stderr.contains("[rsched] Io("),
                 "{case} with seed {seed} reached no I/O scheduling point\nstderr tail:\n{}",
                 tail(&stderr),
             );
