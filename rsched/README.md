@@ -91,6 +91,13 @@ clang -fpass-plugin=/path/to/runtime/librsched_llvm_pass.so \
   -o my_program my_program.c
 ```
 
+The plugin joins clang's pipeline at its last optimization step, at every
+`-O` level, and inserts a call before each atomic instruction. That call
+reaches rsched through a weak reference, so the same binary also links and
+runs natively, where the calls do nothing. C++ works the same way; header
+code such as `std::atomic` and `shared_ptr` is instrumented, while a
+precompiled libstdc++ is not.
+
 The LLVM pass has separate glibc and musl modes when it is used to build libc.
 Application builds do not need to select those internal modes.
 
