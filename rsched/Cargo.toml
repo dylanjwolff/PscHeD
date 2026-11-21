@@ -66,6 +66,10 @@ name = "seccomp"
 path = "tests/source/seccomp.rs"
 
 [[test]]
+name = "sync"
+path = "tests/source/sync.rs"
+
+[[test]]
 name = "task_creation"
 path = "tests/source/task_creation.rs"
 

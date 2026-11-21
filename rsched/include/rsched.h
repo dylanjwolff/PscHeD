@@ -2,11 +2,13 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <semaphore.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifdef __cplusplus
@@ -45,6 +47,38 @@ int  rsched_pthread_barrier_init(pthread_barrier_t *,
                                  const pthread_barrierattr_t *,
                                  unsigned int);
 int  rsched_pthread_barrier_wait(pthread_barrier_t *);
+
+int  rsched_pthread_cond_timedwait(pthread_cond_t *, pthread_mutex_t *,
+                                   const struct timespec *);
+int  rsched_pthread_cond_clockwait(pthread_cond_t *, pthread_mutex_t *, clockid_t,
+                                   const struct timespec *);
+
+/* Semaphores, rwlocks, and pthread_once.  Timed waits expire in virtual time:
+   once no task can run, or after RSCHED_STARVATION_LIMIT scheduling points,
+   and never before their deadline has passed. */
+int  rsched_sem_wait(sem_t *);
+int  rsched_sem_trywait(sem_t *);
+int  rsched_sem_timedwait(sem_t *, const struct timespec *);
+int  rsched_sem_clockwait(sem_t *, clockid_t, const struct timespec *);
+int  rsched_sem_post(sem_t *);
+int  rsched_pthread_rwlock_rdlock(pthread_rwlock_t *);
+int  rsched_pthread_rwlock_wrlock(pthread_rwlock_t *);
+int  rsched_pthread_rwlock_tryrdlock(pthread_rwlock_t *);
+int  rsched_pthread_rwlock_trywrlock(pthread_rwlock_t *);
+int  rsched_pthread_rwlock_timedrdlock(pthread_rwlock_t *, const struct timespec *);
+int  rsched_pthread_rwlock_timedwrlock(pthread_rwlock_t *, const struct timespec *);
+int  rsched_pthread_rwlock_clockrdlock(pthread_rwlock_t *, clockid_t,
+                                       const struct timespec *);
+int  rsched_pthread_rwlock_clockwrlock(pthread_rwlock_t *, clockid_t,
+                                       const struct timespec *);
+int  rsched_pthread_rwlock_unlock(pthread_rwlock_t *);
+int  rsched_pthread_once(pthread_once_t *, void (*)(void));
+
+/* Sleeps block the task in virtual time, like timed waits. */
+int  rsched_nanosleep(const struct timespec *, struct timespec *);
+int  rsched_clock_nanosleep(clockid_t, int, const struct timespec *, struct timespec *);
+int  rsched_usleep(useconds_t);
+unsigned int rsched_sleep(unsigned int);
 
 int  rsched_sched_yield(void);
 pid_t rsched_fork(void);
@@ -92,6 +126,27 @@ int rsched_dup3(int, int, int);
 #define pthread_cond_wait       rsched_pthread_cond_wait
 #define pthread_cond_signal     rsched_pthread_cond_signal
 #define pthread_cond_broadcast  rsched_pthread_cond_broadcast
+#define pthread_cond_timedwait  rsched_pthread_cond_timedwait
+#define pthread_cond_clockwait  rsched_pthread_cond_clockwait
+#define sem_wait                rsched_sem_wait
+#define sem_trywait             rsched_sem_trywait
+#define sem_timedwait           rsched_sem_timedwait
+#define sem_clockwait           rsched_sem_clockwait
+#define sem_post                rsched_sem_post
+#define pthread_rwlock_rdlock   rsched_pthread_rwlock_rdlock
+#define pthread_rwlock_wrlock   rsched_pthread_rwlock_wrlock
+#define pthread_rwlock_tryrdlock rsched_pthread_rwlock_tryrdlock
+#define pthread_rwlock_trywrlock rsched_pthread_rwlock_trywrlock
+#define pthread_rwlock_timedrdlock rsched_pthread_rwlock_timedrdlock
+#define pthread_rwlock_timedwrlock rsched_pthread_rwlock_timedwrlock
+#define pthread_rwlock_clockrdlock rsched_pthread_rwlock_clockrdlock
+#define pthread_rwlock_clockwrlock rsched_pthread_rwlock_clockwrlock
+#define pthread_rwlock_unlock   rsched_pthread_rwlock_unlock
+#define pthread_once            rsched_pthread_once
+#define nanosleep               rsched_nanosleep
+#define clock_nanosleep         rsched_clock_nanosleep
+#define usleep                  rsched_usleep
+#define sleep                   rsched_sleep
 #define pthread_barrier_init    rsched_pthread_barrier_init
 #define pthread_barrier_wait    rsched_pthread_barrier_wait
 #define sched_yield             rsched_sched_yield
