@@ -11,3 +11,6 @@
 	path = rsched/glibc/glibc
 	url = https://sourceware.org/git/glibc.git
 	branch = release/2.39/master
+[submodule "rsched/targets/duckdb/duckdb"]
+	path = rsched/targets/duckdb/duckdb
+	url = https://github.com/duckdb/duckdb.git

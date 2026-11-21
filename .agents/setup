@@ -18,9 +18,9 @@ step() {
 }
 
 apt_packages=(
-  build-essential bison ca-certificates clang-18 curl file g++-13 gawk gcc-13
+  build-essential bison ca-certificates clang-18 cmake curl file g++-13 gawk gcc-13
   gcc-13-plugin-dev git libclang-rt-18-dev llvm-18-dev markdown musl-tools
-  pkg-config zstd
+  ninja-build pkg-config zstd
 )
 
 install_apt_packages() {
