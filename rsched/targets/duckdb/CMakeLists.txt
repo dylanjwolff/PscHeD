@@ -6,8 +6,6 @@ project(duckdb_rsched C CXX)
 add_subdirectory(duckdb)
 find_package(Threads REQUIRED)
 
-add_library(rsched_stub SHARED rsched_stub.c)
-
 add_executable(duckdb_stress stress.cpp compat.c)
 target_include_directories(duckdb_stress PRIVATE duckdb/src/include)
 # DuckDB's link_extension_libraries() reads extension names scoped to its own
@@ -16,5 +14,4 @@ target_include_directories(duckdb_stress PRIVATE duckdb/src/include)
 target_link_libraries(
   duckdb_stress
   "$<LINK_GROUP:RESCAN,duckdb_generated_extension_loader,core_functions_extension,duckdb_static>"
-  rsched_stub Threads::Threads -static-libstdc++ -static-libgcc)
-set_target_properties(duckdb_stress PROPERTIES BUILD_RPATH "$ORIGIN")
+  Threads::Threads -static-libstdc++ -static-libgcc)

@@ -7,7 +7,9 @@ use llvm_plugin::inkwell::llvm_sys::core::{
     LLVMSetLinkage, LLVMSetOperand, LLVMSetValueName2, LLVMSetVisibility, LLVMTypeOf,
 };
 use llvm_plugin::inkwell::llvm_sys::{LLVMLinkage, LLVMVisibility};
-use llvm_plugin::inkwell::module::Module;
+use llvm_plugin::inkwell::attributes::{Attribute, AttributeLoc};
+use llvm_plugin::inkwell::intrinsics::Intrinsic;
+use llvm_plugin::inkwell::module::{Linkage, Module};
 use llvm_plugin::inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicTypeEnum};
 use llvm_plugin::inkwell::values::{
     AsValueRef, BasicMetadataValueEnum, BasicValueEnum, CallSiteValue, FunctionValue,
@@ -29,6 +31,16 @@ struct RschedAtomicsPass {
 
 #[llvm_plugin::plugin(name = "rsched_llvm_pass", version = "0.1.0")]
 fn plugin_registrar(builder: &mut PassBuilder) {
+    // `clang -fpass-plugin=...` runs only the default pipeline, so join it
+    // at its last extension point, which every -O level runs. This mode
+    // instruments application atomics only.
+    builder.add_optimizer_last_ep_callback(|manager, _level| {
+        manager.add_pass(RschedAtomicsPass {
+            direct_pthread: false,
+            musl_libc: false,
+            glibc_libc: false,
+        });
+    });
     builder.add_module_pipeline_parsing_callback(|name, manager| {
         let Some(pass) = parse_pass_name(name) else {
             return PipelineParsing::NotParsed;
@@ -286,6 +298,78 @@ fn wrap_fuzzer_entrypoint(module: &mut Module<'_>) -> bool {
     true
 }
 
+/// Returns the module's `rsched.atomic.hook`, defining it on first use.
+///
+/// Instrumented atomics call this internal thunk instead of the runtime
+/// directly. It passes its return address, the atomic's call site, to
+/// `rsched_atomic_instrument_ra`, which it references weakly: a program that
+/// runs without an rsched runtime links and runs natively, and the hook
+/// does nothing.
+fn atomic_hook_thunk<'ctx>(
+    module: &Module<'ctx>,
+    hook_ty: llvm_plugin::inkwell::types::FunctionType<'ctx>,
+) -> FunctionValue<'ctx> {
+    const THUNK: &str = "rsched.atomic.hook";
+    if let Some(thunk) = module.get_function(THUNK) {
+        return thunk;
+    }
+    let context = module.get_context();
+    let ptr_ty = context.ptr_type(AddressSpace::default());
+    let runtime_ty = context.void_type().fn_type(
+        &[
+            BasicMetadataTypeEnum::PointerType(ptr_ty),
+            BasicMetadataTypeEnum::PointerType(ptr_ty),
+            BasicMetadataTypeEnum::IntType(context.i64_type()),
+            BasicMetadataTypeEnum::IntType(context.i32_type()),
+        ],
+        false,
+    );
+    let runtime = module
+        .get_function("rsched_atomic_instrument_ra")
+        .unwrap_or_else(|| module.add_function("rsched_atomic_instrument_ra", runtime_ty, None));
+    if runtime.count_basic_blocks() == 0 {
+        runtime.set_linkage(Linkage::ExternalWeak);
+    }
+    let thunk = module.add_function(THUNK, hook_ty, Some(Linkage::Internal));
+    let noinline = Attribute::get_named_enum_kind_id("noinline");
+    thunk.add_attribute(AttributeLoc::Function, context.create_enum_attribute(noinline, 0));
+    let return_address = Intrinsic::find("llvm.returnaddress")
+        .and_then(|intrinsic| intrinsic.get_declaration(module, &[]))
+        .expect("declare llvm.returnaddress");
+
+    let builder = context.create_builder();
+    let entry = context.append_basic_block(thunk, "entry");
+    let call = context.append_basic_block(thunk, "call");
+    let done = context.append_basic_block(thunk, "done");
+    builder.position_at_end(entry);
+    let linked = builder
+        .build_is_not_null(runtime.as_global_value().as_pointer_value(), "linked")
+        .expect("check rsched runtime presence");
+    builder
+        .build_conditional_branch(linked, call, done)
+        .expect("branch on rsched runtime presence");
+    builder.position_at_end(call);
+    let site = builder
+        .build_call(
+            return_address,
+            &[BasicMetadataValueEnum::IntValue(context.i32_type().const_zero())],
+            "site",
+        )
+        .expect("call llvm.returnaddress")
+        .try_as_basic_value()
+        .left()
+        .expect("llvm.returnaddress returns a pointer");
+    let mut args = vec![BasicMetadataValueEnum::from(site)];
+    args.extend(thunk.get_param_iter().map(BasicMetadataValueEnum::from));
+    builder
+        .build_call(runtime, &args, "")
+        .expect("call rsched_atomic_instrument_ra");
+    builder.build_unconditional_branch(done).expect("branch to thunk exit");
+    builder.position_at_end(done);
+    builder.build_return(None).expect("return from atomic hook thunk");
+    thunk
+}
+
 fn instrument_atomics(module: &mut Module<'_>) -> bool {
     let context = module.get_context();
     let void_ty = context.void_type();
@@ -300,11 +384,15 @@ fn instrument_atomics(module: &mut Module<'_>) -> bool {
         ],
         false,
     );
-    let hook = module
-        .get_function("rsched_atomic_instrument")
-        .unwrap_or_else(|| module.add_function("rsched_atomic_instrument", hook_ty, None));
     let builder = context.create_builder();
+    let hook = atomic_hook_thunk(module, hook_ty);
 
+    // The pass can reach a module twice, for example through -fpass-plugin
+    // and then `opt -passes=rsched-atomics`; hooks must not be doubled.
+    const INSTRUMENTED: &str = "rsched.atomics.instrumented";
+    if module.get_global_metadata_size(INSTRUMENTED) != 0 {
+        return false;
+    }
     let mut changed = false;
     let mut function = module.get_first_function();
     while let Some(func) = function {
@@ -341,6 +429,12 @@ fn instrument_atomics(module: &mut Module<'_>) -> bool {
         function = func.get_next_function();
     }
 
+    if changed {
+        let marker = context.metadata_node(&[]);
+        module
+            .add_global_metadata(INSTRUMENTED, &marker)
+            .expect("mark module as rsched-instrumented");
+    }
     changed
 }
 
@@ -1097,6 +1191,125 @@ const MUSL_REWRITES: &[LibcRewrite] = &[
         public: "pthread_barrier_wait",
         real: "__rsched_real_pthread_barrier_wait",
         rsched: "rsched_pthread_barrier_wait",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__pthread_cond_timedwait",
+        public: "pthread_cond_timedwait",
+        real: "__rsched_real_pthread_cond_timedwait",
+        rsched: "rsched_pthread_cond_timedwait",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "sem_wait",
+        public: "sem_wait",
+        real: "__rsched_real_sem_wait",
+        rsched: "rsched_sem_wait",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "sem_trywait",
+        public: "sem_trywait",
+        real: "__rsched_real_sem_trywait",
+        rsched: "rsched_sem_trywait",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "sem_timedwait",
+        public: "sem_timedwait",
+        real: "__rsched_real_sem_timedwait",
+        rsched: "rsched_sem_timedwait",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "sem_post",
+        public: "sem_post",
+        real: "__rsched_real_sem_post",
+        rsched: "rsched_sem_post",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__pthread_rwlock_rdlock",
+        public: "pthread_rwlock_rdlock",
+        real: "__rsched_real_pthread_rwlock_rdlock",
+        rsched: "rsched_pthread_rwlock_rdlock",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__pthread_rwlock_wrlock",
+        public: "pthread_rwlock_wrlock",
+        real: "__rsched_real_pthread_rwlock_wrlock",
+        rsched: "rsched_pthread_rwlock_wrlock",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__pthread_rwlock_tryrdlock",
+        public: "pthread_rwlock_tryrdlock",
+        real: "__rsched_real_pthread_rwlock_tryrdlock",
+        rsched: "rsched_pthread_rwlock_tryrdlock",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__pthread_rwlock_trywrlock",
+        public: "pthread_rwlock_trywrlock",
+        real: "__rsched_real_pthread_rwlock_trywrlock",
+        rsched: "rsched_pthread_rwlock_trywrlock",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__pthread_rwlock_timedrdlock",
+        public: "pthread_rwlock_timedrdlock",
+        real: "__rsched_real_pthread_rwlock_timedrdlock",
+        rsched: "rsched_pthread_rwlock_timedrdlock",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__pthread_rwlock_timedwrlock",
+        public: "pthread_rwlock_timedwrlock",
+        real: "__rsched_real_pthread_rwlock_timedwrlock",
+        rsched: "rsched_pthread_rwlock_timedwrlock",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__pthread_rwlock_unlock",
+        public: "pthread_rwlock_unlock",
+        real: "__rsched_real_pthread_rwlock_unlock",
+        rsched: "rsched_pthread_rwlock_unlock",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__pthread_once",
+        public: "pthread_once",
+        real: "__rsched_real_pthread_once",
+        rsched: "rsched_pthread_once",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "nanosleep",
+        public: "nanosleep",
+        real: "__rsched_real_nanosleep",
+        rsched: "rsched_nanosleep",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__clock_nanosleep",
+        public: "clock_nanosleep",
+        real: "__rsched_real_clock_nanosleep",
+        rsched: "rsched_clock_nanosleep",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "usleep",
+        public: "usleep",
+        real: "__rsched_real_usleep",
+        rsched: "rsched_usleep",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "sleep",
+        public: "sleep",
+        real: "__rsched_real_sleep",
+        rsched: "rsched_sleep",
         diverges: false,
     },
     LibcRewrite {

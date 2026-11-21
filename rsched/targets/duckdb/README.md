@@ -26,11 +26,6 @@ every determined result and exits non-zero on a mismatch. `SCALE` multiplies
 the workload; rsched runs need a fraction because every atomic is a scheduling
 point.
 
-Build pieces:
-
-- `rsched-cc.sh` is the CMake compiler launcher that runs
-  `opt -passes=rsched-atomics` between emit-llvm and codegen.
-- `rsched_stub.c` defines a no-op `rsched_atomic_instrument` so the same
-  binary runs natively; under rsched the preloaded libc's definition wins.
-- `compat.c` supplies the glibc 2.36+ symbols that host headers and the
-  static libstdc++ reference, so the binary loads under glibc 2.35.
+`build.sh` compiles DuckDB with `clang -fpass-plugin=librsched_llvm_pass.so`.
+`compat.c` supplies the glibc 2.36+ symbols that host headers and the static
+libstdc++ reference, so the binary loads under glibc 2.35.
