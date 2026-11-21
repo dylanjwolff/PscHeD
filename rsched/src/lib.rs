@@ -24,6 +24,7 @@ pub use event::{AccessKind, Event, EventKind};
 mod fuzzing;
 mod io;
 mod seccomp;
+mod sync;
 mod sys;
 mod task_provider;
 mod tsan;
@@ -78,6 +79,8 @@ struct Thread {
     /// What this thread is about to do at the next scheduling point.
     /// Set before each context switch, cleared after the operation completes.
     pub next_event: Option<Event>,
+    /// Set when the thread's timed wait expired; see `State::block_on`.
+    timed_out: bool,
 }
 
 impl Thread {
@@ -96,6 +99,7 @@ impl Thread {
             joiner: None,
             is_exited: false,
             next_event: None,
+            timed_out: false,
         }
     }
 }
@@ -129,6 +133,15 @@ struct State {
     recursive_mutex_attrs: HashSet<usize>,
     conds: HashMap<usize, SCond>,
     barriers: HashMap<usize, SBarrier>,
+    /// Tasks blocked on each semaphore; see `sync`.
+    sem_waiters: HashMap<usize, Vec<PthreadT>>,
+    rwlocks: HashMap<usize, sync::SRwLock>,
+    /// pthread_once controls being initialized, with the tasks waiting.
+    once_running: HashMap<usize, Vec<PthreadT>>,
+    /// Blocked tasks whose wait has a deadline.
+    timed_waits: Vec<sync::TimedWait>,
+    /// Scheduling points so far, the clock for the starvation limit.
+    points: u64,
     /// A child thread created but not yet processed at a scheduling point.
     /// rsched_pthread_create stores the (StartArg*, child pthread_t) here and
     /// returns immediately so sanitiser post-create hooks can run.  The next
@@ -154,6 +167,11 @@ impl State {
             recursive_mutex_attrs: HashSet::new(),
             conds: HashMap::new(),
             barriers: HashMap::new(),
+            sem_waiters: HashMap::new(),
+            rwlocks: HashMap::new(),
+            once_running: HashMap::new(),
+            timed_waits: Vec::new(),
+            points: 0,
             pending_child: None,
             #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
             pending_pthread_clones: Vec::new(),
@@ -271,6 +289,7 @@ impl State {
         if !self.task(caller).startup_done() {
             self.task(caller).set_startup_done(true);
         }
+        self.points += 1;
 
         let event = self.info.get(&caller).and_then(|t| t.next_event);
         let caller_task = self.task(caller).creation_idx();
@@ -291,7 +310,11 @@ impl State {
 
         let choice = self.choose_task(caller, avoid_self);
         if scheduler::logging_enabled() {
-            let blocked = if self.task(caller).is_blocking() { " blocked" } else { "" };
+            let blocked = if self.task(caller).is_blocking() {
+                " blocked"
+            } else {
+                ""
+            };
             match choice {
                 Some(choice) if choice.pthread != caller => match choice.creation_idx {
                     Some(to) => log_line!("[rsched] Switch(to={to}{blocked}) task={caller_task}"),
@@ -324,9 +347,14 @@ impl State {
     /// on I/O, this waits in the kernel for one of them.
     unsafe fn choose_task(&mut self, caller: PthreadT, avoid_self: bool) -> Option<TaskChoice> {
         task_provider::wake_io_waiters(false);
+        self.expire_timed_wait(true);
         loop {
             if let Some(choice) = self.choose_runnable_task(caller, avoid_self) {
                 return Some(choice);
+            }
+            // Deadlines pass in virtual time: once no task can run.
+            if self.expire_timed_wait(false) {
+                continue;
             }
             if !task_provider::wake_io_waiters(true) {
                 return None;
@@ -2010,7 +2038,19 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
     cond: *mut CondT,
     lock: *mut MutexT,
 ) -> libc::c_int {
+    cond_wait_impl(cond, lock, None)
+}
+
+/// Waits on `cond`, which `deadline`, if any, ends with ETIMEDOUT.
+pub(crate) unsafe fn cond_wait_impl(
+    cond: *mut CondT,
+    lock: *mut MutexT,
+    deadline: Option<sync::Deadline>,
+) -> libc::c_int {
     ensure_init();
+    if !sync::valid_deadline(deadline) {
+        return libc::EINVAL;
+    }
     let ckey = cond as usize;
     let lkey = lock as usize;
     rsched_glock();
@@ -2031,13 +2071,11 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
         })
         .waiters
         .push(caller);
-    st().task(caller).set_blocking(true);
-    st().context_switch(caller);
-    st().park_if_blocked(caller);
+    let expired = st().block_on(caller, sync::WaitOn::Cond(ckey), deadline);
 
     st().mutex_lock(lkey, caller);
     rsched_gunlock();
-    0
+    if expired { libc::ETIMEDOUT } else { 0 }
 }
 
 // ── rsched_pthread_cond_signal ────────────────────────────────────────────

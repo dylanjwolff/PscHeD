@@ -121,7 +121,28 @@ Useful environment variables:
 | `RSCHED_SCHEDULER` | random | Set to `dfs` for depth-first exploration |
 | `RSCHED_LOG` | unset | Set to `1` to log scheduling decisions |
 | `RSCHED_FUZZ_SCHEDULES` | `5` | Schedules executed for each libFuzzer input |
+| `RSCHED_STARVATION_LIMIT` | `50000` | Scheduling points a timed wait or sleep may stay blocked while other tasks run |
 | `RSCHED_SECCOMP` | unset | Set to `1` on Linux x86_64 to trap unsupported raw synchronization syscalls and route I/O issued outside rsched through the I/O model |
+
+## Synchronization and time
+
+Mutexes, condition variables (including `pthread_cond_timedwait` and
+`pthread_cond_clockwait`), barriers, semaphores (`sem_wait`, `sem_trywait`,
+`sem_timedwait`, `sem_clockwait`, `sem_post`), reader-writer locks,
+`pthread_once`, and sleeps (`nanosleep`, `clock_nanosleep`, `usleep`,
+`sleep`) are scheduling points. A task blocked on one is not runnable until
+another task releases it.
+
+Deadlines pass in virtual time. A task whose timed wait or sleep only its
+deadline can end stays blocked until no other task can run, or until it has
+been blocked for `RSCHED_STARVATION_LIMIT` scheduling points, so a task that
+spins on a flag cannot starve it. When rsched expires the wait, it first
+sleeps until the real deadline, so a timeout is never reported early. Which
+wait expires and when depends only on the schedule.
+
+Semaphores must be shared within one process. Process-shared rwlocks and
+`pthread_once` routines that unwind are not modeled; a routine that throws
+aborts the process.
 
 ## File and socket I/O
 

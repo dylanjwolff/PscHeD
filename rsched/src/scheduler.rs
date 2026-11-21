@@ -434,6 +434,13 @@ impl<S: Scheduler> Scheduler for LoggingScheduler<S> {
                 EventKind::SchedYield => {
                     crate::log_line!("[rsched] SchedYield @ 0x{:x} task={task}", ev.instr_addr);
                 }
+                EventKind::Sync { op, obj } => {
+                    crate::log_line!(
+                        "[rsched] Sync({op}, obj=0x{:x}) @ 0x{:x} task={task}",
+                        obj as usize,
+                        ev.instr_addr
+                    );
+                }
                 EventKind::Io { fd, syscall } => {
                     crate::log_line!(
                         "[rsched] Io(syscall={syscall}, fd={fd}) @ 0x{:x} task={task}",
