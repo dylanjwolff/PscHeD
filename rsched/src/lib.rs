@@ -162,7 +162,15 @@ impl State {
 
     unsafe fn add(&mut self, mut t: Thread) {
         let pt = t.pthread;
-        t.task = Some(self.task_provider.register_task(pt));
+        let task = self.task_provider.register_task(pt);
+        t.task = Some(task);
+        if scheduler::logging_enabled() {
+            log_line!(
+                "[rsched] TaskRegistered(tid={}) task={}",
+                t.tid,
+                task.creation_idx()
+            );
+        }
         self.threads.push(pt);
         self.info.insert(pt, Box::new(t));
     }
@@ -171,6 +179,11 @@ impl State {
         self.threads.retain(|&x| x != pt);
         if let Some(t) = self.info.get_mut(&pt) {
             t.is_exited = true;
+            if scheduler::logging_enabled()
+                && let Some(task) = t.task
+            {
+                log_line!("[rsched] TaskExit task={}", task.creation_idx());
+            }
             unsafe {
                 t.task
                     .expect("rsched: registered thread has no task handle")
@@ -260,7 +273,8 @@ impl State {
         }
 
         let event = self.info.get(&caller).and_then(|t| t.next_event);
-        self.scheduler.on_event(event.as_ref());
+        let caller_task = self.task(caller).creation_idx();
+        self.scheduler.on_event(caller_task, event.as_ref());
         if event.is_some() {
             self.clear_event(caller);
         }
@@ -275,7 +289,22 @@ impl State {
                     })
                 ));
 
-        if let Some(choice) = self.choose_task(caller, avoid_self) {
+        let choice = self.choose_task(caller, avoid_self);
+        if scheduler::logging_enabled() {
+            let blocked = if self.task(caller).is_blocking() { " blocked" } else { "" };
+            match choice {
+                Some(choice) if choice.pthread != caller => match choice.creation_idx {
+                    Some(to) => log_line!("[rsched] Switch(to={to}{blocked}) task={caller_task}"),
+                    None => log_line!(
+                        "[rsched] Switch(to=domain {}{blocked}) task={caller_task}",
+                        choice.domain
+                    ),
+                },
+                Some(_) => {}
+                None => log_line!("[rsched] NoRunnableTask({blocked}) task={caller_task}"),
+            }
+        }
+        if let Some(choice) = choice {
             self.mark_waiting(caller, true);
             if let SwitchResult::WakeLocal {
                 pthread,
