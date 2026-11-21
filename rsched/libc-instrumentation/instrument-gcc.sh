@@ -25,7 +25,14 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     esac
 done
 
-if ! $compile || [[ -z "$source_file" || -z "$output_file" ]]; then
+# glibc assembles most syscall wrappers, such as dup2, from stdin
+# (make-syscalls.sh). Those get wrappers too, but no plugin.
+stdin_asm=false
+if $compile && [[ -z "$source_file" && -n "$output_file" && " ${args[*]} " == *" - "* ]]; then
+    stdin_asm=true
+fi
+
+if ! $compile || [[ -z "$output_file" ]] || { [[ -z "$source_file" ]] && ! $stdin_asm; }; then
     exec "$compiler" "$@"
 fi
 
@@ -80,7 +87,9 @@ for ((i = 0; i < ${#args[@]}; i++)); do
             ;;
     esac
 done
-compile_args+=("-fplugin=$RSCHED_GCC_PLUGIN")
+if ! $stdin_asm; then
+    compile_args+=("-fplugin=$RSCHED_GCC_PLUGIN")
+fi
 
 "$compiler" "${compile_args[@]}"
 
@@ -269,6 +278,11 @@ add_io_rewrite "__libc_accept" "accept" "rsched_accept"
 add_io_rewrite "accept4" "accept4" "rsched_accept4"
 add_io_rewrite "__libc_connect" "connect" "rsched_connect"
 add_io_rewrite "__poll" "poll" "rsched_poll"
+add_io_rewrite "__close" "close" "rsched_close"
+add_io_rewrite "__close_range" "close_range" "rsched_close_range"
+add_io_rewrite "__closefrom" "closefrom" "rsched_closefrom"
+add_io_rewrite "__dup2" "dup2" "rsched_dup2"
+add_io_rewrite "__dup3" "dup3" "rsched_dup3"
 
 if [[ ${#objcopy_args[@]} -eq 0 ]]; then
     mv "$object" "$output_file"

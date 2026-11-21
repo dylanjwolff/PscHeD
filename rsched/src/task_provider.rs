@@ -1,6 +1,8 @@
 use crate::scheduler::SharedDfsState;
+use crate::sys::{self, Epoll, Event, Interest, Timeout};
 use crate::{AttrT, CloneStart, CondT, PthreadT, StartArg};
 use std::ffi::{CStr, CString};
+use std::mem::ManuallyDrop;
 use std::ptr::addr_of_mut;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
@@ -80,6 +82,7 @@ impl TaskHandle {
             task.active = 0;
             task.is_blocking = 1;
             task.is_waiting = 0;
+            task.io_wait = 0;
         });
     }
 }
@@ -809,6 +812,9 @@ struct SharedTask {
     is_blocking: u8,
     startup_done: u8,
     is_waiting: u8,
+    /// Blocked in [`io_wait`] until a descriptor is ready.
+    io_wait: u8,
+    _pad: [u8; 3],
     domain: i32,
     pthread: usize,
 }
@@ -854,9 +860,9 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
         return p;
     }
 
-    let fd =
-        libc::syscall(libc::SYS_memfd_create, c"rsched-process-shared".as_ptr(), 0) as libc::c_int;
-    assert!(fd >= 0, "rsched: memfd_create failed");
+    let memfd = sys::memfd_create(c"rsched-process-shared").expect("rsched: memfd_create failed");
+    let io_epoll = Epoll::new().expect("rsched: epoll_create1 failed");
+    let fd = reserve_fd_pair(memfd, io_epoll);
     let r = libc::ftruncate(fd, size as libc::off_t);
     assert_eq!(r, 0, "rsched: ftruncate shared process state failed");
 
@@ -890,6 +896,57 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
             existing
         }
     }
+}
+
+/// Lowest number for rsched's own descriptors, high enough that programs,
+/// which `dup2` onto small numbers such as a shell's `exec 3<file`, do not
+/// ask for one of them.
+const RESERVED_FD_BASE: libc::c_int = 900;
+
+/// Moves the shared state's memfd and the shared I/O epoll to two adjacent
+/// numbers, `base` and `base + 1`, from [`RESERVED_FD_BASE`] up when the
+/// descriptor limit allows, and returns `base`. Both stay open, and open
+/// across exec, for the life of the process: exec'd processes find the
+/// memfd through `RSCHED_SHM_FD` and the epoll right after it.
+fn reserve_fd_pair(memfd: libc::c_int, io_epoll: Epoll) -> libc::c_int {
+    let mut min = RESERVED_FD_BASE;
+    let base = loop {
+        // Above the descriptor limit, fall back to the lowest free numbers.
+        let base = sys::dup_from(memfd, min)
+            .or_else(|_| sys::dup_from(memfd, 0))
+            .expect("rsched: no descriptor free for the shared state");
+        let next = sys::dup_from(io_epoll.as_raw_fd(), base + 1)
+            .expect("rsched: no descriptor free for the shared epoll");
+        if next == base + 1 {
+            break base;
+        }
+        // base + 1 is taken: look for a pair above it.
+        let _ = sys::close(base);
+        let _ = sys::close(next);
+        min = base + 2;
+    };
+    // The originals were only needed to make the copies.
+    let _ = sys::close(memfd);
+    drop(io_epoll);
+    base
+}
+
+/// The first of rsched's two reserved descriptors in this process (see
+/// [`reserve_fd_pair`]), or `None` before the shared state exists. The
+/// program must never close or replace them; see `io::guarded_syscall`.
+pub(crate) fn reserved_fd_base() -> Option<libc::c_int> {
+    let base = PROCESS_SHARED_FD.load(Ordering::Acquire);
+    (base >= 0).then_some(base)
+}
+
+/// The epoll instance shared by every process: each task blocked on I/O
+/// adds its own epoll of the descriptors it waits for, so any process can
+/// tell when another process's waiter becomes runnable.
+fn io_epoll() -> ManuallyDrop<Epoll> {
+    let base = reserved_fd_base().expect("rsched: shared epoll used before process state");
+    // SAFETY: rsched keeps its reserved descriptors open for the life of the
+    // process, and the program cannot close them.
+    unsafe { Epoll::borrow_raw(base + 1) }
 }
 
 fn set_env_usize(key: &str, value: usize) {
@@ -954,6 +1011,7 @@ unsafe fn deactivate_process_tasks(ps: *mut ProcessShared, domain: i32) {
             (*ps).tasks[id].active = 0;
             (*ps).tasks[id].is_blocking = 1;
             (*ps).tasks[id].is_waiting = 0;
+            (*ps).tasks[id].io_wait = 0;
         }
     }
 }
@@ -993,6 +1051,8 @@ impl ProcessTaskProvider {
             is_blocking: 0,
             startup_done: 0,
             is_waiting: 0,
+            io_wait: 0,
+            _pad: [0; 3],
             domain: slot,
             pthread: pt as usize,
         };
@@ -1490,6 +1550,89 @@ impl ProcessTaskProvider {
         }
         self.inner.attach_pthread(task_key, pthread);
     }
+}
+
+/// Blocks `task`, which must be the caller, until a descriptor in `waits`,
+/// an epoll instance owned by the caller, is ready. The task is not runnable
+/// meanwhile; [`wake_io_waiters`] makes it runnable again. Must be called
+/// with GMTX held; `switch` runs the scheduler and returns once the task has
+/// been chosen again. Returns false without blocking when `waits` cannot be
+/// watched, such as when the program closed the shared epoll or nested its
+/// own epolls as deep as the kernel allows.
+pub(crate) unsafe fn io_wait(task: TaskHandle, waits: &Epoll, switch: impl FnOnce()) -> bool {
+    // One-shot: report the waiter once, even though it stays ready until it
+    // runs and removes itself.
+    let registered = io_epoll().add(
+        waits.as_raw_fd(),
+        Interest::IN | Interest::ONESHOT,
+        task.creation_idx as u64,
+    );
+    if registered.is_err() {
+        return false;
+    }
+    task.with_task(|t| t.io_wait = 1);
+    task.set_blocking(true);
+    switch();
+    task.with_task(|t| t.io_wait = 0);
+    let _ = io_epoll().delete(waits.as_raw_fd());
+    true
+}
+
+/// Makes every task blocked in [`io_wait`] whose descriptors are now ready
+/// runnable. With `block`, first waits in the kernel until one is, which is
+/// how rsched waits for I/O from outside the program once no task can run.
+/// It releases GMTX while it waits, because a task that is not parked, such
+/// as a free-running thread under TSAN, may need GMTX to make the descriptor
+/// ready. Returns whether any task is blocked on I/O. Must be called with
+/// GMTX held.
+pub(crate) unsafe fn wake_io_waiters(block: bool) -> bool {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if ps.is_null() {
+        return false;
+    }
+    let blocked = (0..(*ps).task_count.min(MAX_TASKS)).any(|id| {
+        let t = (*ps).tasks[id];
+        t.active != 0 && t.io_wait != 0 && t.is_blocking != 0
+    });
+    if !blocked {
+        return false;
+    }
+    let mut events = [Event::EMPTY; 64];
+    let timeout = if block { Timeout::Never } else { Timeout::Now };
+    let ready = loop {
+        if block {
+            crate::rsched_gunlock();
+        }
+        let result = io_epoll()
+            .wait(&mut events, timeout)
+            .map(|ready| ready.len());
+        if block {
+            crate::rsched_glock();
+        }
+        match result {
+            Ok(ready) => break ready,
+            Err(error) if error.raw_os_error() == Some(libc::EINTR) => {}
+            Err(_) => {
+                // Not expected, since the program cannot close the shared
+                // epoll. Wake every I/O waiter: each checks its descriptors
+                // again and, unable to register a new wait, falls back to
+                // yielding.
+                for id in 0..(*ps).task_count.min(MAX_TASKS) {
+                    if (*ps).tasks[id].io_wait != 0 {
+                        (*ps).tasks[id].is_blocking = 0;
+                    }
+                }
+                return true;
+            }
+        }
+    };
+    for event in &events[..ready] {
+        let id = event.data() as usize;
+        if id < (*ps).task_count && (*ps).tasks[id].io_wait != 0 {
+            (*ps).tasks[id].is_blocking = 0;
+        }
+    }
+    true
 }
 
 pub(crate) unsafe fn deactivate_current_domain_tasks() {

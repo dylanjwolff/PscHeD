@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -291,6 +292,53 @@ static int run_once(void) {
     for (int i = 0; i < TRACE_MAX; i++)
         mark(buf[i]);
     return bad;
+}
+
+#elif defined(CASE_IO_BLOCKED_WAITER)
+
+/* A worker waits in poll and then read on an empty pipe while the main
+   thread and a helper each yield BLOCKED_YIELDS times before the main thread
+   writes. A blocked waiter is not runnable, so it adds no scheduling points
+   while it waits; a waiter that busy-waited would yield again and again
+   until the write. A yield runs another task when one can run,
+   so the worker always reaches its wait before the write ("E"). */
+#define EXPECTED_TRACES 1
+#define BLOCKED_YIELDS 6
+static int blocked_pipe[2];
+
+static void *blocked_worker(void *arg) {
+    (void)arg;
+    char c;
+    struct pollfd pfd = {.fd = blocked_pipe[0], .events = POLLIN};
+    note_pending(blocked_pipe[0]);
+    if (poll(&pfd, 1, -1) != 1 || read(blocked_pipe[0], &c, 1) != 1 || c != 'x')
+        return (void *)1;
+    return 0;
+}
+
+static void *yielding_helper(void *arg) {
+    (void)arg;
+    for (int i = 0; i < BLOCKED_YIELDS; i++)
+        sched_yield();
+    return 0;
+}
+
+static int run_once(void) {
+    if (pipe(blocked_pipe) != 0)
+        return fail("pipe");
+    pthread_t worker, helper;
+    if (pthread_create(&worker, 0, blocked_worker, 0) != 0 ||
+        pthread_create(&helper, 0, yielding_helper, 0) != 0)
+        return fail("pthread_create");
+    for (int i = 0; i < BLOCKED_YIELDS; i++)
+        sched_yield();
+    int bad = write(blocked_pipe[1], "x", 1) != 1;
+    void *worker_result;
+    pthread_join(worker, &worker_result);
+    pthread_join(helper, 0);
+    close(blocked_pipe[0]);
+    close(blocked_pipe[1]);
+    return bad || worker_result != 0;
 }
 
 #else

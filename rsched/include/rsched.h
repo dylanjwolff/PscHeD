@@ -55,7 +55,7 @@ int rsched_execve(const char *, char *const [], char *const []);
 pid_t rsched_waitpid(pid_t, int *, int);
 
 /* File and socket operations.  Each is a scheduling point; on a blocking
-   descriptor, the calling task yields until the operation can proceed. */
+   descriptor, the calling task blocks until the operation can proceed. */
 ssize_t rsched_read(int, void *, size_t);
 ssize_t rsched_write(int, const void *, size_t);
 ssize_t rsched_readv(int, const struct iovec *, int);
@@ -72,6 +72,14 @@ int rsched_accept(int, struct sockaddr *, socklen_t *);
 int rsched_accept4(int, struct sockaddr *, socklen_t *, int);
 int rsched_connect(int, const struct sockaddr *, socklen_t);
 int rsched_poll(struct pollfd *, nfds_t, int);
+
+/* Descriptor closing.  rsched's own descriptors survive these: closing one
+   reports success, and dup2/dup3 onto one fail with EBADF. */
+int rsched_close(int);
+int rsched_close_range(unsigned int, unsigned int, int);
+void rsched_closefrom(int);
+int rsched_dup2(int, int);
+int rsched_dup3(int, int, int);
 
 /* Redirect standard pthread / sched calls to the scheduler wrappers so that
    existing C programs need only add `#include "rsched.h"`. */
@@ -106,6 +114,11 @@ int rsched_poll(struct pollfd *, nfds_t, int);
 #define accept4                 rsched_accept4
 #define connect                 rsched_connect
 #define poll                    rsched_poll
+#define close                   rsched_close
+#define close_range             rsched_close_range
+#define closefrom               rsched_closefrom
+#define dup2                    rsched_dup2
+#define dup3                    rsched_dup3
 
 #ifdef __cplusplus
 }

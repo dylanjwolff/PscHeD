@@ -2,9 +2,10 @@
 //!
 //! Only one task runs at a time, so an I/O call that blocks in the kernel
 //! would stall every other task, including the one that would unblock it.
-//! Each modeled operation is therefore a scheduling point followed, for a
-//! blocking descriptor, by a loop that yields until the descriptor is ready.
-//! The operation itself then runs as a raw syscall that cannot block.
+//! Each modeled operation is therefore a scheduling point. When it would
+//! block, the task stops being runnable until its descriptor is ready, like a
+//! task waiting for a mutex, and the operation then runs as a raw syscall
+//! that cannot block.
 //!
 //! Every integration mode funnels through [`prepare`]: the `rsched_*`
 //! wrappers used by source annotations, the LLVM pass, and instrumented libc;
@@ -13,6 +14,7 @@
 
 use crate::event::{Event, EventKind};
 use crate::seccomp::raw_syscall6;
+use crate::sys::{Epoll, Interest};
 use libc::{c_int, c_long, c_void};
 
 /// How a modeled syscall can block.
@@ -86,6 +88,11 @@ pub(crate) fn is_modeled(nr: c_long) -> bool {
     MODELED_SYSCALLS.contains(&nr)
 }
 
+// The syscalls here that the seccomp filter traps (poll, and the
+// descriptor-closing calls in `guarded_syscall`) must go through rsched's own
+// syscall instruction, `raw_syscall6`, which the filter lets through. Others
+// use the safe wrappers in `sys`, which make them the same way.
+
 unsafe fn poll_one(fd: c_int, events: libc::c_short) -> bool {
     let mut pfd = libc::pollfd {
         fd,
@@ -96,18 +103,12 @@ unsafe fn poll_one(fd: c_int, events: libc::c_short) -> bool {
     raw_syscall6(libc::SYS_poll, &mut pfd as *mut _ as c_long, 1, 0, 0, 0, 0) != 0
 }
 
-unsafe fn is_nonblocking(fd: c_int) -> bool {
-    let flags = raw_syscall6(
-        libc::SYS_fcntl,
-        c_long::from(fd),
-        c_long::from(libc::F_GETFL),
-        0,
-        0,
-        0,
-        0,
-    );
-    // A bad descriptor fails immediately in the real call.
-    flags < 0 || flags & c_long::from(libc::O_NONBLOCK) != 0
+fn is_nonblocking(fd: c_int) -> bool {
+    // A bad descriptor, such as -1, fails immediately in the real call.
+    if fd < 0 {
+        return true;
+    }
+    crate::sys::status_flags(fd).map_or(true, |flags| flags & libc::O_NONBLOCK != 0)
 }
 
 unsafe fn io_point(instr_addr: u64, fd: c_int, syscall: c_long) {
@@ -125,7 +126,57 @@ unsafe fn io_point(instr_addr: u64, fd: c_int, syscall: c_long) {
     crate::rsched_gunlock();
 }
 
-/// Makes `nr` a scheduling point when `schedule` is set, then yields until
+/// Blocks the calling task, which is not runnable meanwhile, until one of
+/// `fds` reports its events, an error, or a hang-up. Ready descriptors can
+/// become unready again before the task runs, so callers check again.
+unsafe fn wait_until_ready(fds: &[libc::pollfd]) {
+    if !block_until_ready(fds) {
+        // rsched cannot watch these descriptors, for example a user epoll
+        // nested as deep as the kernel allows: let the other tasks run once
+        // before the caller checks again.
+        crate::rsched_sched_yield();
+    }
+}
+
+/// Does the work of [`wait_until_ready`]; returns false, without blocking,
+/// when the descriptors cannot be watched.
+unsafe fn block_until_ready(fds: &[libc::pollfd]) -> bool {
+    let Ok(waits) = Epoll::new() else {
+        return false;
+    };
+    for (i, pfd) in fds.iter().enumerate().filter(|(_, pfd)| pfd.fd >= 0) {
+        // poll may list a descriptor more than once; epoll takes it once.
+        let earlier = fds[..i].iter().any(|other| other.fd == pfd.fd);
+        let events = fds[..=i]
+            .iter()
+            .filter(|other| other.fd == pfd.fd)
+            .fold(0, |events, other| events | other.events);
+        let interest = Interest::from_poll(events);
+        let watched = if earlier {
+            waits.modify(pfd.fd, interest, 0)
+        } else {
+            waits.add(pfd.fd, interest, 0)
+        };
+        if watched.is_err() {
+            return false;
+        }
+    }
+    crate::rsched_glock();
+    let caller = crate::my_pt();
+    let task = crate::st().task(caller);
+    // Mark the task blocked and run other tasks until one of them, or the
+    // kernel, makes a descriptor in `waits` ready and the scheduler picks
+    // this task again. Like a mutex waiter, it parks if the scheduler had no
+    // other task to switch to.
+    let waited = crate::task_provider::io_wait(task, &waits, || {
+        crate::st().context_switch(caller);
+        crate::st().park_if_blocked(caller);
+    });
+    crate::rsched_gunlock();
+    waited
+}
+
+/// Makes `nr` a scheduling point when `schedule` is set, then blocks until
 /// the call can no longer block. May rewrite `args`: a `poll` whose timeout
 /// would only elapse while every other task waits gets a zero timeout, so
 /// timeouts expire in virtual time. Non-I/O syscalls are left untouched.
@@ -145,7 +196,11 @@ pub(crate) unsafe fn prepare(instr_addr: u64, nr: c_long, args: &mut [c_long; 6]
                 return;
             }
             while !poll_one(fd, events) {
-                crate::rsched_sched_yield();
+                wait_until_ready(&[libc::pollfd {
+                    fd,
+                    events,
+                    revents: 0,
+                }]);
             }
         }
         Blocking::Poll => {
@@ -154,6 +209,8 @@ pub(crate) unsafe fn prepare(instr_addr: u64, nr: c_long, args: &mut [c_long; 6]
             if timeout == 0 || ready() {
                 return;
             }
+            // A timeout may fire at any scheduling point: one more choice
+            // decides whether the descriptors become ready first.
             if timeout > 0 {
                 crate::rsched_sched_yield();
                 if !ready() {
@@ -161,8 +218,14 @@ pub(crate) unsafe fn prepare(instr_addr: u64, nr: c_long, args: &mut [c_long; 6]
                 }
                 return;
             }
+            // poll(NULL, 0, -1) sleeps forever, so it waits on no descriptors.
+            let fds = if nfds == 0 {
+                &[][..]
+            } else {
+                core::slice::from_raw_parts(fds as *const libc::pollfd, nfds as usize)
+            };
             while !ready() {
-                crate::rsched_sched_yield();
+                wait_until_ready(fds);
             }
         }
     }
@@ -192,6 +255,125 @@ pub unsafe extern "C" fn rsched_io_prepare_syscall(
 /// Routes a modeled syscall issued through `syscall(2)`.
 pub(crate) unsafe fn syscall(instr_addr: u64, nr: c_long, args: [c_long; 6]) -> c_long {
     modeled_syscall(instr_addr, nr, args)
+}
+
+// ── rsched's reserved descriptors ─────────────────────────────────────────
+//
+// rsched keeps two adjacent descriptors open for itself (see
+// `task_provider::reserved_fd_base`). A program that closes descriptors it did
+// not open, as daemons and `closefrom` do, would otherwise close them and
+// could then get the same numbers back for its own files. Every call that
+// closes or replaces a descriptor therefore leaves the reserved ones alone.
+
+/// Syscalls that can close a descriptor; the seccomp filter traps these.
+pub(crate) const FD_GUARDED_SYSCALLS: &[c_long] = &[
+    libc::SYS_close,
+    libc::SYS_close_range,
+    libc::SYS_dup2,
+    libc::SYS_dup3,
+];
+
+/// rsched's two reserved descriptors, `base` and `base + 1`.
+fn reserved() -> Option<core::ops::RangeInclusive<c_long>> {
+    crate::task_provider::reserved_fd_base().map(|base| c_long::from(base)..=c_long::from(base) + 1)
+}
+
+fn is_reserved(fd: c_long) -> bool {
+    reserved().is_some_and(|reserved| reserved.contains(&fd))
+}
+
+/// Runs `nr` as a raw syscall without touching rsched's reserved
+/// descriptors, returning the raw result (or -errno). Returns `None` for
+/// syscalls that cannot close a descriptor.
+///
+/// - `close` of a reserved descriptor reports success and does nothing.
+/// - `close_range` closes, or marks close-on-exec, everything in the range
+///   except the reserved descriptors.
+/// - `dup2` and `dup3` onto a reserved descriptor fail with `EBADF`, as for a
+///   number the process may not use, since they would close it.
+pub(crate) unsafe fn guarded_syscall(nr: c_long, args: &[c_long; 6]) -> Option<c_long> {
+    let raw = |nr, a0, a1, a2| raw_syscall6(nr, a0, a1, a2, 0, 0, 0);
+    Some(match nr {
+        libc::SYS_close if is_reserved(args[0]) => 0,
+        libc::SYS_close => raw(nr, args[0], 0, 0),
+        libc::SYS_close_range => {
+            let (first, last) = (args[0] as u32, args[1] as u32);
+            let Some(reserved) = reserved().filter(|r| {
+                first <= last && *r.start() <= c_long::from(last) && *r.end() >= c_long::from(first)
+            }) else {
+                return Some(raw(nr, args[0], args[1], args[2]));
+            };
+            // The range covers a reserved descriptor: close what lies below
+            // and above the reserved pair.
+            let below = (c_long::from(first), reserved.start() - 1);
+            let above = (reserved.end() + 1, c_long::from(last));
+            for (low, high) in [below, above] {
+                let r = if low <= high {
+                    raw(nr, low, high, args[2])
+                } else {
+                    0
+                };
+                if r < 0 {
+                    return Some(r);
+                }
+            }
+            0
+        }
+        libc::SYS_dup2 | libc::SYS_dup3 if args[0] != args[1] && is_reserved(args[1]) => {
+            -c_long::from(libc::EBADF)
+        }
+        libc::SYS_dup2 | libc::SYS_dup3 => raw(nr, args[0], args[1], args[2]),
+        _ => return None,
+    })
+}
+
+/// Converts a raw syscall result to libc's -1-and-errno convention.
+pub(crate) unsafe fn libc_result(r: c_long) -> c_long {
+    if (-4095..0).contains(&r) {
+        *libc::__errno_location() = -r as c_int;
+        -1
+    } else {
+        r
+    }
+}
+
+unsafe fn guarded(nr: c_long, args: [c_long; 6]) -> c_long {
+    libc_result(guarded_syscall(nr, &args).expect("rsched: syscall is not fd-guarded"))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_close(fd: c_int) -> c_int {
+    guarded(libc::SYS_close, [fd.into(), 0, 0, 0, 0, 0]) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_close_range(
+    first: libc::c_uint,
+    last: libc::c_uint,
+    flags: c_int,
+) -> c_int {
+    guarded(
+        libc::SYS_close_range,
+        [first.into(), last.into(), flags.into(), 0, 0, 0],
+    ) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_closefrom(lowfd: c_int) {
+    rsched_close_range(lowfd.max(0) as libc::c_uint, libc::c_uint::MAX, 0);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_dup2(old: c_int, new: c_int) -> c_int {
+    guarded(libc::SYS_dup2, [old.into(), new.into(), 0, 0, 0, 0]) as c_int
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_dup3(old: c_int, new: c_int, flags: c_int) -> c_int {
+    guarded(
+        libc::SYS_dup3,
+        [old.into(), new.into(), flags.into(), 0, 0, 0],
+    ) as c_int
 }
 
 macro_rules! arg {
