@@ -185,6 +185,11 @@ fn seccomp_keeps_reserved_descriptors_from_raw_close() {
 }
 
 #[test]
+fn io_on_a_negative_descriptor_fails_with_ebadf() {
+    assert_edge_case("CASE_IO_EDGE_BAD_FD");
+}
+
+#[test]
 fn kernel_wait_releases_the_global_lock() {
     assert_edge_case("CASE_IO_EDGE_UNPARKED_THREAD_NEEDS_LOCK");
 }

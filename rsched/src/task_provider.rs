@@ -1,6 +1,8 @@
 use crate::scheduler::SharedDfsState;
+use crate::sys::{self, Epoll, Event, Interest, Timeout};
 use crate::{AttrT, CloneStart, CondT, PthreadT, StartArg};
 use std::ffi::{CStr, CString};
+use std::mem::ManuallyDrop;
 use std::ptr::addr_of_mut;
 use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
@@ -819,10 +821,6 @@ struct SharedTask {
 
 #[repr(C)]
 struct ProcessShared {
-    /// epoll instance shared by every process: each task blocked on I/O adds
-    /// its own epoll of the descriptors it waits for, so any process can tell
-    /// when another process's waiter becomes runnable.
-    io_epoll: libc::c_int,
     task_count: usize,
     dfs: SharedDfsState,
     tasks: [SharedTask; MAX_TASKS],
@@ -862,10 +860,9 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
         return p;
     }
 
-    let fd = reserve_fd(
-        libc::syscall(libc::SYS_memfd_create, c"rsched-process-shared".as_ptr(), 0) as libc::c_int,
-    );
-    assert!(fd >= 0, "rsched: memfd_create failed");
+    let memfd = sys::memfd_create(c"rsched-process-shared").expect("rsched: memfd_create failed");
+    let io_epoll = Epoll::new().expect("rsched: epoll_create1 failed");
+    let fd = reserve_fd_pair(memfd, io_epoll);
     let r = libc::ftruncate(fd, size as libc::off_t);
     assert_eq!(r, 0, "rsched: ftruncate shared process state failed");
 
@@ -884,9 +881,6 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
     );
     core::ptr::write_bytes(raw, 0, size);
     p = raw.cast::<ProcessShared>();
-    // Not close-on-exec, like the shared memory fd, so exec'd processes keep it.
-    (*p).io_epoll = reserve_fd(libc::epoll_create1(0));
-    assert!((*p).io_epoll >= 0, "rsched: epoll_create1 failed");
     PROCESS_SHARED_FD.store(fd, Ordering::Release);
     set_env_usize("RSCHED_SHM_FD", fd as usize);
 
@@ -909,39 +903,50 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
 /// ask for one of them.
 const RESERVED_FD_BASE: libc::c_int = 900;
 
-/// Moves `fd` to a number of at least [`RESERVED_FD_BASE`] when the
-/// descriptor limit allows, and returns the number it ends up at.
-unsafe fn reserve_fd(fd: libc::c_int) -> libc::c_int {
-    if fd < 0 {
-        return fd;
-    }
-    let moved = crate::seccomp::raw_syscall6(
-        libc::SYS_fcntl,
-        fd.into(),
-        libc::F_DUPFD.into(),
-        RESERVED_FD_BASE.into(),
-        0,
-        0,
-        0,
-    );
-    if moved < 0 {
-        return fd;
-    }
-    crate::seccomp::raw_syscall6(libc::SYS_close, fd.into(), 0, 0, 0, 0, 0);
-    moved as libc::c_int
+/// Moves the shared state's memfd and the shared I/O epoll to two adjacent
+/// numbers, `base` and `base + 1`, from [`RESERVED_FD_BASE`] up when the
+/// descriptor limit allows, and returns `base`. Both stay open, and open
+/// across exec, for the life of the process: exec'd processes find the
+/// memfd through `RSCHED_SHM_FD` and the epoll right after it.
+fn reserve_fd_pair(memfd: libc::c_int, io_epoll: Epoll) -> libc::c_int {
+    let mut min = RESERVED_FD_BASE;
+    let base = loop {
+        // Above the descriptor limit, fall back to the lowest free numbers.
+        let base = sys::dup_from(memfd, min)
+            .or_else(|_| sys::dup_from(memfd, 0))
+            .expect("rsched: no descriptor free for the shared state");
+        let next = sys::dup_from(io_epoll.as_raw_fd(), base + 1)
+            .expect("rsched: no descriptor free for the shared epoll");
+        if next == base + 1 {
+            break base;
+        }
+        // base + 1 is taken: look for a pair above it.
+        let _ = sys::close(base);
+        let _ = sys::close(next);
+        min = base + 2;
+    };
+    // The originals were only needed to make the copies.
+    let _ = sys::close(memfd);
+    drop(io_epoll);
+    base
 }
 
-/// Descriptors rsched keeps open for itself in this process: the shared
-/// state's memfd and the shared I/O epoll. The program must never close or
-/// replace them; see `io::guarded_syscall`.
-pub(crate) fn reserved_fds() -> [libc::c_int; 2] {
-    let ps = PROCESS_SHARED.load(Ordering::Acquire);
-    let io_epoll = if ps.is_null() {
-        -1
-    } else {
-        unsafe { (*ps).io_epoll }
-    };
-    [PROCESS_SHARED_FD.load(Ordering::Acquire), io_epoll]
+/// The first of rsched's two reserved descriptors in this process (see
+/// [`reserve_fd_pair`]), or `None` before the shared state exists. The
+/// program must never close or replace them; see `io::guarded_syscall`.
+pub(crate) fn reserved_fd_base() -> Option<libc::c_int> {
+    let base = PROCESS_SHARED_FD.load(Ordering::Acquire);
+    (base >= 0).then_some(base)
+}
+
+/// The epoll instance shared by every process: each task blocked on I/O
+/// adds its own epoll of the descriptors it waits for, so any process can
+/// tell when another process's waiter becomes runnable.
+fn io_epoll() -> ManuallyDrop<Epoll> {
+    let base = reserved_fd_base().expect("rsched: shared epoll used before process state");
+    // SAFETY: rsched keeps its reserved descriptors open for the life of the
+    // process, and the program cannot close them.
+    unsafe { Epoll::borrow_raw(base + 1) }
 }
 
 fn set_env_usize(key: &str, value: usize) {
@@ -1554,39 +1559,22 @@ impl ProcessTaskProvider {
 /// been chosen again. Returns false without blocking when `waits` cannot be
 /// watched, such as when the program closed the shared epoll or nested its
 /// own epolls as deep as the kernel allows.
-pub(crate) unsafe fn io_wait(task: TaskHandle, waits: libc::c_int, switch: impl FnOnce()) -> bool {
-    let ps = process_shared_ptr();
+pub(crate) unsafe fn io_wait(task: TaskHandle, waits: &Epoll, switch: impl FnOnce()) -> bool {
     // One-shot: report the waiter once, even though it stays ready until it
     // runs and removes itself.
-    let mut event = libc::epoll_event {
-        events: (libc::EPOLLIN | libc::EPOLLONESHOT) as u32,
-        u64: task.creation_idx as u64,
-    };
-    let added = crate::seccomp::raw_syscall6(
-        libc::SYS_epoll_ctl,
-        (*ps).io_epoll.into(),
-        libc::EPOLL_CTL_ADD.into(),
-        waits.into(),
-        addr_of_mut!(event) as libc::c_long,
-        0,
-        0,
+    let registered = io_epoll().add(
+        waits.as_raw_fd(),
+        Interest::IN | Interest::ONESHOT,
+        task.creation_idx as u64,
     );
-    if added != 0 {
+    if registered.is_err() {
         return false;
     }
     task.with_task(|t| t.io_wait = 1);
     task.set_blocking(true);
     switch();
     task.with_task(|t| t.io_wait = 0);
-    crate::seccomp::raw_syscall6(
-        libc::SYS_epoll_ctl,
-        (*ps).io_epoll.into(),
-        libc::EPOLL_CTL_DEL.into(),
-        waits.into(),
-        0,
-        0,
-        0,
-    );
+    let _ = io_epoll().delete(waits.as_raw_fd());
     true
 }
 
@@ -1609,40 +1597,37 @@ pub(crate) unsafe fn wake_io_waiters(block: bool) -> bool {
     if !blocked {
         return false;
     }
-    let mut events = [libc::epoll_event { events: 0, u64: 0 }; 64];
+    let mut events = [Event::EMPTY; 64];
+    let timeout = if block { Timeout::Never } else { Timeout::Now };
     let ready = loop {
         if block {
             crate::rsched_gunlock();
         }
-        let n = crate::seccomp::raw_syscall6(
-            libc::SYS_epoll_wait,
-            (*ps).io_epoll.into(),
-            events.as_mut_ptr() as libc::c_long,
-            events.len() as libc::c_long,
-            if block { -1 } else { 0 },
-            0,
-            0,
-        );
+        let result = io_epoll()
+            .wait(&mut events, timeout)
+            .map(|ready| ready.len());
         if block {
             crate::rsched_glock();
         }
-        if n >= 0 {
-            break n as usize;
-        }
-        if n != -libc::c_long::from(libc::EINTR) {
-            // The shared epoll is gone, for example closed by the program.
-            // Wake every I/O waiter: each checks its descriptors again and,
-            // unable to register a new wait, falls back to yielding.
-            for id in 0..(*ps).task_count.min(MAX_TASKS) {
-                if (*ps).tasks[id].io_wait != 0 {
-                    (*ps).tasks[id].is_blocking = 0;
+        match result {
+            Ok(ready) => break ready,
+            Err(error) if error.raw_os_error() == Some(libc::EINTR) => {}
+            Err(_) => {
+                // Not expected, since the program cannot close the shared
+                // epoll. Wake every I/O waiter: each checks its descriptors
+                // again and, unable to register a new wait, falls back to
+                // yielding.
+                for id in 0..(*ps).task_count.min(MAX_TASKS) {
+                    if (*ps).tasks[id].io_wait != 0 {
+                        (*ps).tasks[id].is_blocking = 0;
+                    }
                 }
+                return true;
             }
-            return true;
         }
     };
     for event in &events[..ready] {
-        let id = event.u64 as usize;
+        let id = event.data() as usize;
         if id < (*ps).task_count && (*ps).tasks[id].io_wait != 0 {
             (*ps).tasks[id].is_blocking = 0;
         }

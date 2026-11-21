@@ -24,6 +24,7 @@ pub use event::{AccessKind, Event, EventKind};
 mod fuzzing;
 mod io;
 mod seccomp;
+mod sys;
 mod task_provider;
 mod tsan;
 #[cfg(all(feature = "instrumented-libc", feature = "coro"))]

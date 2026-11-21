@@ -184,6 +184,25 @@ int main(void) {
     return 0;
 }
 
+#elif defined(CASE_IO_EDGE_BAD_FD)
+
+/* I/O on descriptor -1 fails with EBADF, as glibc's own tests check. */
+#include <errno.h>
+#include <sys/socket.h>
+
+int main(void) {
+    rsched_init();
+    char c;
+    errno = 0;
+    if (read(-1, &c, 1) != -1 || errno != EBADF)
+        return 1;
+    errno = 0;
+    if (recvmsg(-1, NULL, 0) != -1 || errno != EBADF)
+        return 1;
+    printf("ok\n");
+    return 0;
+}
+
 #elif defined(CASE_IO_EDGE_UNPARKED_THREAD_NEEDS_LOCK)
 
 /* The only task waits on a pipe, so rsched waits in the kernel. A thread
