@@ -150,9 +150,9 @@ fn dfs_state() -> &'static mut SharedDfsState {
 pub trait Scheduler: Sized {
     fn choose(&mut self, is_blocking: &[bool]) -> Option<usize>;
 
-    /// Called just before each scheduling decision with the event the current
-    /// thread is about to execute.  Default implementation is a no-op.
-    fn on_event(&mut self, _event: Option<&Event>) {}
+    /// Called just before each scheduling decision with the event that task
+    /// `task` (its creation index) is about to execute. Default: no-op.
+    fn on_event(&mut self, _task: usize, _event: Option<&Event>) {}
 
     /// Called when the current execution is complete and the scheduler can
     /// commit any run-local state.  Default implementation is a no-op.
@@ -244,13 +244,28 @@ pub enum SchedulerImpl {
 
 impl SchedulerImpl {
     pub fn new(seed: u64) -> Self {
-        let logging = env_is("RSCHED_LOG", "1");
+        let logging = logging_enabled();
         let use_dfs = env_is("RSCHED_SCHEDULER", "dfs");
         match (use_dfs, logging) {
             (true, true) => Self::LoggingDfs(LoggingScheduler::new(DfsScheduler::new())),
             (true, false) => Self::Dfs(DfsScheduler::new()),
             (false, true) => Self::LoggingRandom(LoggingScheduler::new(RandomWalk::new(seed))),
             (false, false) => Self::Random(RandomWalk::new(seed)),
+        }
+    }
+}
+
+/// Whether `RSCHED_LOG=1`; read once, since logging sites are hot.
+pub(crate) fn logging_enabled() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static LOGGING: AtomicU8 = AtomicU8::new(0);
+    match LOGGING.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let enabled = env_is("RSCHED_LOG", "1");
+            LOGGING.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
+            enabled
         }
     }
 }
@@ -284,12 +299,12 @@ impl Scheduler for SchedulerImpl {
         }
     }
 
-    fn on_event(&mut self, event: Option<&Event>) {
+    fn on_event(&mut self, task: usize, event: Option<&Event>) {
         match self {
-            Self::Random(scheduler) => scheduler.on_event(event),
-            Self::Dfs(scheduler) => scheduler.on_event(event),
-            Self::LoggingRandom(scheduler) => scheduler.on_event(event),
-            Self::LoggingDfs(scheduler) => scheduler.on_event(event),
+            Self::Random(scheduler) => scheduler.on_event(task, event),
+            Self::Dfs(scheduler) => scheduler.on_event(task, event),
+            Self::LoggingRandom(scheduler) => scheduler.on_event(task, event),
+            Self::LoggingDfs(scheduler) => scheduler.on_event(task, event),
         }
     }
 
@@ -342,7 +357,7 @@ impl Scheduler for DfsScheduler {
         Some(runnable[choice])
     }
 
-    fn on_event(&mut self, event: Option<&Event>) {
+    fn on_event(&mut self, _task: usize, event: Option<&Event>) {
         self.should_branch = !matches!(
             event.map(|event| event.kind),
             None | Some(EventKind::SchedYield)
@@ -396,32 +411,32 @@ impl<S: Scheduler> Scheduler for LoggingScheduler<S> {
         self.inner.choose(is_blocking)
     }
 
-    fn on_event(&mut self, event: Option<&Event>) {
+    fn on_event(&mut self, task: usize, event: Option<&Event>) {
         if let Some(ev) = event {
             match ev.kind {
                 EventKind::ThreadCreate => {
-                    crate::log_line!("[rsched] ThreadCreate @ 0x{:x}", ev.instr_addr);
+                    crate::log_line!("[rsched] ThreadCreate @ 0x{:x} task={task}", ev.instr_addr);
                 }
                 EventKind::LockAcq { lock } => {
                     crate::log_line!(
-                        "[rsched] LockAcq(lock=0x{:x}) @ 0x{:x}",
+                        "[rsched] LockAcq(lock=0x{:x}) @ 0x{:x} task={task}",
                         lock as usize,
                         ev.instr_addr
                     );
                 }
                 EventKind::LockRel { lock } => {
                     crate::log_line!(
-                        "[rsched] LockRel(lock=0x{:x}) @ 0x{:x}",
+                        "[rsched] LockRel(lock=0x{:x}) @ 0x{:x} task={task}",
                         lock as usize,
                         ev.instr_addr
                     );
                 }
                 EventKind::SchedYield => {
-                    crate::log_line!("[rsched] SchedYield @ 0x{:x}", ev.instr_addr);
+                    crate::log_line!("[rsched] SchedYield @ 0x{:x} task={task}", ev.instr_addr);
                 }
                 EventKind::Io { fd, syscall } => {
                     crate::log_line!(
-                        "[rsched] Io(syscall={syscall}, fd={fd}) @ 0x{:x}",
+                        "[rsched] Io(syscall={syscall}, fd={fd}) @ 0x{:x} task={task}",
                         ev.instr_addr
                     );
                 }
@@ -436,14 +451,14 @@ impl<S: Scheduler> Scheduler for LoggingScheduler<S> {
                         AccessKind::ReadWrite => "RW",
                     };
                     crate::log_line!(
-                        "[rsched] MemOp({kind}, mem=0x{:x}, size={size}) @ 0x{:x}",
+                        "[rsched] MemOp({kind}, mem=0x{:x}, size={size}) @ 0x{:x} task={task}",
                         mem_addr as usize,
                         ev.instr_addr
                     );
                 }
             }
         }
-        self.inner.on_event(event);
+        self.inner.on_event(task, event);
     }
 
     fn finish(&mut self) {
