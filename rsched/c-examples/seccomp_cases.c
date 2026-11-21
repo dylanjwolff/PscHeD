@@ -27,6 +27,42 @@ int main(void) {
     return counter == 1 ? 0 : 1;
 }
 
+#elif defined(CASE_SECCOMP_SIGNALS_BLOCKED)
+
+/* Workers block every signal, as glibc does around thread creation and exit,
+   then contend for a mutex, so rsched's own futexes trap while the program
+   asked for SIGSYS to be blocked. The trap must still reach the handler. */
+#include <pthread.h>
+#include <signal.h>
+#include <stdio.h>
+
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static int counter;
+
+static void *worker(void *arg) {
+    (void)arg;
+    sigset_t all;
+    sigfillset(&all);
+    pthread_sigmask(SIG_BLOCK, &all, NULL);
+    for (int i = 0; i < 1000; i++) {
+        pthread_mutex_lock(&lock);
+        counter++;
+        pthread_mutex_unlock(&lock);
+    }
+    return NULL;
+}
+
+int main(void) {
+    rsched_init();
+    pthread_t threads[3];
+    for (int i = 0; i < 3; i++)
+        pthread_create(&threads[i], NULL, worker, NULL);
+    for (int i = 0; i < 3; i++)
+        pthread_join(threads[i], NULL);
+    printf("counter = %d\n", counter);
+    return counter == 3000 ? 0 : 1;
+}
+
 #elif defined(CASE_SECCOMP_RAW_FUTEX)
 
 #include <linux/futex.h>
