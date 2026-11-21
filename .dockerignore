@@ -10,3 +10,6 @@ rsched/target/
 # The binary_instrumentation tests skip gracefully when e9tool is absent.
 rsched/binary-instrumentation/e9patch/
 rsched/binary-instrumentation/instrumented/
+
+# DuckDB target checkout (rsched/targets/duckdb); not needed by the test image.
+rsched/targets/duckdb/duckdb/
