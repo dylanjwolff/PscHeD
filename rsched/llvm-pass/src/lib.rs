@@ -753,6 +753,21 @@ const PTHREAD_REWRITES: &[(&str, &str)] = &[
     ("usleep", "rsched_usleep"),
     ("sleep", "rsched_sleep"),
     ("clock_gettime", "rsched_clock_gettime"),
+    ("time", "rsched_time"),
+    ("gettimeofday", "rsched_gettimeofday"),
+    ("stat", "rsched_stat"),
+    ("stat64", "rsched_stat"),
+    ("lstat", "rsched_lstat"),
+    ("lstat64", "rsched_lstat"),
+    ("fstat", "rsched_fstat"),
+    ("fstat64", "rsched_fstat"),
+    ("fstatat", "rsched_fstatat"),
+    ("fstatat64", "rsched_fstatat"),
+    ("statx", "rsched_statx"),
+    ("ftruncate", "rsched_ftruncate"),
+    ("ftruncate64", "rsched_ftruncate"),
+    ("truncate", "rsched_truncate"),
+    ("truncate64", "rsched_truncate"),
     ("sched_getcpu", "rsched_sched_getcpu"),
     ("getrandom", "rsched_getrandom"),
     ("ppoll", "rsched_ppoll"),
@@ -1751,6 +1766,15 @@ const MUSL_IO_REWRITES: &[IoRewrite] = &[
     ("close", "close", "rsched_close"),
     ("dup2", "dup2", "rsched_dup2"),
     ("__dup3", "dup3", "rsched_dup3"),
+    // Virtual file timestamps (src/files.rs). musl's own writes and stat
+    // calls inside libc, such as stdio's, keep the kernel's times.
+    ("__fstat", "fstat", "rsched_fstat"),
+    ("stat", "stat", "rsched_stat"),
+    ("lstat", "lstat", "rsched_lstat"),
+    ("__fstatat", "fstatat", "rsched_fstatat"),
+    ("statx", "statx", "rsched_statx"),
+    ("ftruncate", "ftruncate", "rsched_ftruncate"),
+    ("truncate", "truncate", "rsched_truncate"),
 ];
 
 const GLIBC_IO_REWRITES: &[IoRewrite] = &[

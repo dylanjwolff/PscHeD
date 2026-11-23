@@ -19,6 +19,7 @@ mod scheduler;
 use scheduler::{Scheduler, SchedulerImpl};
 
 mod event;
+mod files;
 pub use event::{AccessKind, Event, EventKind};
 
 mod fuzzing;
@@ -1002,7 +1003,9 @@ pub unsafe extern "C" fn rsched_syscall(
         return virt::kernel_wait(|| libc::syscall(number, a0, a1, a2, a3, a4, a5));
     }
 
-    libc::syscall(number, a0, a1, a2, a3, a4, a5)
+    let r = libc::syscall(number, a0, a1, a2, a3, a4, a5);
+    files::after_syscall(number, &[a0, a1, a2, a3, a4, a5], r);
+    r
 }
 
 /// Runs a syscall instruction reached outside rsched that rsched must run

@@ -159,10 +159,7 @@ deadline can end stays blocked until no other task can run, or until it has
 been blocked for `RSCHED_STARVATION_LIMIT` scheduling points, so a task that
 spins on a flag cannot starve it. Expiring the wait moves the virtual clock
 to its deadline, so a timeout is never reported early. Which wait expires
-and when depends only on the schedule. A sleep then also lasts its real
-duration, so file timestamps and `time()` see it pass as they would
-natively; timed waits on condition variables, semaphores, and rwlocks
-return as soon as they expire.
+and when depends only on the schedule.
 
 Calls that wait in the kernel and that rsched does not model, such as
 `ppoll`, `select`, `pselect`, `epoll_wait`, `epoll_pwait`, and
@@ -175,8 +172,19 @@ their CPU, and randomness from deterministic models:
 - `clock_gettime` on the realtime, monotonic, and boot-time clocks returns
   virtual time. It starts at the real time when rsched starts and advances
   by 1 µs at every scheduling point and every clock read, so a loop that
-  spins on the clock still ends. CPU-time clocks stay real, as do
-  `gettimeofday` and `time`, which glibc resolves into the vDSO.
+  spins on the clock still ends. `time` and `gettimeofday` read the same
+  virtual realtime clock. CPU-time clocks stay real.
+- File times follow virtual time. rsched keeps a table of the access,
+  modification, and change times of files, keyed by device and inode, in
+  memory shared by the process tree. A successful `write`, `pwrite`,
+  `writev`, `pwritev`, `truncate`, `ftruncate`, or `fallocate` sets the
+  file's mtime and ctime to the virtual time, and `stat`, `fstat`,
+  `lstat`, `fstatat`, and `statx` report the table's times. A change rsched
+  does not see, such as creating a file, shows up as a newer kernel time and
+  is reported as the virtual time of the stat call that saw it; times from
+  before rsched started are reported unchanged. With instrumented glibc,
+  stdio's internal writes are stamped too; with instrumented musl, only the
+  public functions are.
 - `sched_getcpu` reports a CPU derived from the calling task.
 - `getrandom`, including `syscall(SYS_getrandom)` and, under
   `RSCHED_SECCOMP=1`, the raw syscall, returns bytes from a generator seeded

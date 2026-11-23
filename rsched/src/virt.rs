@@ -1,4 +1,5 @@
 //! Deterministic environment inputs: time, the current CPU, and randomness.
+//! File times, which follow virtual time, are kept in `files`.
 //!
 //! A program that reads the real clock, CPU number, or kernel randomness can
 //! take a different path on each run of one seed. Under rsched these come
@@ -78,7 +79,7 @@ pub(crate) unsafe fn start(seed: u64) {
     env.random_counter.store(0, Ordering::Relaxed);
 }
 
-fn started() -> bool {
+pub(crate) fn started() -> bool {
     instrumented_libc_ready()
         && crate::INITED.load(Ordering::Acquire)
         && env().started.load(Ordering::Acquire) != 0
@@ -104,6 +105,16 @@ pub(crate) fn is_virtual(clock: clockid_t) -> bool {
     base_ns(clock).is_some()
 }
 
+/// The real time at which virtual `CLOCK_REALTIME` started.
+pub(crate) fn realtime_base_ns() -> i64 {
+    env().realtime_base_ns.load(Ordering::Relaxed)
+}
+
+/// The current virtual `CLOCK_REALTIME`.
+pub(crate) fn realtime_now_ns() -> i64 {
+    to_ns(&now(libc::CLOCK_REALTIME))
+}
+
 /// Advances time by one tick; called at every scheduling point.
 pub(crate) fn tick() {
     if env().started.load(Ordering::Relaxed) != 0 {
@@ -126,27 +137,6 @@ fn to_ns(ts: &timespec) -> i64 {
 pub(crate) fn now(clock: clockid_t) -> timespec {
     let base = base_ns(clock).expect("rsched: clock is not virtual");
     to_timespec(base.saturating_add(env().elapsed_ns.load(Ordering::Relaxed) as i64))
-}
-
-/// Real monotonic nanoseconds, for [`real_sleep_until`].
-pub(crate) unsafe fn real_monotonic_ns() -> i64 {
-    real_now_ns(libc::CLOCK_MONOTONIC)
-}
-
-/// Sleeps for real until `ns` nanoseconds have passed since `start`, a
-/// [`real_monotonic_ns`] reading.
-pub(crate) unsafe fn real_sleep_until(start: i64, ns: i64) {
-    let at = to_timespec(start.saturating_add(ns));
-    while crate::seccomp::raw_syscall6(
-        libc::SYS_clock_nanosleep,
-        libc::CLOCK_MONOTONIC as c_long,
-        libc::TIMER_ABSTIME as c_long,
-        &at as *const timespec as c_long,
-        0,
-        0,
-        0,
-    ) == -c_long::from(libc::EINTR)
-    {}
 }
 
 /// Moves time forward by `ns`.
@@ -197,6 +187,32 @@ pub(crate) fn advance_to(clock: clockid_t, at: &timespec) {
 /// Nanoseconds from now until `at` on `clock`; zero once it has passed.
 pub(crate) fn remaining_ns(clock: clockid_t, at: &timespec) -> i64 {
     (to_ns(at) - to_ns(&now(clock))).max(0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_time(t: *mut libc::time_t) -> libc::time_t {
+    let mut ts: timespec = std::mem::zeroed();
+    rsched_clock_gettime(libc::CLOCK_REALTIME, &mut ts);
+    if !t.is_null() {
+        *t = ts.tv_sec;
+    }
+    ts.tv_sec
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_gettimeofday(tv: *mut libc::timeval, tz: *mut c_void) -> c_int {
+    if !tz.is_null() {
+        crate::seccomp::raw_syscall6(libc::SYS_gettimeofday, 0, tz as c_long, 0, 0, 0, 0);
+    }
+    if !tv.is_null() {
+        let mut ts: timespec = std::mem::zeroed();
+        rsched_clock_gettime(libc::CLOCK_REALTIME, &mut ts);
+        *tv = libc::timeval {
+            tv_sec: ts.tv_sec,
+            tv_usec: ts.tv_nsec / 1000,
+        };
+    }
+    0
 }
 
 #[unsafe(no_mangle)]

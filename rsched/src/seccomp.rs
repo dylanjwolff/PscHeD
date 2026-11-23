@@ -96,8 +96,9 @@ extern "C" fn sigsys_handler(
             // an unconditional scheduling point.
             let ip = regs[libc::REG_RIP as usize] as u64;
             crate::io::prepare(ip, nr, &mut args, false);
-            regs[libc::REG_RAX as usize] =
-                raw_syscall6(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
+            let ret = raw_syscall6(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
+            crate::files::after_syscall(nr, &args, ret);
+            regs[libc::REG_RAX as usize] = ret;
             return;
         }
 

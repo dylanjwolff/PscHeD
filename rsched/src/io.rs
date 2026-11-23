@@ -257,7 +257,9 @@ pub(crate) unsafe fn prepare(instr_addr: u64, nr: c_long, args: &mut [c_long; 6]
 #[inline(always)]
 unsafe fn modeled_syscall(instr_addr: u64, nr: c_long, mut args: [c_long; 6]) -> c_long {
     prepare(instr_addr, nr, &mut args, true);
-    crate::rsched_raw_syscall(nr, args[0], args[1], args[2], args[3], args[4], args[5])
+    let r = crate::rsched_raw_syscall(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
+    crate::files::after_syscall(nr, &args, r);
+    r
 }
 
 /// Entry point for code that is about to execute a raw I/O `syscall`

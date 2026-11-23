@@ -608,12 +608,7 @@ pub unsafe extern "C" fn rsched_pthread_once(
 // ── Sleeps ────────────────────────────────────────────────────────────────
 
 /// Sleeps the calling task until `deadline` (None: a zero-length sleep,
-/// which is only a scheduling point).
-///
-/// The deadline passes in virtual time, so the schedule does not depend on
-/// real time. A program that sleeps usually expects the world outside to
-/// see that time pass too, such as file timestamps or `time()`, so the
-/// sleep then also lasts the requested real time, as it would natively.
+/// which is only a scheduling point). The deadline passes in virtual time.
 unsafe fn sleep_impl(deadline: Option<Deadline>, instr_addr: u64) {
     ensure_init();
     rsched_glock();
@@ -627,15 +622,10 @@ unsafe fn sleep_impl(deadline: Option<Deadline>, instr_addr: u64) {
         return;
     }
     sync_point(caller, "sleep", std::ptr::null(), instr_addr);
-    let Some(deadline) = deadline else {
-        rsched_gunlock();
-        return;
-    };
-    let real_start = virt::real_monotonic_ns();
-    let duration = virt::remaining_ns(deadline.clock, &deadline.at);
-    st().block_on(caller, WaitOn::Sleep, Some(deadline));
+    if let Some(deadline) = deadline {
+        st().block_on(caller, WaitOn::Sleep, Some(deadline));
+    }
     rsched_gunlock();
-    virt::real_sleep_until(real_start, duration);
 }
 
 fn is_zero(ts: &timespec) -> bool {

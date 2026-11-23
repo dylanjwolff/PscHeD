@@ -237,6 +237,75 @@ add_io_rewrite() {
     fi
 }
 
+# Calls rsched_file_call_done(nr, result, args) after the real function,
+# so rsched can keep virtual file timestamps (see src/files.rs). Saves the
+# six argument registers as the args array. `int` sign-extends a 32-bit
+# result.
+emit_file_hook() {
+    local symbol=$1
+    local real=$2
+    local nr=$3
+    local width=$4
+    local hidden=$5
+
+    {
+        printf '\n.text\n'
+        printf '.globl %s\n' "$symbol"
+        if [[ "$hidden" == yes ]]; then
+            printf '.hidden %s\n' "$symbol"
+        fi
+        printf '.type %s, @function\n' "$symbol"
+        printf '%s:\n' "$symbol"
+        printf '    pushq %%r9\n'
+        printf '    pushq %%r8\n'
+        printf '    pushq %%rcx\n'
+        printf '    pushq %%rdx\n'
+        printf '    pushq %%rsi\n'
+        printf '    pushq %%rdi\n'
+        printf '    subq $8, %%rsp\n'
+        printf '    call %s\n' "$real"
+        if [[ "$width" == int ]]; then
+            printf '    movslq %%eax, %%rax\n'
+        fi
+        printf '    movq %%rax, (%%rsp)\n'
+        printf '    movq $%s, %%rdi\n' "$nr"
+        printf '    movq %%rax, %%rsi\n'
+        printf '    leaq 8(%%rsp), %%rdx\n'
+        printf '    call rsched_file_call_done@PLT\n'
+        printf '    movq (%%rsp), %%rax\n'
+        printf '    addq $56, %%rsp\n'
+        printf '    ret\n'
+        printf '.size %s, .-%s\n' "$symbol" "$symbol"
+    } >>"$wrapper_source"
+}
+
+# Hooks `impl` and each defined alias of it, including glibc's hidden
+# __GI_* names that stdio and the stat functions call, so writes and stat
+# results that libc makes internally reach the file timestamp model too.
+add_file_hook() {
+    local impl=$1
+    local nr=$2
+    local width=$3
+    shift 3
+
+    if ! symbol_defined "$impl"; then
+        return
+    fi
+    local real="__rsched_real_file_$impl"
+    objcopy_args+=(--redefine-sym "$impl=$real")
+    emit_file_hook "$impl" "$real" "$nr" "$width" no
+    local name hidden
+    for name in "$@"; do
+        if ! symbol_defined "$name"; then
+            continue
+        fi
+        objcopy_args+=(--redefine-sym "$name=__rsched_real_alias_$name")
+        hidden=no
+        [[ "$name" == __GI_* ]] && hidden=yes
+        emit_file_hook "$name" "$real" "$nr" "$width" "$hidden"
+    done
+}
+
 objcopy_args=()
 : >"$wrapper_source"
 
@@ -285,6 +354,8 @@ add_rewrite "__sleep" "sleep" "__rsched_real_sleep" "rsched_sleep" ""
 # Deterministic inputs (see src/virt.rs). gettimeofday and time are IFUNCs
 # into the vDSO and stay real.
 add_rewrite "__clock_gettime" "clock_gettime" "__rsched_real_clock_gettime" "rsched_clock_gettime" ""
+add_rewrite "time" "time" "__rsched_real_time" "rsched_time" ""
+add_rewrite "__gettimeofday" "gettimeofday" "__rsched_real_gettimeofday" "rsched_gettimeofday" ""
 add_rewrite "sched_getcpu" "sched_getcpu" "__rsched_real_sched_getcpu" "rsched_sched_getcpu" ""
 add_rewrite "__getrandom" "getrandom" "__rsched_real_getrandom" "rsched_getrandom" ""
 # Kernel waits with a timeout move virtual time by the time they block.
@@ -319,6 +390,18 @@ add_io_rewrite "__close_range" "close_range" "rsched_close_range"
 add_io_rewrite "__closefrom" "closefrom" "rsched_closefrom"
 add_io_rewrite "__dup2" "dup2" "rsched_dup2"
 add_io_rewrite "__dup3" "dup3" "rsched_dup3"
+
+# The public write and writev wrappers above call these implementations,
+# so their writes are stamped here too.
+add_file_hook "__libc_write" 1 long __GI___libc_write __GI___write __GI_write __write
+add_file_hook "__write_nocancel" 1 long __GI___write_nocancel
+add_file_hook "__libc_pwrite64" 18 long __libc_pwrite __GI___pwrite __GI___pwrite64 __pwrite64 pwrite pwrite64
+add_file_hook "__writev" 20 long __GI___writev
+add_file_hook "__ftruncate64" 77 int __ftruncate ftruncate ftruncate64
+add_file_hook "__truncate64" 76 int truncate truncate64
+add_file_hook "fallocate64" 285 int fallocate
+add_file_hook "__fstatat64" 262 int __GI___fstatat __GI___fstatat64 __fstatat fstatat fstatat64
+add_file_hook "statx" 332 int
 
 if [[ ${#objcopy_args[@]} -eq 0 ]]; then
     mv "$object" "$output_file"

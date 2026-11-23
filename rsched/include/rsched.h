@@ -10,6 +10,8 @@
 #include <sys/random.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -88,6 +90,19 @@ unsigned int rsched_sleep(unsigned int);
 int  rsched_clock_gettime(clockid_t, struct timespec *);
 int  rsched_sched_getcpu(void);
 ssize_t rsched_getrandom(void *, size_t, unsigned int);
+time_t rsched_time(time_t *);
+int  rsched_gettimeofday(struct timeval *, void *);
+
+/* Stat calls report virtual file times: a successful write or truncate
+   sets a file's mtime and ctime to the virtual time. */
+struct statx;
+int  rsched_stat(const char *, struct stat *);
+int  rsched_lstat(const char *, struct stat *);
+int  rsched_fstat(int, struct stat *);
+int  rsched_fstatat(int, const char *, struct stat *, int);
+int  rsched_statx(int, const char *, int, unsigned int, struct statx *);
+int  rsched_ftruncate(int, off_t);
+int  rsched_truncate(const char *, off_t);
 
 int  rsched_sched_yield(void);
 pid_t rsched_fork(void);
@@ -165,6 +180,16 @@ int rsched_dup3(int, int, int);
 #define clock_gettime           rsched_clock_gettime
 #define sched_getcpu            rsched_sched_getcpu
 #define getrandom               rsched_getrandom
+/* Function-like where the name is also a struct or field name. */
+#define time(t)                 rsched_time(t)
+#define gettimeofday            rsched_gettimeofday
+#define stat(p, b)              rsched_stat(p, b)
+#define lstat                   rsched_lstat
+#define fstat                   rsched_fstat
+#define fstatat                 rsched_fstatat
+#define statx(d, p, f, m, b)    rsched_statx(d, p, f, m, b)
+#define ftruncate               rsched_ftruncate
+#define truncate                rsched_truncate
 #define pthread_barrier_init    rsched_pthread_barrier_init
 #define pthread_barrier_wait    rsched_pthread_barrier_wait
 #define sched_yield             rsched_sched_yield

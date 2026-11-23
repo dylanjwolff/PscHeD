@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
+#include <sys/stat.h>
 #include <poll.h>
 #include <time.h>
 #include <unistd.h>
@@ -264,6 +265,25 @@ static int run_once(void) {
     struct timeval tv = {0, 50000};
     if (select(0, 0, 0, 0, &tv) != 0 || now(CLOCK_MONOTONIC) - start < 0.05)
         return fail("select timed out before its timeout passed");
+    /* A file's times follow virtual time, as in glibc's tst-fseek: a
+       write after a sleep moves its mtime, which stays behind time(). */
+    char path[] = "/tmp/rsched-virtual-mtime-XXXXXX";
+    int fd = mkstemp(path);
+    if (fd < 0)
+        return fail("mkstemp");
+    unlink(path);
+    struct stat st1, st2;
+    int ok = write(fd, "a", 1) == 1 && fstat(fd, &st1) == 0;
+    sleep(1);
+    ok = ok && write(fd, "b", 1) == 1;
+    sleep(1);
+    time_t t = time(NULL);
+    ok = ok && fstat(fd, &st2) == 0;
+    close(fd);
+    if (!ok)
+        return fail("file write or fstat");
+    if (!(st1.st_mtime < st2.st_mtime && st1.st_ctime < st2.st_ctime && st2.st_mtime < t))
+        return fail("file times did not follow virtual time");
     unsigned char bytes[12];
     if (getrandom(bytes, sizeof bytes, 0) != (ssize_t)sizeof bytes)
         return fail("getrandom");
