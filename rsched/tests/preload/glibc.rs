@@ -228,7 +228,10 @@ int main(int argc, char **argv)
     run(command, "build newer-glibc test");
     let mut command = Command::new(&glibc.preload_runner);
     command.arg(&binary);
-    let output = run(command, "run a newer-glibc program under the instrumented glibc");
+    let output = run(
+        command,
+        "run a newer-glibc program under the instrumented glibc",
+    );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         "strtol=-5 sscanf=12,31 strlcpy=6,abc fmod=1.5 random=0\n"
