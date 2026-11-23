@@ -148,6 +148,9 @@ fn io_message_passing_with_instrumented_glibc_preloaded() {
     io_cases::check_io_cases("gcc", &glibc.preload_runner, &temp_dir());
 }
 
+// The coro provider does not support glibc's posix_spawn, which system()
+// uses: it fails with EINVAL before any process starts.
+#[cfg(not(feature = "coro"))]
 #[test]
 fn child_processes_run_with_the_host_libc() {
     // A program that starts a host binary, here /bin/sh through system(),
