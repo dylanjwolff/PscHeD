@@ -5,6 +5,7 @@
 #include <semaphore.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -80,6 +81,11 @@ int  rsched_clock_nanosleep(clockid_t, int, const struct timespec *, struct time
 int  rsched_usleep(useconds_t);
 unsigned int rsched_sleep(unsigned int);
 
+/* Deterministic inputs: virtual time, a per-task CPU, and seeded randomness. */
+int  rsched_clock_gettime(clockid_t, struct timespec *);
+int  rsched_sched_getcpu(void);
+ssize_t rsched_getrandom(void *, size_t, unsigned int);
+
 int  rsched_sched_yield(void);
 pid_t rsched_fork(void);
 long rsched_syscall(long, ...);
@@ -147,6 +153,9 @@ int rsched_dup3(int, int, int);
 #define clock_nanosleep         rsched_clock_nanosleep
 #define usleep                  rsched_usleep
 #define sleep                   rsched_sleep
+#define clock_gettime           rsched_clock_gettime
+#define sched_getcpu            rsched_sched_getcpu
+#define getrandom               rsched_getrandom
 #define pthread_barrier_init    rsched_pthread_barrier_init
 #define pthread_barrier_wait    rsched_pthread_barrier_wait
 #define sched_yield             rsched_sched_yield

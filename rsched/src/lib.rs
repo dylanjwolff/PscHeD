@@ -28,6 +28,7 @@ mod sync;
 mod sys;
 mod task_provider;
 mod tsan;
+mod virt;
 #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
 use task_provider::CloneArgs;
 use task_provider::{
@@ -290,6 +291,7 @@ impl State {
             self.task(caller).set_startup_done(true);
         }
         self.points += 1;
+        virt::tick();
 
         let event = self.info.get(&caller).and_then(|t| t.next_event);
         let caller_task = self.task(caller).creation_idx();
@@ -964,6 +966,9 @@ pub unsafe extern "C" fn rsched_syscall(
     if number == libc::SYS_fork {
         return rsched_fork().into();
     }
+    if let Some(r) = virt_syscall(number, &[a0, a1, a2, a3, a4, a5]) {
+        return io::libc_result(r);
+    }
     if io::is_modeled(number) {
         return io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5]);
     }
@@ -980,6 +985,28 @@ pub unsafe extern "C" fn rsched_syscall(
 /// closes descriptors spares rsched's reserved ones. Stores the raw syscall
 /// result (or -errno) in `ret` and returns true; returns false when the
 /// instruction should run unchanged, including thread-style clones.
+/// Runs `getrandom` or `clock_gettime` against rsched's deterministic models
+/// (see `virt`), returning the raw result or -errno; None for other syscalls
+/// and before rsched starts.
+unsafe fn virt_syscall(number: libc::c_long, args: &[libc::c_long; 6]) -> Option<libc::c_long> {
+    match number {
+        libc::SYS_getrandom if virt::models_random() => Some(virt::fill_random(
+            args[0] as *mut libc::c_void,
+            args[1] as usize,
+            args[2] as libc::c_uint,
+        )),
+        libc::SYS_clock_gettime => {
+            let r = virt::rsched_clock_gettime(args[0] as libc::clockid_t, args[1] as *mut _);
+            Some(if r == 0 {
+                0
+            } else {
+                -libc::c_long::from(*libc::__errno_location())
+            })
+        }
+        _ => None,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_process_syscall(
     number: libc::c_long,
@@ -991,6 +1018,10 @@ pub unsafe extern "C" fn rsched_process_syscall(
     }
     let args = &*(args as *const [libc::c_long; 6]);
     if let Some(r) = io::guarded_syscall(number, args) {
+        *ret = r;
+        return true;
+    }
+    if let Some(r) = virt_syscall(number, args) {
         *ret = r;
         return true;
     }
@@ -1026,6 +1057,8 @@ pub unsafe extern "C" fn rsched_libc_syscall(
     let outermost = rsched_try_enter();
     let result = if outermost && number == libc::SYS_clone {
         rsched_syscall(number, a0, a1, a2, a3, a4, a5)
+    } else if outermost && let Some(r) = virt_syscall(number, &[a0, a1, a2, a3, a4, a5]) {
+        io::libc_result(r)
     } else if outermost && io::is_modeled(number) {
         io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5])
     } else if let Some(r) = io::guarded_syscall(number, &[a0, a1, a2, a3, a4, a5])
@@ -1423,6 +1456,7 @@ pub unsafe extern "C" fn rsched_init() {
     }
     let seed = seed_from_env();
     STATE = Some(State::new(seed));
+    virt::start(seed);
     let first_process = st().task_provider.current_domain() < 0;
     st().task_provider.register_current_domain(first_process);
     #[cfg(not(feature = "instrumented-libc"))]
@@ -1463,6 +1497,7 @@ pub unsafe extern "C" fn rsched_reinit(seed: u64) {
     // Drop any existing state (previous test run's threads/mutexes/etc.).
     STATE = None;
     STATE = Some(State::new(seed));
+    virt::start(seed);
     INITED.store(true, Ordering::SeqCst);
     if st().task_provider.current_domain() < 0 {
         st().task_provider.register_current_domain(true);

@@ -45,6 +45,17 @@ fn static_lib() -> PathBuf {
 
 /// Builds and runs one case; returns the number of DFS schedules it ran.
 fn run_case(case: &str) -> usize {
+    let stdout = run_case_output(case, &[]);
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("runs="))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|runs| runs.parse().ok())
+        .unwrap_or_else(|| panic!("no run count in {stdout}"))
+}
+
+/// Builds one case and runs it with `env`, returning its stdout.
+fn run_case_output(case: &str, env: &[(&str, &str)]) -> String {
     let root = repo_root();
     let binary = temp_dir().join(case);
     let status = Command::new("clang")
@@ -63,6 +74,7 @@ fn run_case(case: &str) -> usize {
     let output = Command::new("timeout")
         .args(["--kill-after=5s", "60s"])
         .arg(&binary)
+        .envs(env.iter().copied())
         .output()
         .expect("spawn sync case");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -72,11 +84,7 @@ fn run_case(case: &str) -> usize {
         output.status,
         String::from_utf8_lossy(&output.stderr),
     );
-    stdout
-        .strip_prefix("runs=")
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(|runs| runs.parse().ok())
-        .unwrap_or_else(|| panic!("no run count in {stdout}"))
+    stdout.into_owned()
 }
 
 #[test]
@@ -113,4 +121,14 @@ fn sleeping_task_lets_others_run() {
 #[test]
 fn dfs_runs_past_its_former_depth_limit() {
     assert_eq!(run_case("CASE_SYNC_DEEP_DFS"), 1);
+}
+
+#[test]
+fn time_and_randomness_depend_only_on_the_seed() {
+    let first = run_case_output("CASE_SYNC_VIRTUAL_INPUTS", &[("RANDOM_SEED", "7")]);
+    let again = run_case_output("CASE_SYNC_VIRTUAL_INPUTS", &[("RANDOM_SEED", "7")]);
+    let other = run_case_output("CASE_SYNC_VIRTUAL_INPUTS", &[("RANDOM_SEED", "8")]);
+    assert!(first.contains("random="), "{first}");
+    assert_eq!(first, again, "same seed, different output");
+    assert_ne!(first, other, "getrandom ignored the seed");
 }

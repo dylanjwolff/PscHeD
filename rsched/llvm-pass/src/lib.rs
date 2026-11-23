@@ -1,3 +1,5 @@
+use llvm_plugin::inkwell::attributes::{Attribute, AttributeLoc};
+use llvm_plugin::inkwell::intrinsics::Intrinsic;
 use llvm_plugin::inkwell::llvm_sys::core::{
     LLVMAddAlias2, LLVMAliasGetAliasee, LLVMConstIntGetZExtValue, LLVMGetCalledValue,
     LLVMGetFirstGlobal, LLVMGetFirstGlobalAlias, LLVMGetInlineAsmAsmString,
@@ -7,8 +9,6 @@ use llvm_plugin::inkwell::llvm_sys::core::{
     LLVMSetLinkage, LLVMSetOperand, LLVMSetValueName2, LLVMSetVisibility, LLVMTypeOf,
 };
 use llvm_plugin::inkwell::llvm_sys::{LLVMLinkage, LLVMVisibility};
-use llvm_plugin::inkwell::attributes::{Attribute, AttributeLoc};
-use llvm_plugin::inkwell::intrinsics::Intrinsic;
 use llvm_plugin::inkwell::module::{Linkage, Module};
 use llvm_plugin::inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicTypeEnum};
 use llvm_plugin::inkwell::values::{
@@ -332,7 +332,10 @@ fn atomic_hook_thunk<'ctx>(
     }
     let thunk = module.add_function(THUNK, hook_ty, Some(Linkage::Internal));
     let noinline = Attribute::get_named_enum_kind_id("noinline");
-    thunk.add_attribute(AttributeLoc::Function, context.create_enum_attribute(noinline, 0));
+    thunk.add_attribute(
+        AttributeLoc::Function,
+        context.create_enum_attribute(noinline, 0),
+    );
     let return_address = Intrinsic::find("llvm.returnaddress")
         .and_then(|intrinsic| intrinsic.get_declaration(module, &[]))
         .expect("declare llvm.returnaddress");
@@ -352,7 +355,9 @@ fn atomic_hook_thunk<'ctx>(
     let site = builder
         .build_call(
             return_address,
-            &[BasicMetadataValueEnum::IntValue(context.i32_type().const_zero())],
+            &[BasicMetadataValueEnum::IntValue(
+                context.i32_type().const_zero(),
+            )],
             "site",
         )
         .expect("call llvm.returnaddress")
@@ -364,9 +369,13 @@ fn atomic_hook_thunk<'ctx>(
     builder
         .build_call(runtime, &args, "")
         .expect("call rsched_atomic_instrument_ra");
-    builder.build_unconditional_branch(done).expect("branch to thunk exit");
+    builder
+        .build_unconditional_branch(done)
+        .expect("branch to thunk exit");
     builder.position_at_end(done);
-    builder.build_return(None).expect("return from atomic hook thunk");
+    builder
+        .build_return(None)
+        .expect("return from atomic hook thunk");
     thunk
 }
 
@@ -713,18 +722,39 @@ const PTHREAD_REWRITES: &[(&str, &str)] = &[
     ("sem_post", "rsched_sem_post"),
     ("pthread_rwlock_rdlock", "rsched_pthread_rwlock_rdlock"),
     ("pthread_rwlock_wrlock", "rsched_pthread_rwlock_wrlock"),
-    ("pthread_rwlock_tryrdlock", "rsched_pthread_rwlock_tryrdlock"),
-    ("pthread_rwlock_trywrlock", "rsched_pthread_rwlock_trywrlock"),
-    ("pthread_rwlock_timedrdlock", "rsched_pthread_rwlock_timedrdlock"),
-    ("pthread_rwlock_timedwrlock", "rsched_pthread_rwlock_timedwrlock"),
-    ("pthread_rwlock_clockrdlock", "rsched_pthread_rwlock_clockrdlock"),
-    ("pthread_rwlock_clockwrlock", "rsched_pthread_rwlock_clockwrlock"),
+    (
+        "pthread_rwlock_tryrdlock",
+        "rsched_pthread_rwlock_tryrdlock",
+    ),
+    (
+        "pthread_rwlock_trywrlock",
+        "rsched_pthread_rwlock_trywrlock",
+    ),
+    (
+        "pthread_rwlock_timedrdlock",
+        "rsched_pthread_rwlock_timedrdlock",
+    ),
+    (
+        "pthread_rwlock_timedwrlock",
+        "rsched_pthread_rwlock_timedwrlock",
+    ),
+    (
+        "pthread_rwlock_clockrdlock",
+        "rsched_pthread_rwlock_clockrdlock",
+    ),
+    (
+        "pthread_rwlock_clockwrlock",
+        "rsched_pthread_rwlock_clockwrlock",
+    ),
     ("pthread_rwlock_unlock", "rsched_pthread_rwlock_unlock"),
     ("pthread_once", "rsched_pthread_once"),
     ("nanosleep", "rsched_nanosleep"),
     ("clock_nanosleep", "rsched_clock_nanosleep"),
     ("usleep", "rsched_usleep"),
     ("sleep", "rsched_sleep"),
+    ("clock_gettime", "rsched_clock_gettime"),
+    ("sched_getcpu", "rsched_sched_getcpu"),
+    ("getrandom", "rsched_getrandom"),
     ("fork", "rsched_fork"),
     ("waitpid", "rsched_waitpid"),
     ("execv", "rsched_execv"),
@@ -1310,6 +1340,27 @@ const MUSL_REWRITES: &[LibcRewrite] = &[
         public: "sleep",
         real: "__rsched_real_sleep",
         rsched: "rsched_sleep",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "__clock_gettime",
+        public: "clock_gettime",
+        real: "__rsched_real_clock_gettime",
+        rsched: "rsched_clock_gettime",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "sched_getcpu",
+        public: "sched_getcpu",
+        real: "__rsched_real_sched_getcpu",
+        rsched: "rsched_sched_getcpu",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "getrandom",
+        public: "getrandom",
+        real: "__rsched_real_getrandom",
+        rsched: "rsched_getrandom",
         diverges: false,
     },
     LibcRewrite {

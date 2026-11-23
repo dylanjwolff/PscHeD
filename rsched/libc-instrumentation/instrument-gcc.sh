@@ -282,6 +282,11 @@ add_rewrite "__nanosleep" "nanosleep" "__rsched_real_nanosleep" "rsched_nanoslee
 add_rewrite "__clock_nanosleep" "clock_nanosleep" "__rsched_real_clock_nanosleep" "rsched_clock_nanosleep" ""
 add_rewrite "usleep" "usleep" "__rsched_real_usleep" "rsched_usleep" ""
 add_rewrite "__sleep" "sleep" "__rsched_real_sleep" "rsched_sleep" ""
+# Deterministic inputs (see src/virt.rs). gettimeofday and time are IFUNCs
+# into the vDSO and stay real.
+add_rewrite "__clock_gettime" "clock_gettime" "__rsched_real_clock_gettime" "rsched_clock_gettime" ""
+add_rewrite "sched_getcpu" "sched_getcpu" "__rsched_real_sched_getcpu" "rsched_sched_getcpu" ""
+add_rewrite "__getrandom" "getrandom" "__rsched_real_getrandom" "rsched_getrandom" ""
 add_rewrite "___pthread_barrier_init" "pthread_barrier_init" "__rsched_real_pthread_barrier_init" "rsched_pthread_barrier_init" "__GI___pthread_barrier_init"
 add_rewrite "___pthread_barrier_wait" "pthread_barrier_wait" "__rsched_real_pthread_barrier_wait" "rsched_pthread_barrier_wait" "__GI___pthread_barrier_wait"
 add_rewrite "__sched_yield" "sched_yield" "__rsched_real_sched_yield" "rsched_sched_yield" "__GI___sched_yield"

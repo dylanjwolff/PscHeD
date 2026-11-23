@@ -143,9 +143,22 @@ another task releases it.
 Deadlines pass in virtual time. A task whose timed wait or sleep only its
 deadline can end stays blocked until no other task can run, or until it has
 been blocked for `RSCHED_STARVATION_LIMIT` scheduling points, so a task that
-spins on a flag cannot starve it. When rsched expires the wait, it first
-sleeps until the real deadline, so a timeout is never reported early. Which
-wait expires and when depends only on the schedule.
+spins on a flag cannot starve it. Expiring the wait moves the virtual clock
+to its deadline, so a timeout is never reported early. Which wait expires
+and when depends only on the schedule.
+
+So that one seed always takes the same path, programs also read time,
+their CPU, and randomness from deterministic models:
+
+- `clock_gettime` on the realtime, monotonic, and boot-time clocks returns
+  virtual time. It starts at the real time when rsched starts and advances
+  by 1 µs at every scheduling point and every clock read, so a loop that
+  spins on the clock still ends. CPU-time clocks stay real, as do
+  `gettimeofday` and `time`, which glibc resolves into the vDSO.
+- `sched_getcpu` reports a CPU derived from the calling task.
+- `getrandom`, including `syscall(SYS_getrandom)` and, under
+  `RSCHED_SECCOMP=1`, the raw syscall, returns bytes from a generator seeded
+  by `RANDOM_SEED`. Reads of `/dev/urandom` are not modeled.
 
 Semaphores must be shared within one process. Process-shared rwlocks and
 `pthread_once` routines that unwind are not modeled; a routine that throws

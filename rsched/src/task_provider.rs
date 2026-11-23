@@ -823,12 +823,17 @@ struct SharedTask {
 struct ProcessShared {
     task_count: usize,
     dfs: SharedDfsState,
+    env: crate::virt::SharedEnv,
     tasks: [SharedTask; MAX_TASKS],
     slots: [ProcessSlot; MAX_PROCESSES],
 }
 
 pub(crate) unsafe fn shared_dfs_state() -> *mut SharedDfsState {
     addr_of_mut!((*process_shared_ptr()).dfs)
+}
+
+pub(crate) unsafe fn shared_env() -> *mut crate::virt::SharedEnv {
+    addr_of_mut!((*process_shared_ptr()).env)
 }
 
 unsafe fn process_shared_ptr() -> *mut ProcessShared {

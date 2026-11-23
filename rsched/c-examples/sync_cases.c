@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -242,6 +243,25 @@ static int run_once(void) {
     return counter == 1000 ? 0 : fail("lost an increment");
 }
 
+#elif defined(CASE_SYNC_VIRTUAL_INPUTS)
+
+/* A loop that spins on the clock, with no other scheduling point, ends; and
+   getrandom's bytes depend only on RANDOM_SEED. */
+#define DFS_RUNS 1
+static int run_once(void) {
+    double start = now(CLOCK_MONOTONIC);
+    while (now(CLOCK_MONOTONIC) - start < 0.005)
+        ;
+    unsigned char bytes[12];
+    if (getrandom(bytes, sizeof bytes, 0) != (ssize_t)sizeof bytes)
+        return fail("getrandom");
+    printf("random=");
+    for (size_t i = 0; i < sizeof bytes; i++)
+        printf("%02x", bytes[i]);
+    printf(" cpu=%d\n", sched_getcpu());
+    return 0;
+}
+
 #else
 #error "define one CASE_SYNC_* variant"
 #endif
@@ -253,7 +273,8 @@ int main(void) {
     rsched_dfs_reset();
     size_t runs = 0;
     while (rsched_dfs_has_next()) {
-        rsched_reinit(0);
+        const char *seed = getenv("RANDOM_SEED");
+        rsched_reinit(seed ? strtoull(seed, 0, 10) : 0);
         int r = run_once();
         if (r != 0) {
             fprintf(stderr, "schedule %zu failed\n", runs);

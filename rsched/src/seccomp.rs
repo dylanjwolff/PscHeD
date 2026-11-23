@@ -244,6 +244,9 @@ unsafe fn install_filter() {
         libc::SYS_fork as u32,
         // Emulated so SIGSYS stays deliverable; see emulate_sigprocmask.
         libc::SYS_rt_sigprocmask as u32,
+        // Raw reads of these come from rsched's deterministic models.
+        libc::SYS_getrandom as u32,
+        libc::SYS_clock_gettime as u32,
         clone_syscall,
         clone3_syscall,
     ];

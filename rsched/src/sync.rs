@@ -1,15 +1,16 @@
 //! Models of blocking primitives beyond mutexes and untimed condition waits:
 //! semaphores, timed condition waits, rwlocks, `pthread_once`, and sleeps.
 //!
-//! Timed waits run in virtual time. A waiter that only its deadline could
-//! wake stays blocked until no task can run, or until it has been blocked for
-//! `RSCHED_STARVATION_LIMIT` scheduling points (default 50000), so a spinning
-//! task cannot starve it forever. Both points depend only on the schedule.
-//! Before the waiter resumes, rsched sleeps until the real deadline, so a
-//! timeout is never reported before its deadline has passed.
+//! Timed waits run in virtual time (see `virt`). A waiter that only its
+//! deadline could wake stays blocked until no task can run, or until it has
+//! been blocked for `RSCHED_STARVATION_LIMIT` scheduling points (default
+//! 50000), so a spinning task cannot starve it forever. Both points depend
+//! only on the schedule. Expiring a wait moves virtual time to its deadline,
+//! so a timeout is never reported before its deadline has passed.
 
 use crate::event::{Event, EventKind};
 use crate::scheduler::logging_enabled;
+use crate::virt;
 use crate::{
     CondT, PthreadT, State, ensure_init, log_line, my_pt, return_address, rsched_glock,
     rsched_gunlock, seccomp, st, with_internal_depth,
@@ -61,10 +62,9 @@ fn supported_clock(clock: clockid_t) -> bool {
     clock == libc::CLOCK_REALTIME || clock == libc::CLOCK_MONOTONIC
 }
 
-/// The deadline `rel` after now on `clock`.
+/// The deadline `rel` after now on `clock`, which must be virtual.
 unsafe fn after(clock: clockid_t, rel: timespec) -> Deadline {
-    let mut now: timespec = std::mem::zeroed();
-    libc::clock_gettime(clock, &mut now);
+    let now = virt::now(clock);
     let mut at = timespec {
         tv_sec: now.tv_sec.saturating_add(rel.tv_sec),
         tv_nsec: now.tv_nsec + rel.tv_nsec,
@@ -97,28 +97,24 @@ fn starvation_limit() -> u64 {
     limit
 }
 
-/// Sleeps until `deadline` without holding rsched's global lock.
-unsafe fn sleep_until(deadline: Deadline) {
-    rsched_gunlock();
-    sleep_until_unlocked(deadline);
-    rsched_glock();
-}
-
-unsafe fn sleep_until_unlocked(deadline: Deadline) {
-    loop {
-        let r = seccomp::raw_syscall6(
-            libc::SYS_clock_nanosleep,
-            deadline.clock as c_long,
-            libc::TIMER_ABSTIME as c_long,
-            &deadline.at as *const timespec as c_long,
-            0,
-            0,
-            0,
-        );
-        if r != -(libc::EINTR as c_long) {
-            return;
-        }
-    }
+/// Sleeps a thread rsched does not schedule for real, for as long as
+/// `deadline` is away in virtual time.
+unsafe fn sleep_unscheduled(deadline: Deadline) {
+    let ns = virt::remaining_ns(deadline.clock, &deadline.at);
+    let mut rel = timespec {
+        tv_sec: ns / 1_000_000_000,
+        tv_nsec: ns % 1_000_000_000,
+    };
+    while seccomp::raw_syscall6(
+        libc::SYS_nanosleep,
+        &rel as *const timespec as c_long,
+        &mut rel as *mut timespec as c_long,
+        0,
+        0,
+        0,
+        0,
+    ) == -(libc::EINTR as c_long)
+    {}
 }
 
 unsafe fn errno() -> c_int {
@@ -180,12 +176,7 @@ impl State {
             .choose_index(&blocking)
             .expect("rsched: non-empty timed wait list");
         let wait = self.timed_waits[candidates[pick]];
-        sleep_until(wait.deadline);
-        // A thread rsched does not schedule may have woken the waiter while
-        // the global lock was released.
-        if !self.threads.contains(&wait.pthread) || !self.task(wait.pthread).is_blocking() {
-            return true;
-        }
+        virt::advance_to(wait.deadline.clock, &wait.deadline.at);
         let pt = wait.pthread;
         match wait.on {
             WaitOn::Sem(key) => {
@@ -626,7 +617,7 @@ unsafe fn sleep_impl(deadline: Option<Deadline>, instr_addr: u64) {
         // Not a task rsched schedules: sleep for real.
         rsched_gunlock();
         if let Some(deadline) = deadline {
-            sleep_until_unlocked(deadline);
+            sleep_unscheduled(deadline);
         }
         return;
     }
@@ -672,7 +663,7 @@ pub unsafe extern "C" fn rsched_clock_nanosleep(
     if !valid(&req) || req.tv_sec < 0 {
         return libc::EINVAL;
     }
-    if !supported_clock(clock) && clock != libc::CLOCK_BOOTTIME {
+    if !virt::is_virtual(clock) {
         // CPU-time and other clocks: leave the sleep to the kernel.
         let r = seccomp::raw_syscall6(
             libc::SYS_clock_nanosleep,
