@@ -126,6 +126,28 @@ unsafe fn io_point(instr_addr: u64, fd: c_int, syscall: c_long) {
     crate::rsched_gunlock();
 }
 
+/// Blocks the calling task until child process `pid` changes state, by
+/// watching its pidfd like any other descriptor. Returns false, without
+/// blocking, for a `pid` that names no single process or when the kernel
+/// has no pidfds; the caller then yields instead.
+pub(crate) unsafe fn wait_for_child(pid: libc::pid_t) -> bool {
+    const SYS_PIDFD_OPEN: c_long = 434;
+    if pid <= 0 {
+        return false;
+    }
+    let fd = raw_syscall6(SYS_PIDFD_OPEN, pid as c_long, 0, 0, 0, 0, 0);
+    if fd < 0 {
+        return false;
+    }
+    wait_until_ready(&[libc::pollfd {
+        fd: fd as c_int,
+        events: libc::POLLIN,
+        revents: 0,
+    }]);
+    raw_syscall6(libc::SYS_close, fd, 0, 0, 0, 0, 0);
+    true
+}
+
 /// Blocks the calling task, which is not runnable meanwhile, until one of
 /// `fds` reports its events, an error, or a hang-up. Ready descriptors can
 /// become unready again before the task runs, so callers check again.

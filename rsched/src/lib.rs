@@ -924,6 +924,11 @@ pub unsafe extern "C" fn rsched_process_exit() {
     // run next. Retire them first so that one of them blocked on I/O does
     // not make the scheduler wait for a descriptor nobody will touch.
     task_provider::deactivate_current_domain_tasks();
+    // The exit itself can make a waiter's descriptor ready, such as a
+    // parent's pidfd in waitpid or the other end of a pipe, but only once
+    // this process is gone. Waiting for that here would deadlock, so wake
+    // the waiters to check again in their own processes.
+    task_provider::wake_all_io_waiters();
     let next = st().choose_task(0 as PthreadT, false);
     st().task_provider.process_exit(next);
     rsched_gunlock();
@@ -1147,7 +1152,11 @@ pub unsafe extern "C" fn rsched_waitpid(
         if r != 0 {
             return r;
         }
-        rsched_sched_yield();
+        // A blocked waiter lets the child's timed waits expire; one that
+        // yields stays runnable and holds them off.
+        if !io::wait_for_child(pid) {
+            rsched_sched_yield();
+        }
     }
 }
 

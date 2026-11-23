@@ -1596,6 +1596,20 @@ pub(crate) unsafe fn io_wait(task: TaskHandle, waits: &Epoll, switch: impl FnOnc
 /// as a free-running thread under TSAN, may need GMTX to make the descriptor
 /// ready. Returns whether any task is blocked on I/O. Must be called with
 /// GMTX held.
+/// Makes every task blocked on I/O runnable; each checks its descriptors
+/// again and waits anew if they are still not ready.
+pub(crate) unsafe fn wake_all_io_waiters() {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if ps.is_null() {
+        return;
+    }
+    for id in 0..(*ps).task_count.min(MAX_TASKS) {
+        if (*ps).tasks[id].io_wait != 0 {
+            (*ps).tasks[id].is_blocking = 0;
+        }
+    }
+}
+
 pub(crate) unsafe fn wake_io_waiters(block: bool) -> bool {
     let ps = PROCESS_SHARED.load(Ordering::Acquire);
     if ps.is_null() {
@@ -1628,11 +1642,7 @@ pub(crate) unsafe fn wake_io_waiters(block: bool) -> bool {
                 // epoll. Wake every I/O waiter: each checks its descriptors
                 // again and, unable to register a new wait, falls back to
                 // yielding.
-                for id in 0..(*ps).task_count.min(MAX_TASKS) {
-                    if (*ps).tasks[id].io_wait != 0 {
-                        (*ps).tasks[id].is_blocking = 0;
-                    }
-                }
+                wake_all_io_waiters();
                 return true;
             }
         }
