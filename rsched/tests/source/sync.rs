@@ -109,3 +109,8 @@ fn pthread_once_runs_init_once() {
 fn sleeping_task_lets_others_run() {
     assert!(run_case("CASE_SYNC_SLEEP") > 1);
 }
+
+#[test]
+fn dfs_runs_past_its_former_depth_limit() {
+    assert_eq!(run_case("CASE_SYNC_DEEP_DFS"), 1);
+}

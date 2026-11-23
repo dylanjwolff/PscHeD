@@ -215,6 +215,33 @@ static int run_once(void) {
     return flag == 1 ? 0 : fail("setter did not run");
 }
 
+#elif defined(CASE_SYNC_DEEP_DFS)
+
+/* Two threads contend for a mutex far more often than DFS once recorded
+   (256 branching points). Only the first schedule runs. */
+#define DFS_RUNS 1
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static int counter;
+
+static void *bump(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 500; i++) {
+        pthread_mutex_lock(&mutex);
+        counter++;
+        pthread_mutex_unlock(&mutex);
+    }
+    return 0;
+}
+
+static int run_once(void) {
+    counter = 0;
+    pthread_t t;
+    pthread_create(&t, 0, bump, 0);
+    bump(0);
+    pthread_join(t, 0);
+    return counter == 1000 ? 0 : fail("lost an increment");
+}
+
 #else
 #error "define one CASE_SYNC_* variant"
 #endif
@@ -235,6 +262,10 @@ int main(void) {
         rsched_dfs_finish_current();
         if (++runs >= MAX_RUNS)
             return fail("too many dfs runs");
+#ifdef DFS_RUNS
+        if (runs == DFS_RUNS)
+            break;
+#endif
     }
     printf("runs=%zu completed=%zu\n", runs, rsched_dfs_completed_schedules());
     return runs == rsched_dfs_completed_schedules() ? 0 : 1;

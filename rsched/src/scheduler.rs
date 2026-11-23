@@ -1,25 +1,18 @@
 use crate::event::{AccessKind, Event, EventKind};
 
-pub(crate) const DFS_MAX_EVENTS: usize = 256;
+/// Branching scheduling points DFS records per execution. The path lives in
+/// process-shared memory, which is mapped lazily, so unused depth costs no
+/// memory. Past this depth an execution continues without branching.
+pub(crate) const DFS_MAX_EVENTS: usize = 1 << 20;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
 pub(crate) struct DfsPath {
     len: usize,
     choices: [u16; DFS_MAX_EVENTS],
 }
 
 impl DfsPath {
-    const EMPTY: Self = Self {
-        len: 0,
-        choices: [0; DFS_MAX_EVENTS],
-    };
-
     fn push(&mut self, choice: usize) {
-        assert!(
-            self.len < DFS_MAX_EVENTS,
-            "rsched: dfs execution exceeded DFS_MAX_EVENTS"
-        );
         assert!(
             choice <= u16::MAX as usize,
             "rsched: dfs choice ordinal does not fit in u16"
@@ -38,13 +31,16 @@ impl DfsPath {
     }
 }
 
+/// Zero-initialized in process-shared memory. It is several megabytes, so it
+/// is only ever reset in place, never built as a value.
 #[repr(C)]
-#[derive(Clone, Copy)]
 pub(crate) struct SharedDfsState {
     initialized: u8,
     in_progress: u8,
     has_next: u8,
-    _pad: [u8; 5],
+    /// An execution reached DFS_MAX_EVENTS; exploration is incomplete.
+    truncated: u8,
+    _pad: [u8; 4],
     completed: usize,
     path: DfsPath,
     replay_depth: usize,
@@ -52,19 +48,15 @@ pub(crate) struct SharedDfsState {
 }
 
 impl SharedDfsState {
-    pub(crate) const EMPTY: Self = Self {
-        initialized: 0,
-        in_progress: 0,
-        has_next: 0,
-        _pad: [0; 5],
-        completed: 0,
-        path: DfsPath::EMPTY,
-        replay_depth: 0,
-        choices_at_depth: [0; DFS_MAX_EVENTS],
-    };
-
     fn reset(&mut self) {
-        *self = Self::EMPTY;
+        // Entries past the recorded prefix are rewritten before they are read.
+        self.path.choices[..self.path.len].fill(0);
+        self.choices_at_depth[..self.replay_depth.min(DFS_MAX_EVENTS)].fill(0);
+        self.path.len = 0;
+        self.replay_depth = 0;
+        self.completed = 0;
+        self.in_progress = 0;
+        self.truncated = 0;
         self.initialized = 1;
         self.has_next = 1;
     }
@@ -83,17 +75,13 @@ impl SharedDfsState {
         if self.has_next == 0 {
             return;
         }
+        self.choices_at_depth[..self.replay_depth.min(DFS_MAX_EVENTS)].fill(0);
         self.replay_depth = 0;
-        self.choices_at_depth = [0; DFS_MAX_EVENTS];
         self.has_next = 0;
         self.in_progress = 1;
     }
 
     fn record_choice_count(&mut self, depth: usize, choices: usize) {
-        assert!(
-            depth < DFS_MAX_EVENTS,
-            "rsched: dfs execution exceeded DFS_MAX_EVENTS"
-        );
         assert!(
             choices <= u16::MAX as usize,
             "rsched: dfs choice count does not fit in u16"
@@ -103,6 +91,16 @@ impl SharedDfsState {
 
     fn next_choice(&mut self, choices: usize) -> usize {
         let depth = self.replay_depth;
+        if depth >= DFS_MAX_EVENTS {
+            if self.truncated == 0 {
+                self.truncated = 1;
+                crate::log_line!(
+                    "rsched: dfs execution exceeded {DFS_MAX_EVENTS} branching points; \
+                     later points do not branch, so exploration is incomplete"
+                );
+            }
+            return 0;
+        }
         self.record_choice_count(depth, choices);
         let choice = self.path.choice(depth).unwrap_or(0);
         assert!(
@@ -134,7 +132,8 @@ impl SharedDfsState {
             }
         }
         self.has_next = 0;
-        self.path = DfsPath::EMPTY;
+        self.path.choices[..self.path.len].fill(0);
+        self.path.len = 0;
     }
 }
 

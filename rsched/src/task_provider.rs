@@ -879,7 +879,9 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
         libc::MAP_FAILED,
         "rsched: mmap shared process state failed"
     );
-    core::ptr::write_bytes(raw, 0, size);
+    // A fresh memfd reads as zeros, which every field starts as. Writing
+    // them would commit every page, including the megabytes of DFS path
+    // that most runs never reach.
     p = raw.cast::<ProcessShared>();
     PROCESS_SHARED_FD.store(fd, Ordering::Release);
     set_env_usize("RSCHED_SHM_FD", fd as usize);
