@@ -237,6 +237,7 @@ pub(crate) unsafe fn prepare(instr_addr: u64, nr: c_long, args: &mut [c_long; 6]
                 crate::rsched_sched_yield();
                 if !ready() {
                     args[2] = 0;
+                    crate::virt::advance_by(i64::from(timeout) * 1_000_000);
                 }
                 return;
             }

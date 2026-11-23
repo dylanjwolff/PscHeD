@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
+#include <poll.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -254,6 +255,15 @@ static int run_once(void) {
     double start = now(CLOCK_MONOTONIC);
     while (now(CLOCK_MONOTONIC) - start < 0.005)
         ;
+    /* A timeout that passes moves the clock past it. */
+    start = now(CLOCK_MONOTONIC);
+    if (poll(0, 0, 50) != 0 || now(CLOCK_MONOTONIC) - start < 0.05)
+        return fail("poll timed out before its timeout passed");
+    /* So does one that waits in the kernel. */
+    start = now(CLOCK_MONOTONIC);
+    struct timeval tv = {0, 50000};
+    if (select(0, 0, 0, 0, &tv) != 0 || now(CLOCK_MONOTONIC) - start < 0.05)
+        return fail("select timed out before its timeout passed");
     unsigned char bytes[12];
     if (getrandom(bytes, sizeof bytes, 0) != (ssize_t)sizeof bytes)
         return fail("getrandom");

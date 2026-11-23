@@ -159,7 +159,15 @@ deadline can end stays blocked until no other task can run, or until it has
 been blocked for `RSCHED_STARVATION_LIMIT` scheduling points, so a task that
 spins on a flag cannot starve it. Expiring the wait moves the virtual clock
 to its deadline, so a timeout is never reported early. Which wait expires
-and when depends only on the schedule.
+and when depends only on the schedule. A sleep then also lasts its real
+duration, so file timestamps and `time()` see it pass as they would
+natively; timed waits on condition variables, semaphores, and rwlocks
+return as soon as they expire.
+
+Calls that wait in the kernel and that rsched does not model, such as
+`ppoll`, `select`, `pselect`, `epoll_wait`, `epoll_pwait`, and
+`sigtimedwait`, move the virtual clock by the real time they blocked, so
+their timeouts are never seen to end early.
 
 So that one seed always takes the same path, programs also read time,
 their CPU, and randomness from deterministic models:

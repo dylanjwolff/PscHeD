@@ -998,6 +998,9 @@ pub unsafe extern "C" fn rsched_syscall(
     if let Some(r) = io::guarded_syscall(number, &[a0, a1, a2, a3, a4, a5]) {
         return io::libc_result(r);
     }
+    if virt::waits_in_kernel(number) {
+        return virt::kernel_wait(|| libc::syscall(number, a0, a1, a2, a3, a4, a5));
+    }
 
     libc::syscall(number, a0, a1, a2, a3, a4, a5)
 }
@@ -1088,6 +1091,8 @@ pub unsafe extern "C" fn rsched_libc_syscall(
         && outermost
     {
         io::libc_result(r)
+    } else if outermost && virt::waits_in_kernel(number) {
+        virt::kernel_wait(|| rsched_raw_syscall(number, a0, a1, a2, a3, a4, a5))
     } else {
         rsched_raw_syscall(number, a0, a1, a2, a3, a4, a5)
     };

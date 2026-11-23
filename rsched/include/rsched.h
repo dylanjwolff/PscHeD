@@ -5,7 +5,10 @@
 #include <semaphore.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <signal.h>
+#include <sys/epoll.h>
 #include <sys/random.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -112,6 +115,12 @@ int rsched_accept(int, struct sockaddr *, socklen_t *);
 int rsched_accept4(int, struct sockaddr *, socklen_t *, int);
 int rsched_connect(int, const struct sockaddr *, socklen_t);
 int rsched_poll(struct pollfd *, nfds_t, int);
+int rsched_ppoll(struct pollfd *, nfds_t, const struct timespec *, const sigset_t *);
+int rsched_select(int, fd_set *, fd_set *, fd_set *, struct timeval *);
+int rsched_pselect(int, fd_set *, fd_set *, fd_set *, const struct timespec *, const sigset_t *);
+int rsched_epoll_wait(int, struct epoll_event *, int, int);
+int rsched_epoll_pwait(int, struct epoll_event *, int, int, const sigset_t *);
+int rsched_sigtimedwait(const sigset_t *, siginfo_t *, const struct timespec *);
 
 /* Descriptor closing.  rsched's own descriptors survive these: closing one
    reports success, and dup2/dup3 onto one fail with EBADF. */
@@ -178,6 +187,12 @@ int rsched_dup3(int, int, int);
 #define accept4                 rsched_accept4
 #define connect                 rsched_connect
 #define poll                    rsched_poll
+#define ppoll                   rsched_ppoll
+#define select                  rsched_select
+#define pselect                 rsched_pselect
+#define epoll_wait              rsched_epoll_wait
+#define epoll_pwait             rsched_epoll_pwait
+#define sigtimedwait            rsched_sigtimedwait
 #define close                   rsched_close
 #define close_range             rsched_close_range
 #define closefrom               rsched_closefrom

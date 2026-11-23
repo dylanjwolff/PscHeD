@@ -8,7 +8,14 @@
 //!   their real values when rsched starts and then advance together by
 //!   [`TICK_NS`] at every scheduling point and every clock read, so a loop
 //!   that spins on the clock still ends. A timed wait or sleep that expires
-//!   moves them to its deadline.
+//!   moves them to its deadline, and a `poll` timeout rsched expires moves
+//!   them by the timeout. A syscall that rsched does not model and that may
+//!   wait in the kernel, such as `ppoll` or `epoll_wait`, moves them by the
+//!   real time it blocked, so a timeout never passes while the clock stands
+//!   still; only such real waits make time depend on more than the schedule.
+//!   libc's `ppoll`, `select`, `pselect`, `epoll_wait`, `epoll_pwait`, and
+//!   `sigtimedwait` are routed here too, since they make their syscalls
+//!   inline.
 //! - `sched_getcpu` reports a CPU derived from the calling task.
 //! - `getrandom` returns bytes from a generator seeded by `RANDOM_SEED`.
 //!
@@ -119,6 +126,63 @@ fn to_ns(ts: &timespec) -> i64 {
 pub(crate) fn now(clock: clockid_t) -> timespec {
     let base = base_ns(clock).expect("rsched: clock is not virtual");
     to_timespec(base.saturating_add(env().elapsed_ns.load(Ordering::Relaxed) as i64))
+}
+
+/// Real monotonic nanoseconds, for [`real_sleep_until`].
+pub(crate) unsafe fn real_monotonic_ns() -> i64 {
+    real_now_ns(libc::CLOCK_MONOTONIC)
+}
+
+/// Sleeps for real until `ns` nanoseconds have passed since `start`, a
+/// [`real_monotonic_ns`] reading.
+pub(crate) unsafe fn real_sleep_until(start: i64, ns: i64) {
+    let at = to_timespec(start.saturating_add(ns));
+    while crate::seccomp::raw_syscall6(
+        libc::SYS_clock_nanosleep,
+        libc::CLOCK_MONOTONIC as c_long,
+        libc::TIMER_ABSTIME as c_long,
+        &at as *const timespec as c_long,
+        0,
+        0,
+        0,
+    ) == -c_long::from(libc::EINTR)
+    {}
+}
+
+/// Moves time forward by `ns`.
+pub(crate) fn advance_by(ns: i64) {
+    if started() && ns > 0 {
+        env().elapsed_ns.fetch_add(ns as u64, Ordering::Relaxed);
+    }
+}
+
+/// Whether syscall `nr`, unmodeled, may wait in the kernel for a timeout.
+pub(crate) fn waits_in_kernel(nr: c_long) -> bool {
+    const SYS_EPOLL_PWAIT2: c_long = 441;
+    matches!(
+        nr,
+        libc::SYS_ppoll
+            | libc::SYS_select
+            | libc::SYS_pselect6
+            | libc::SYS_epoll_wait
+            | libc::SYS_epoll_pwait
+            | SYS_EPOLL_PWAIT2
+            | libc::SYS_nanosleep
+            | libc::SYS_clock_nanosleep
+            | libc::SYS_rt_sigtimedwait
+    )
+}
+
+/// Runs `call`, a syscall that may wait in the kernel, and moves virtual
+/// time forward by the real time it took.
+pub(crate) unsafe fn kernel_wait(call: impl FnOnce() -> c_long) -> c_long {
+    if !started() {
+        return call();
+    }
+    let start = real_now_ns(libc::CLOCK_MONOTONIC);
+    let result = call();
+    advance_by(real_now_ns(libc::CLOCK_MONOTONIC) - start);
+    result
 }
 
 /// Moves time forward, if needed, so that `clock` reads at least `at`.
@@ -250,3 +314,55 @@ pub unsafe extern "C" fn rsched_getrandom(buf: *mut c_void, len: usize, flags: c
     }
     r as isize
 }
+
+/// Entry points for libc calls that may wait in the kernel for a timeout.
+/// libc makes their syscalls inline, so `syscall` interception never sees
+/// them. Each runs the real call and moves virtual time by the time it took.
+macro_rules! kernel_wait_entry {
+    ($name:ident, $real:ident, ($($arg:ident: $ty:ty),*)) => {
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name($($arg: $ty),*) -> c_int {
+            kernel_wait(|| crate::with_internal_depth(|| libc::$real($($arg),*)) as c_long) as c_int
+        }
+    };
+}
+
+kernel_wait_entry!(rsched_ppoll, ppoll, (
+    fds: *mut libc::pollfd,
+    nfds: libc::nfds_t,
+    timeout: *const timespec,
+    sigmask: *const libc::sigset_t
+));
+kernel_wait_entry!(rsched_select, select, (
+    nfds: c_int,
+    readfds: *mut libc::fd_set,
+    writefds: *mut libc::fd_set,
+    exceptfds: *mut libc::fd_set,
+    timeout: *mut libc::timeval
+));
+kernel_wait_entry!(rsched_pselect, pselect, (
+    nfds: c_int,
+    readfds: *mut libc::fd_set,
+    writefds: *mut libc::fd_set,
+    exceptfds: *mut libc::fd_set,
+    timeout: *const timespec,
+    sigmask: *const libc::sigset_t
+));
+kernel_wait_entry!(rsched_epoll_wait, epoll_wait, (
+    epfd: c_int,
+    events: *mut libc::epoll_event,
+    maxevents: c_int,
+    timeout: c_int
+));
+kernel_wait_entry!(rsched_epoll_pwait, epoll_pwait, (
+    epfd: c_int,
+    events: *mut libc::epoll_event,
+    maxevents: c_int,
+    timeout: c_int,
+    sigmask: *const libc::sigset_t
+));
+kernel_wait_entry!(rsched_sigtimedwait, sigtimedwait, (
+    set: *const libc::sigset_t,
+    info: *mut libc::siginfo_t,
+    timeout: *const timespec
+));
