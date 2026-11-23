@@ -939,17 +939,32 @@ pub unsafe extern "C" fn rsched_process_exit_status(status: libc::c_int) -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_fork() -> libc::pid_t {
     ensure_init();
-    // The instrumented-libc depth is keyed by thread id, so the child starts
-    // at 0; give it the caller's depth so the libc fork wrapper's exit does
-    // not underflow it.
+    st().task_provider.fork()
+}
+
+/// The caller's rsched recursion depth, for a forked child to inherit with
+/// [`inherit_depth`].
+pub(crate) fn fork_depth() -> u32 {
     #[cfg(feature = "instrumented-libc")]
-    let depth = instrumented_depth_load();
-    let pid = st().task_provider.fork();
-    #[cfg(feature = "instrumented-libc")]
-    if pid == 0 {
-        instrumented_depth_store(depth);
+    {
+        instrumented_depth_load()
     }
-    pid
+    #[cfg(not(feature = "instrumented-libc"))]
+    {
+        0
+    }
+}
+
+/// Gives a forked child its parent's recursion depth. The instrumented-libc
+/// depth is keyed by thread id, so the child's new thread starts without
+/// one; it must inherit it before running any wrapped libc function, or a
+/// call rsched makes internally, such as the fork gate's `sem_wait`, looks
+/// like an outermost application call and re-enters the scheduler.
+pub(crate) fn inherit_depth(depth: u32) {
+    #[cfg(feature = "instrumented-libc")]
+    instrumented_depth_store(depth);
+    #[cfg(not(feature = "instrumented-libc"))]
+    let _ = depth;
 }
 
 #[unsafe(no_mangle)]

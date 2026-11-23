@@ -1442,8 +1442,10 @@ impl ProcessTaskProvider {
 
     pub(crate) unsafe fn fork(&mut self) -> libc::pid_t {
         self.before_fork();
+        let depth = crate::fork_depth();
         let pid = crate::with_internal_depth(|| libc::fork());
         if pid == 0 {
+            crate::inherit_depth(depth);
             self.after_fork_child();
         } else if self.after_fork_parent(pid) {
             crate::rsched_glock();
@@ -1475,6 +1477,7 @@ impl ProcessTaskProvider {
         }
 
         self.before_fork();
+        let depth = crate::fork_depth();
         let result = crate::seccomp::raw_syscall6(
             libc::SYS_clone,
             flags,
@@ -1491,6 +1494,7 @@ impl ProcessTaskProvider {
         }
         let pid = result as libc::pid_t;
         if pid == 0 {
+            crate::inherit_depth(depth);
             self.after_fork_child();
         } else if self.after_fork_parent(pid) {
             crate::rsched_glock();
