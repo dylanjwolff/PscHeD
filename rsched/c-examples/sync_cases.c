@@ -17,7 +17,9 @@
 #include <unistd.h>
 
 #ifdef RSCHED
-#include "rsched.h"
+#include "rsched_atomic.h"
+#else
+#include <stdatomic.h>
 #endif
 
 #define MAX_RUNS 4096
@@ -260,6 +262,34 @@ static int run_once(void) {
         printf("%02x", bytes[i]);
     printf(" cpu=%d\n", sched_getcpu());
     return 0;
+}
+
+#elif defined(CASE_SYNC_EXIT_DESTRUCTOR)
+
+/* A thread-specific data destructor runs after the thread's start routine
+   has returned, when rsched has already retired the task. Its atomics must
+   run straight through rather than wait for a turn that never comes. */
+static pthread_key_t key;
+static _Atomic int destroyed;
+
+static void destroy(void *value) {
+    (void)value;
+    atomic_fetch_add(&destroyed, 1);
+}
+
+static void *worker(void *arg) {
+    pthread_setspecific(key, arg);
+    return 0;
+}
+
+static int run_once(void) {
+    atomic_store(&destroyed, 0);
+    pthread_key_create(&key, destroy);
+    pthread_t t;
+    pthread_create(&t, 0, worker, (void *)1);
+    pthread_join(t, 0);
+    pthread_key_delete(key);
+    return atomic_load(&destroyed) == 1 ? 0 : fail("destructor did not run");
 }
 
 #else

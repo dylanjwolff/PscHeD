@@ -269,7 +269,10 @@ impl State {
     }
 
     unsafe fn park_if_blocked(&mut self, caller: PthreadT) {
-        if self.task(caller).is_blocking() {
+        // A retired task, such as one running thread-exit destructors, is
+        // marked blocking but nothing will ever wake it; as in
+        // context_switch, it runs straight through.
+        if self.threads.contains(&caller) && self.task(caller).is_blocking() {
             self.task(caller).set_waiting(true);
             let cond = addr_of_mut!(self.t(caller).suspend_cond);
             self.task_provider.park(ParkingHandle::new(cond));

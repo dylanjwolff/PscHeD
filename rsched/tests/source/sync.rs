@@ -132,3 +132,11 @@ fn time_and_randomness_depend_only_on_the_seed() {
     assert_eq!(first, again, "same seed, different output");
     assert_ne!(first, other, "getrandom ignored the seed");
 }
+
+// Coroutine tasks never return to libc's thread exit, so thread-specific
+// data destructors do not run under the coro provider.
+#[cfg(not(feature = "coro"))]
+#[test]
+fn atomics_after_a_thread_retires_run_through() {
+    run_case("CASE_SYNC_EXIT_DESTRUCTOR");
+}
