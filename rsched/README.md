@@ -102,6 +102,16 @@ runs natively, where the calls do nothing. C++ works the same way; header
 code such as `std::atomic` and `shared_ptr` is instrumented, while a
 precompiled libstdc++ is not.
 
+The instrumented glibc is 2.35. Programs built against a newer host glibc
+often reference a few later symbols without asking for them: the C23
+`__isoc23_strtol`/`sscanf` family that newer headers redirect to,
+`arc4random`, `strlcpy`, and `fmod@GLIBC_2.38`. The glibc bundle exports these
+under their upstream versions (`glibc/compat.c`, `glibc/compat-libm.c`), so
+such programs load. The scanf functions abort with a message on the one input
+the old parser would read differently, a `%b` conversion or a `%i`
+conversion that meets a `0b` prefix. The rest of the newer API is not
+provided, and the loader names any missing symbol.
+
 The LLVM pass has separate glibc and musl modes when it is used to build libc.
 Application builds do not need to select those internal modes.
 
