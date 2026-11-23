@@ -147,3 +147,43 @@ fn io_message_passing_with_instrumented_glibc_preloaded() {
     let glibc = build_instrumented_glibc();
     io_cases::check_io_cases("gcc", &glibc.preload_runner, &temp_dir());
 }
+
+#[test]
+fn child_processes_run_with_the_host_libc() {
+    // A program that starts a host binary, here /bin/sh through system(),
+    // must not hand that binary the instrumented libc.
+    let glibc = build_instrumented_glibc();
+    let temp = temp_dir();
+    let source = temp.join("system.c");
+    let binary = temp.join("system");
+    std::fs::write(
+        &source,
+        r#"
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+static void *worker(void *arg) { return arg; }
+int main(void)
+{
+    pthread_t thread;
+    pthread_create(&thread, 0, worker, 0);
+    pthread_join(thread, 0);
+    printf("status=%d\n", system("exit 7"));
+    return 0;
+}
+"#,
+    )
+    .expect("write system() test");
+    let mut command = Command::new("gcc");
+    command.args(["-pthread", "-o"]).arg(&binary).arg(&source);
+    run(command, "build system() test");
+    let mut command = Command::new(&glibc.preload_runner);
+    command.arg(&binary);
+    let output = run(command, "run system() under the instrumented glibc");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("status=1792"),
+        "the shell did not run:\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

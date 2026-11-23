@@ -81,6 +81,10 @@ Run an ordinary dynamically linked program through the bundle:
 The launcher selects the bundled dynamic loader and preloads the instrumented
 libc. Applications retain the libc pthread ABI and normal libc thread-local
 storage setup. Thread creation is intercepted at libc's clone boundary.
+The preload goes to the loader's `--preload` option rather than
+`LD_PRELOAD`, so programs the application executes, such as `/bin/sh` from
+`system()`, run uninstrumented with the host libc. Forks without `exec` stay
+instrumented and scheduled.
 
 The instrumented libc covers synchronization operations implemented by libc.
 To make application atomic instructions into scheduling points as well,
