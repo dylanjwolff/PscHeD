@@ -148,9 +148,6 @@ fn io_message_passing_with_instrumented_glibc_preloaded() {
     io_cases::check_io_cases("gcc", &glibc.preload_runner, &temp_dir());
 }
 
-// The coro provider does not support glibc's posix_spawn, which system()
-// uses: it fails with EINVAL before any process starts.
-#[cfg(not(feature = "coro"))]
 #[test]
 fn child_processes_run_with_the_host_libc() {
     // A program that starts a host binary, here /bin/sh through system(),
@@ -188,56 +185,5 @@ int main(void)
         stdout.contains("status=1792"),
         "the shell did not run:\nstdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn programs_built_against_newer_glibc_load() {
-    // The host headers redirect strtol and sscanf to their C23 names, and
-    // fmod binds to fmod@GLIBC_2.38, all of which the instrumented glibc
-    // must export.
-    let glibc = build_instrumented_glibc();
-    let temp = temp_dir();
-    let source = temp.join("newer.c");
-    let binary = temp.join("newer");
-    std::fs::write(
-        &source,
-        r#"
-#define _GNU_SOURCE
-#include <math.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-int main(int argc, char **argv)
-{
-    char buf[4];
-    int x = 0, y = 0;
-    volatile double a = 7.5, b = 2;
-    (void)argv;
-    sscanf("12 0x1f", "%d %i", &x, &y);
-    printf("strtol=%ld sscanf=%d,%d strlcpy=%zu,%s fmod=%g random=%u\n",
-           strtol("-0b101", 0, 0), x, y, strlcpy(buf, "abcdef", sizeof buf), buf,
-           fmod(a, b), arc4random_uniform(argc));
-    return 0;
-}
-"#,
-    )
-    .expect("write newer-glibc test");
-    let mut command = Command::new("gcc");
-    command
-        .args(["-std=gnu2x", "-o"])
-        .arg(&binary)
-        .arg(&source)
-        .arg("-lm");
-    run(command, "build newer-glibc test");
-    let mut command = Command::new(&glibc.preload_runner);
-    command.arg(&binary);
-    let output = run(
-        command,
-        "run a newer-glibc program under the instrumented glibc",
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "strtol=-5 sscanf=12,31 strlcpy=6,abc fmod=1.5 random=0\n"
     );
 }

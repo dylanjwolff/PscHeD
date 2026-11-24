@@ -28,6 +28,11 @@ use std::io;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 const SLOTS: usize = 4096;
+
+/// 2^64 divided by the golden ratio, for Fibonacci hashing: multiplying by
+/// it spreads consecutive inode numbers, which file systems often hand out,
+/// across the table instead of into neighboring slots.
+const FIBONACCI_HASH: u64 = 0x9e37_79b9_7f4a_7c15;
 const NS: i64 = 1_000_000_000;
 
 /// Atime, mtime, ctime.
@@ -61,7 +66,7 @@ fn table() -> &'static SharedFiles {
 /// The file's slot, and whether it was just claimed.
 fn slot(dev: u64, ino: u64) -> Option<(&'static Slot, bool)> {
     let key = ino.wrapping_add(1);
-    let start = (ino ^ dev.rotate_left(32)).wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize;
+    let start = (ino ^ dev.rotate_left(32)).wrapping_mul(FIBONACCI_HASH) as usize;
     for probe in 0..SLOTS {
         let s = &table().slots[start.wrapping_add(probe) % SLOTS];
         match s.ino.load(Ordering::Relaxed) {
@@ -129,19 +134,20 @@ fn fix_stat(st: &mut libc::stat) {
 /// Replaces the kernel's times in `stx` with the table's, when it has them.
 fn fix_statx(stx: &mut Statx) {
     let wanted = STATX_ATIME | STATX_MTIME | STATX_CTIME | STATX_INO;
-    if stx.mask & wanted != wanted {
+    if stx.stx_mask & wanted != wanted {
         return;
     }
-    let dev = libc::makedev(stx.dev_major, stx.dev_minor);
-    let real = [stx.atime, stx.mtime, stx.ctime].map(|t| ns(t.sec, i64::from(t.nsec)));
-    let t = observe(dev, stx.ino, real, &[]);
-    for (field, t) in [&mut stx.atime, &mut stx.mtime, &mut stx.ctime]
+    let dev = libc::makedev(stx.stx_dev_major, stx.stx_dev_minor);
+    let real =
+        [stx.stx_atime, stx.stx_mtime, stx.stx_ctime].map(|t| ns(t.tv_sec, i64::from(t.tv_nsec)));
+    let t = observe(dev, stx.stx_ino, real, &[]);
+    for (field, t) in [&mut stx.stx_atime, &mut stx.stx_mtime, &mut stx.stx_ctime]
         .into_iter()
         .zip(t)
     {
         let (sec, nsec) = split(t);
-        field.sec = sec;
-        field.nsec = nsec as u32;
+        field.tv_sec = sec;
+        field.tv_nsec = nsec as u32;
     }
 }
 

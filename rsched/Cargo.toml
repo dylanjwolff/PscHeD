@@ -17,6 +17,9 @@ bench = false
 [dependencies]
 corosensei = "0.3.4"
 libc = "0.2"
+# Kernel UAPI structs generated from the Linux headers, such as `statx`,
+# which the `libc` crate lacks for musl.
+linux-raw-sys = { version = "0.11", default-features = false, features = ["general", "no_std"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

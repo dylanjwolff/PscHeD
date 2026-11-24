@@ -78,6 +78,8 @@ object="$work_dir/input.o"
 wrapped_object="$work_dir/wrapped.o"
 wrapper_source="$work_dir/wrappers.S"
 wrapper_object="$work_dir/wrappers.o"
+file_hook_source="$work_dir/file-hooks.c"
+file_hook_object="$work_dir/file-hooks.o"
 symbols_file="$work_dir/symbols"
 
 compile_args=()
@@ -242,46 +244,19 @@ add_io_rewrite() {
     fi
 }
 
-# Calls rsched_file_call_done(nr, result, args) after the real function,
-# so rsched can keep virtual file timestamps (see src/files.rs). Saves the
-# six argument registers as the args array. `int` sign-extends a 32-bit
-# result.
+# Defines `symbol` as a hook that calls `real` and then reports the call to
+# rsched (see file-hook.h). `width` is int or long, the result type.
 emit_file_hook() {
     local symbol=$1
     local real=$2
     local nr=$3
     local width=$4
     local hidden=$5
+    local visibility=default
 
-    {
-        printf '\n.text\n'
-        printf '.globl %s\n' "$symbol"
-        if [[ "$hidden" == yes ]]; then
-            printf '.hidden %s\n' "$symbol"
-        fi
-        printf '.type %s, @function\n' "$symbol"
-        printf '%s:\n' "$symbol"
-        printf '    pushq %%r9\n'
-        printf '    pushq %%r8\n'
-        printf '    pushq %%rcx\n'
-        printf '    pushq %%rdx\n'
-        printf '    pushq %%rsi\n'
-        printf '    pushq %%rdi\n'
-        printf '    subq $8, %%rsp\n'
-        printf '    call %s\n' "$real"
-        if [[ "$width" == int ]]; then
-            printf '    movslq %%eax, %%rax\n'
-        fi
-        printf '    movq %%rax, (%%rsp)\n'
-        printf '    movq $%s, %%rdi\n' "$nr"
-        printf '    movq %%rax, %%rsi\n'
-        printf '    leaq 8(%%rsp), %%rdx\n'
-        printf '    call rsched_file_call_done@PLT\n'
-        printf '    movq (%%rsp), %%rax\n'
-        printf '    addq $56, %%rsp\n'
-        printf '    ret\n'
-        printf '.size %s, .-%s\n' "$symbol" "$symbol"
-    } >>"$wrapper_source"
+    [[ "$hidden" == yes ]] && visibility=hidden
+    printf 'FILE_HOOK(%s, %s, %s, %s, "%s")\n' \
+        "$symbol" "$real" "$nr" "$width" "$visibility" >>"$file_hook_source"
 }
 
 # Hooks `impl` and each defined alias of it, including glibc's hidden
@@ -313,6 +288,7 @@ add_file_hook() {
 
 objcopy_args=()
 : >"$wrapper_source"
+: >"$file_hook_source"
 
 if symbol_defined syscall; then
     objcopy_args+=(--redefine-sym "syscall=__rsched_replaced_syscall")
@@ -417,10 +393,22 @@ if [[ ${#objcopy_args[@]} -eq 0 ]]; then
 fi
 
 objcopy "${objcopy_args[@]}" "$object" "$wrapped_object"
+extra_objects=()
 if [[ -s "$wrapper_source" ]]; then
     printf '\n.section .note.GNU-stack,"",@progbits\n' >>"$wrapper_source"
     "$compiler" -c -x assembler "$wrapper_source" -o "$wrapper_object"
-    ld -r "$wrapped_object" "$wrapper_object" -o "$output_file"
+    extra_objects+=("$wrapper_object")
+fi
+if [[ -s "$file_hook_source" ]]; then
+    # Plain C with no glibc headers; built like the rest of libc.so, without
+    # the host's default stack protector or fortification.
+    "$compiler" -c -x c -O2 -fPIC -fno-stack-protector -U_FORTIFY_SOURCE \
+        -include "$RSCHED_WORKSPACE/libc-instrumentation/file-hook.h" \
+        "$file_hook_source" -o "$file_hook_object"
+    extra_objects+=("$file_hook_object")
+fi
+if [[ ${#extra_objects[@]} -gt 0 ]]; then
+    ld -r "$wrapped_object" "${extra_objects[@]}" -o "$output_file"
 else
     mv "$wrapped_object" "$output_file"
 fi

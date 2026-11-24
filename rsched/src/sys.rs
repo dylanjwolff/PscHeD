@@ -194,45 +194,10 @@ impl Drop for Epoll {
 
 // ── File metadata, for the virtual file times in `files` ──────────────────
 
-/// The kernel's `struct statx`; the `libc` crate has none for musl.
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub(crate) struct Statx {
-    pub(crate) mask: u32,
-    blksize: u32,
-    attributes: u64,
-    nlink: u32,
-    uid: u32,
-    gid: u32,
-    mode: u16,
-    spare0: u16,
-    pub(crate) ino: u64,
-    size: u64,
-    blocks: u64,
-    attributes_mask: u64,
-    pub(crate) atime: StatxTimestamp,
-    btime: StatxTimestamp,
-    pub(crate) ctime: StatxTimestamp,
-    pub(crate) mtime: StatxTimestamp,
-    rdev_major: u32,
-    rdev_minor: u32,
-    pub(crate) dev_major: u32,
-    pub(crate) dev_minor: u32,
-    spare: [u64; 14],
-}
-
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub(crate) struct StatxTimestamp {
-    pub(crate) sec: i64,
-    pub(crate) nsec: u32,
-    reserved: i32,
-}
-
-pub(crate) const STATX_ATIME: u32 = 0x20;
-pub(crate) const STATX_MTIME: u32 = 0x40;
-pub(crate) const STATX_CTIME: u32 = 0x80;
-pub(crate) const STATX_INO: u32 = 0x100;
+/// The kernel's `struct statx`, generated from the Linux UAPI headers.
+pub(crate) use linux_raw_sys::general::{
+    STATX_ATIME, STATX_CTIME, STATX_INO, STATX_MTIME, statx as Statx,
+};
 
 /// The metadata of the file open as `fd`.
 pub(crate) fn fstat(fd: c_int) -> io::Result<libc::stat> {
