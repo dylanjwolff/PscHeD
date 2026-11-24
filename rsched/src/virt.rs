@@ -13,7 +13,8 @@
 //!   rsched expires moves them by the timeout. A syscall that rsched does not
 //!   model and that may wait in the kernel, such as `ppoll` or `epoll_wait`,
 //!   moves them by one tick, and by its timeout when it reports one, so a
-//!   timeout never passes while the clock stands still. libc's `ppoll`,
+//!   timeout never passes while the clock stands still. `epoll_wait` and
+//!   `epoll_pwait` are modeled instead, like `poll` on the epoll descriptor. libc's `ppoll`,
 //!   `select`, `pselect`, `epoll_wait`, `epoll_pwait`, and `sigtimedwait` are
 //!   routed here too, since they make their syscalls inline.
 //! - `sched_getcpu` reports a CPU derived from the calling task.
@@ -157,6 +158,33 @@ unsafe fn wait_timeout_ns(nr: c_long, args: &[c_long; 6]) -> Option<i64> {
     }
 }
 
+/// Whether `nr`, one of the [`waits_in_kernel`] syscalls, called with
+/// `args`, watches no descriptor and so can only time out.
+fn waits_on_nothing(nr: c_long, args: &[c_long; 6]) -> bool {
+    match nr {
+        libc::SYS_select | libc::SYS_pselect6 => {
+            args[0] == 0 || (args[1] == 0 && args[2] == 0 && args[3] == 0)
+        }
+        libc::SYS_ppoll => args[1] == 0,
+        _ => false,
+    }
+}
+
+/// Writes a zero time left into the timeout of a `select` or `ppoll` that
+/// timed out, as Linux does.
+unsafe fn clear_time_left(nr: c_long, args: &[c_long; 6]) {
+    match nr {
+        libc::SYS_select if args[4] != 0 => {
+            *(args[4] as *mut libc::timeval) = libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            };
+        }
+        libc::SYS_ppoll if args[2] != 0 => *(args[2] as *mut timespec) = to_timespec(0),
+        _ => {}
+    }
+}
+
 /// Runs `call`, syscall `nr` with `args`, which may wait in the kernel and
 /// returns as a libc function does (-1 and errno on failure). Time moves by
 /// one tick, and by the call's timeout when it reports that the timeout
@@ -169,8 +197,36 @@ pub(crate) unsafe fn kernel_wait(
     if !started() {
         return call();
     }
+    if nr == libc::SYS_epoll_wait || nr == libc::SYS_epoll_pwait {
+        // Modeled: wait for an event as a scheduling point, then collect it
+        // with a zero timeout.
+        let mut args = args;
+        args[3] = crate::io::prepare_epoll_wait(
+            crate::return_address(),
+            args[0] as c_int,
+            args[3] as c_int,
+        )
+        .into();
+        if nr == libc::SYS_epoll_pwait && args[4] != 0 {
+            // The libc entry point passes no sigset size; the kernel's is 8.
+            args[5] = 8;
+        }
+        let r = crate::seccomp::raw_syscall6(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
+        return crate::io::libc_result(r);
+    }
     // Read first: Linux's select writes the time left into its timeval.
     let timeout = wait_timeout_ns(nr, &args);
+    // A wait on no descriptor is a sleep: no task can end it early, so it
+    // sleeps in virtual time, letting the other tasks run, and reports the
+    // timeout. Waiting in the kernel would take real time and, with no
+    // scheduling point, starve every other task.
+    if let Some(ns) = timeout
+        && waits_on_nothing(nr, &args)
+    {
+        crate::sync::sleep_for(ns, crate::return_address());
+        clear_time_left(nr, &args);
+        return 0;
+    }
     let result = call();
     let timed_out = if nr == libc::SYS_rt_sigtimedwait {
         result == -1 && *libc::__errno_location() == libc::EAGAIN
@@ -184,12 +240,27 @@ pub(crate) unsafe fn kernel_wait(
     result
 }
 
+/// The elapsed virtual time at which `clock`, which must be virtual,
+/// reads `at`.
+pub(crate) fn elapsed_at(clock: clockid_t, at: &timespec) -> u64 {
+    let base = base_ns(clock).expect("rsched: clock is not virtual");
+    to_ns(at).saturating_sub(base).max(0) as u64
+}
+
+/// The elapsed virtual time.
+pub(crate) fn elapsed() -> u64 {
+    env().elapsed_ns.load(Ordering::Relaxed)
+}
+
 /// Moves time forward, if needed, so that `clock` reads at least `at`.
 pub(crate) fn advance_to(clock: clockid_t, at: &timespec) {
-    let Some(base) = base_ns(clock) else {
-        return;
-    };
-    let target = to_ns(at).saturating_sub(base).max(0) as u64;
+    if is_virtual(clock) {
+        advance_to_elapsed(elapsed_at(clock, at));
+    }
+}
+
+/// Moves time forward, if needed, to elapsed time `target`.
+pub(crate) fn advance_to_elapsed(target: u64) {
     env().elapsed_ns.fetch_max(target, Ordering::Relaxed);
 }
 

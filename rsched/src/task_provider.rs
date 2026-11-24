@@ -83,8 +83,55 @@ impl TaskHandle {
             task.is_blocking = 1;
             task.is_waiting = 0;
             task.io_wait = 0;
+            task.deadline = NO_DEADLINE;
         });
     }
+
+    /// Records the deadline of the timed wait the task blocks in, or
+    /// [`NO_DEADLINE`].
+    pub(crate) unsafe fn set_deadline(self, deadline: u64) {
+        self.with_task(|task| task.deadline = deadline);
+    }
+
+    /// Expires the timed wait of a task in another process: it becomes
+    /// runnable and, once its process runs, sees it timed out.
+    pub(crate) unsafe fn expire_remote(self) {
+        self.with_task(|task| {
+            task.timed_out = 1;
+            task.is_blocking = 0;
+            task.deadline = NO_DEADLINE;
+        });
+    }
+
+    /// Whether another process expired the task's timed wait; clears it.
+    pub(crate) unsafe fn take_timed_out(self) -> bool {
+        self.with_task(|task| std::mem::take(&mut task.timed_out) != 0)
+    }
+}
+
+/// [`SharedTask::deadline`] of a task not in a timed wait.
+pub(crate) const NO_DEADLINE: u64 = u64::MAX;
+
+/// Tasks of other processes blocked in a timed wait, in creation order,
+/// with their deadlines.
+pub(crate) unsafe fn remote_timed_waits() -> Vec<(TaskHandle, u64)> {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if ps.is_null() {
+        return Vec::new();
+    }
+    let current = PROCESS_SLOT.load(Ordering::Acquire);
+    (0..(*ps).task_count.min(MAX_TASKS))
+        .filter(|&id| {
+            let t = (*ps).tasks[id];
+            t.active != 0
+                && t.is_blocking != 0
+                && t.deadline != NO_DEADLINE
+                && t.domain >= 0
+                && t.domain != current
+                && (*ps).slots[t.domain as usize].active != 0
+        })
+        .map(|id| (TaskHandle::new(id), (*ps).tasks[id].deadline))
+        .collect()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -814,9 +861,15 @@ struct SharedTask {
     is_waiting: u8,
     /// Blocked in [`io_wait`] until a descriptor is ready.
     io_wait: u8,
-    _pad: [u8; 3],
+    /// Another process expired this task's timed wait; the task finishes
+    /// the expiry in its own process (see `State::reap_remote_expiries`).
+    timed_out: u8,
+    _pad: [u8; 2],
     domain: i32,
     pthread: usize,
+    /// While blocked in a timed wait: the virtual elapsed time at which it
+    /// expires, so that any process can expire it once no task can run.
+    deadline: u64,
 }
 
 #[repr(C)]
@@ -1024,6 +1077,7 @@ unsafe fn deactivate_process_tasks(ps: *mut ProcessShared, domain: i32) {
             (*ps).tasks[id].is_blocking = 1;
             (*ps).tasks[id].is_waiting = 0;
             (*ps).tasks[id].io_wait = 0;
+            (*ps).tasks[id].deadline = NO_DEADLINE;
         }
     }
 }
@@ -1064,9 +1118,11 @@ impl ProcessTaskProvider {
             startup_done: 0,
             is_waiting: 0,
             io_wait: 0,
-            _pad: [0; 3],
+            timed_out: 0,
+            _pad: [0; 2],
             domain: slot,
             pthread: pt as usize,
+            deadline: NO_DEADLINE,
         };
         TaskHandle::new(creation_idx)
     }
@@ -1388,6 +1444,13 @@ impl ProcessTaskProvider {
 
     pub(crate) fn task_tid(&self, thread: PthreadT) -> libc::pid_t {
         self.inner.task_tid(thread)
+    }
+
+    /// Passes the turn to `choice`, a task of another process, and waits
+    /// until a task of this process is chosen again; returns it. For a
+    /// thread that leaves without being a task, such as an exiting one.
+    pub(crate) unsafe fn hand_off_and_wait(&mut self, choice: TaskChoice) -> Option<PthreadT> {
+        self.switch_domain(choice, true)
     }
 
     pub(crate) unsafe fn switch_task(

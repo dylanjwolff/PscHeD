@@ -198,6 +198,35 @@ unsafe fn block_until_ready(fds: &[libc::pollfd]) -> bool {
     waited
 }
 
+/// Waits, as a scheduling point, until epoll instance `epfd` has an event
+/// or `timeout` milliseconds pass in virtual time, like a modeled `poll` on
+/// `epfd`, and returns the timeout for the real `epoll_wait`, which is then
+/// zero so the call cannot block in the kernel while the task holds the
+/// turn. A negative timeout blocks the task until `epfd` is ready.
+pub(crate) unsafe fn prepare_epoll_wait(instr_addr: u64, epfd: c_int, timeout: c_int) -> c_int {
+    crate::ensure_init();
+    io_point(instr_addr, epfd, libc::SYS_epoll_wait);
+    if timeout == 0 || poll_one(epfd, libc::POLLIN) {
+        return 0;
+    }
+    if timeout > 0 {
+        // As for poll: one more choice decides whether an event comes first.
+        crate::rsched_sched_yield();
+        if !poll_one(epfd, libc::POLLIN) {
+            crate::virt::advance_by(i64::from(timeout) * 1_000_000);
+        }
+        return 0;
+    }
+    while !poll_one(epfd, libc::POLLIN) {
+        wait_until_ready(&[libc::pollfd {
+            fd: epfd,
+            events: libc::POLLIN,
+            revents: 0,
+        }]);
+    }
+    0
+}
+
 /// Makes `nr` a scheduling point when `schedule` is set, then blocks until
 /// the call can no longer block. May rewrite `args`: a `poll` whose timeout
 /// would only elapse while every other task waits gets a zero timeout, so

@@ -154,10 +154,12 @@ expires it. A timeout is never reported early, and which wait expires and
 when depends only on the schedule.
 
 Calls that wait in the kernel and that rsched does not model, such as
-`ppoll`, `select`, `pselect`, `epoll_wait`, `epoll_pwait`, and
-`sigtimedwait`, move the virtual clock by one tick, and by their timeout
-when they report that it passed. Time never depends on how long they
-really blocked.
+`ppoll`, `select`, `pselect`, `epoll_pwait2`, and `sigtimedwait`, move the
+virtual clock by one tick, and by their timeout when they report that it
+passed. Time never depends on how long they
+really blocked. A `select`, `pselect`, or `ppoll` that watches no
+descriptor, such as `select(0, NULL, NULL, NULL, &tv)`, is a sleep: it
+sleeps in virtual time like `nanosleep`.
 
 So that one seed always takes the same path, programs also read time,
 their CPU, and randomness from deterministic models, and run without address-space randomization:
@@ -198,8 +200,8 @@ aborts the process.
 ## File and socket I/O
 
 `read`, `write`, `readv`, `writev`, `recv`, `recvfrom`, `recvmsg`, `send`,
-`sendto`, `sendmsg`, `accept`, `accept4`, `connect`, and `poll` are scheduling
-points. Only one task runs at a time, so a call that blocked in the kernel
+`sendto`, `sendmsg`, `accept`, `accept4`, `connect`, `poll`, `epoll_wait`, and
+`epoll_pwait` are scheduling points. Only one task runs at a time, so a call that blocked in the kernel
 would stall the task that could unblock it. On a blocking descriptor that is
 not ready, the calling task instead blocks, like a task waiting for a mutex:
 it is not runnable, so it adds no scheduling points, until the descriptor is
@@ -230,7 +232,9 @@ close or replace them: `close` of one reports success, `close_range` and
 integration mode guards these calls the way it reaches I/O.
 
 Writes are assumed to fit in the free buffer space once a descriptor reports
-writable. `select`, `epoll`, `ppoll`, and opening FIFOs are not modeled.
+writable. `epoll_wait` and `epoll_pwait` wait on the epoll descriptor like a
+`poll` on it, so a wait with a timeout expires in virtual time. `select`,
+`ppoll`, `epoll_pwait2`, and opening FIFOs are not modeled.
 
 ## Processes
 
@@ -249,6 +253,14 @@ mode reaches `fork` differently:
 - `RSCHED_SECCOMP=1`: a `fork` syscall issued outside rsched is trapped and
   run through the scheduler. With `RSCHED_SECCOMP_TRAP_CLONE=1`, process-style
   `clone` is too, while thread-style clones still abort.
+
+Timed waits and sleeps expire across processes: when no task of any
+process can run, the running process may expire a timed wait of another
+process, so a parent sleeping between polls of its children, as Apache's
+master does, wakes even while every child waits on I/O. A thread that exits
+while the other threads of its process are blocked passes the turn to
+another process and waits until a task of its own process is chosen again
+before it exits.
 
 `vfork` and `clone` with `CLONE_VM` are not modeled.
 

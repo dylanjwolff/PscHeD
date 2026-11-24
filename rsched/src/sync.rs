@@ -10,7 +10,7 @@
 
 use crate::event::{Event, EventKind};
 use crate::scheduler::logging_enabled;
-use crate::virt;
+use crate::{task_provider, virt};
 use crate::{
     CondT, PthreadT, State, ensure_init, log_line, my_pt, return_address, rsched_glock,
     rsched_gunlock, seccomp, st, with_internal_depth,
@@ -99,12 +99,29 @@ impl State {
                 on,
                 deadline,
             });
+            self.task(caller)
+                .set_deadline(virt::elapsed_at(deadline.clock, &deadline.at));
         }
         self.task(caller).set_blocking(true);
         self.context_switch(caller);
         self.park_if_blocked(caller);
+        self.reap_remote_expiries();
         self.timed_waits.retain(|w| w.pthread != caller);
+        self.task(caller).set_deadline(task_provider::NO_DEADLINE);
         std::mem::take(&mut self.t(caller).timed_out)
+    }
+
+    /// Finishes the timed waits of this process's tasks that another
+    /// process expired: they leave the queues they waited on and see the
+    /// timeout. Runs whenever a task of this process resumes, so no task
+    /// here wakes a waiter whose wait already expired.
+    pub(crate) unsafe fn reap_remote_expiries(&mut self) {
+        let waits = self.timed_waits.clone();
+        for wait in waits {
+            if self.threads.contains(&wait.pthread) && self.task(wait.pthread).take_timed_out() {
+                self.expire(wait, "remote");
+            }
+        }
     }
 
     /// Expires every timed wait whose deadline virtual time has reached.
@@ -122,6 +139,12 @@ impl State {
         for wait in due {
             self.expire(wait, "due");
         }
+        let now = virt::elapsed();
+        for (task, deadline) in task_provider::remote_timed_waits() {
+            if deadline <= now {
+                task.expire_remote();
+            }
+        }
     }
 
     /// When no task can run: expires one timed wait, chosen by the scheduler
@@ -134,14 +157,28 @@ impl State {
             .filter(|w| self.threads.contains(&w.pthread) && self.task(w.pthread).is_blocking())
             .copied()
             .collect();
-        if candidates.is_empty() {
+        // Tasks of other processes too: only one process runs, and its tasks
+        // may all wait on I/O that never comes while another process sleeps.
+        let remote = task_provider::remote_timed_waits();
+        if candidates.is_empty() && remote.is_empty() {
             return false;
         }
-        let blocking = vec![false; candidates.len()];
+        let blocking = vec![false; candidates.len() + remote.len()];
         let pick = self
             .choose_index(&blocking)
             .expect("rsched: non-empty timed wait list");
-        let wait = candidates[pick];
+        let Some(&wait) = candidates.get(pick) else {
+            let (task, deadline) = remote[pick - candidates.len()];
+            virt::advance_to_elapsed(deadline);
+            task.expire_remote();
+            if logging_enabled() {
+                log_line!(
+                    "[rsched] TimedWaitExpired(idle, other process) task={}",
+                    task.creation_idx()
+                );
+            }
+            return true;
+        };
         virt::advance_to(wait.deadline.clock, &wait.deadline.at);
         self.expire(wait, "idle");
         true
@@ -170,6 +207,7 @@ impl State {
         }
         self.t(pt).timed_out = true;
         self.task(pt).set_blocking(false);
+        self.task(pt).set_deadline(task_provider::NO_DEADLINE);
         if logging_enabled() {
             log_line!(
                 "[rsched] TimedWaitExpired({why}) task={}",
@@ -599,6 +637,18 @@ unsafe fn sleep_impl(deadline: Option<Deadline>, instr_addr: u64) {
         st().block_on(caller, WaitOn::Sleep, Some(deadline));
     }
     rsched_gunlock();
+}
+
+/// Sleeps `ns` nanoseconds of virtual time, as a scheduling point; zero
+/// only yields. For kernel waits that watch no descriptor, such as
+/// `select(0, NULL, NULL, NULL, &tv)`, which programs use as a sleep.
+pub(crate) unsafe fn sleep_for(ns: i64, instr_addr: u64) {
+    let rel = timespec {
+        tv_sec: ns / 1_000_000_000,
+        tv_nsec: ns % 1_000_000_000,
+    };
+    let deadline = (ns > 0).then(|| after(libc::CLOCK_MONOTONIC, rel));
+    sleep_impl(deadline, instr_addr);
 }
 
 fn is_zero(ts: &timespec) -> bool {

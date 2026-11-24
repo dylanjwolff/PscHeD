@@ -18,8 +18,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -338,6 +340,127 @@ static int run_once(void) {
     pthread_join(helper, 0);
     close(blocked_pipe[0]);
     close(blocked_pipe[1]);
+    return bad || worker_result != 0;
+}
+
+#elif defined(CASE_IO_SLEEPING_WRITER_PROCESS)
+
+/* A forked child reads a pipe that the parent writes only after sleeping
+   an hour in select(0, NULL, NULL, NULL, &tv), as APR's apr_sleep does.
+   The sleep is a timed wait in virtual time, so it takes no real time.
+   Once the child blocks in read,
+   no task can run, and whichever process holds the turn must expire the
+   parent's sleep instead of waiting in the kernel for the child's pipe. The
+   child always blocks before the write ("E"). */
+#define EXPECTED_TRACES 1
+
+static int run_once(void) {
+    int p[2];
+    if (pipe(p) != 0)
+        return fail("pipe");
+    pid_t child = fork();
+    if (child < 0)
+        return fail("fork");
+    if (child == 0) {
+        char c;
+        close(p[1]);
+        note_pending(p[0]);
+        int bad = read(p[0], &c, 1) != 1 || c != 'x';
+#ifdef RSCHED
+        rsched_process_exit();
+#endif
+        _exit(bad);
+    }
+    close(p[0]);
+    struct timeval tv = {3600, 0};
+    int bad = select(0, NULL, NULL, NULL, &tv) != 0 || write(p[1], "x", 1) != 1;
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0)
+        if (errno != EINTR)
+            return fail("waitpid");
+    close(p[1]);
+    return bad || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
+}
+
+#elif defined(CASE_IO_THREAD_EXIT_IN_CHILD)
+
+/* A forked child starts a thread that exits at once while the child's main
+   thread reads a pipe the parent writes. pthread_create does not switch,
+   so the main thread always finds the pipe empty ("E") and blocks before
+   the thread runs and exits ("T"). No task of the child can then run, so
+   the exit passes the turn to the parent; once the parent's write makes
+   the read ready, the turn must come back to the child. */
+#define EXPECTED_TRACES 1
+
+static void *exit_at_once(void *arg) {
+    mark('T');
+    return arg;
+}
+
+static int run_once(void) {
+    int p[2];
+    if (pipe(p) != 0)
+        return fail("pipe");
+    pid_t child = fork();
+    if (child < 0)
+        return fail("fork");
+    if (child == 0) {
+        char c;
+        pthread_t thread;
+        close(p[1]);
+        int bad = pthread_create(&thread, 0, exit_at_once, 0) != 0;
+        note_pending(p[0]);
+        bad |= read(p[0], &c, 1) != 1 || c != 'x';
+        bad |= pthread_join(thread, 0) != 0;
+#ifdef RSCHED
+        rsched_process_exit();
+#endif
+        _exit(bad);
+    }
+    close(p[0]);
+    int bad = write(p[1], "x", 1) != 1;
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0)
+        if (errno != EINTR)
+            return fail("waitpid");
+    close(p[1]);
+    return bad || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
+}
+
+#elif defined(CASE_IO_EPOLL_THREADS)
+
+/* A worker waits in epoll_wait with no timeout for a pipe the main thread
+   writes, as Apache's event MPM listener waits for connections. A wait in
+   the kernel would hold the only turn and hang. The trace records whether
+   the worker found the byte waiting ("F") or blocked until the write
+   ("E"). */
+#define EXPECTED_TRACES 2
+static int epoll_pipe[2];
+
+static void *epoll_worker(void *arg) {
+    (void)arg;
+    char c;
+    int ep = epoll_create1(0);
+    struct epoll_event ev = {.events = EPOLLIN}, out;
+    if (ep < 0 || epoll_ctl(ep, EPOLL_CTL_ADD, epoll_pipe[0], &ev) != 0)
+        return (void *)1;
+    note_pending(epoll_pipe[0]);
+    int bad = epoll_wait(ep, &out, 1, -1) != 1 || read(epoll_pipe[0], &c, 1) != 1 || c != 'x';
+    close(ep);
+    return (void *)(long)bad;
+}
+
+static int run_once(void) {
+    if (pipe(epoll_pipe) != 0)
+        return fail("pipe");
+    pthread_t worker;
+    if (pthread_create(&worker, 0, epoll_worker, 0) != 0)
+        return fail("pthread_create");
+    int bad = write(epoll_pipe[1], "x", 1) != 1;
+    void *worker_result;
+    pthread_join(worker, &worker_result);
+    close(epoll_pipe[0]);
+    close(epoll_pipe[1]);
     return bad || worker_result != 0;
 }
 

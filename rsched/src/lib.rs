@@ -275,6 +275,7 @@ impl State {
             let cond = addr_of_mut!(self.t(caller).suspend_cond);
             self.task_provider.park(ParkingHandle::new(cond));
             self.task(caller).set_waiting(false);
+            self.reap_remote_expiries();
         }
     }
 
@@ -338,8 +339,10 @@ impl State {
                 .task_provider
                 .switch_task(choice, caller, SwitchMode::SuspendCurrent)
             {
+                self.reap_remote_expiries();
                 self.wake_local(pthread, suspend_caller, caller);
             }
+            self.reap_remote_expiries();
             self.mark_waiting(caller, false);
         }
     }
@@ -1621,14 +1624,33 @@ pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
         let next = local_tasks[idx];
         let cond_ptr = addr_of_mut!(st().t(next).suspend_cond);
         st().task_provider.wake(ParkingHandle::new(cond_ptr));
-    } else if let Some(choice) = st().choose_task(0 as PthreadT, false)
-        && let SwitchResult::WakeLocal { pthread, .. } =
-            st().task_provider
-                .switch_task(choice, 0 as PthreadT, SwitchMode::ReleaseCurrent)
-        && st().info.contains_key(&pthread)
-    {
-        let cond_ptr = addr_of_mut!(st().t(pthread).suspend_cond);
-        st().task_provider.wake(ParkingHandle::new(cond_ptr));
+    } else if let Some(choice) = st().choose_task(0 as PthreadT, false) {
+        let next = if !cfg!(feature = "coro")
+            && choice.domain != st().task_provider.current_domain()
+            && !st().threads.is_empty()
+        {
+            // This thread runs its process's turn, and the process's other
+            // threads are all parked on their own conditions. Hand the turn
+            // to the other process and wait for it to come back here, as a
+            // switching thread does, then pass it to the local task chosen
+            // then. Exiting at once would leave no thread to take the turn.
+            st().task_provider.hand_off_and_wait(choice)
+        } else {
+            match st().task_provider.switch_task(
+                choice,
+                0 as PthreadT,
+                SwitchMode::ReleaseCurrent,
+            ) {
+                SwitchResult::WakeLocal { pthread, .. } => Some(pthread),
+                SwitchResult::Done => None,
+            }
+        };
+        if let Some(pthread) = next
+            && st().info.contains_key(&pthread)
+        {
+            let cond_ptr = addr_of_mut!(st().t(pthread).suspend_cond);
+            st().task_provider.wake(ParkingHandle::new(cond_ptr));
+        }
     }
     rsched_gunlock();
     depth_exit();
