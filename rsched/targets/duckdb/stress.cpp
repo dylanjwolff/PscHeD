@@ -8,6 +8,14 @@
 // checked, so a wrong interleaving shows up as a failure, not only as a hang.
 //
 // Usage: duckdb_stress [scale] [db_threads]
+//
+// Environment, for trying DuckDB configurations that change how it uses
+// threads:
+//   DUCKDB_SETTINGS  comma-separated name=value database options, such as
+//                    "external_threads=2,scheduler_process_partial=true"
+//   DUCKDB_PRAGMAS   semicolon-separated SQL run on every connection, such
+//                    as "PRAGMA verify_parallelism"
+//   DUCKDB_PATH      ":memory:" for an in-memory database instead of a file
 #include "duckdb.hpp"
 
 #include <algorithm>
@@ -39,6 +47,35 @@ unique_ptr<MaterializedQueryResult> Must(Connection &con, const std::string &sql
 		Fail(sql + ": " + result->GetError());
 	}
 	return result;
+}
+
+// Splits `text` at `sep`, dropping empty parts.
+std::vector<std::string> Split(const std::string &text, char sep) {
+	std::vector<std::string> parts;
+	size_t start = 0;
+	while (start <= text.size()) {
+		size_t end = text.find(sep, start);
+		if (end == std::string::npos) {
+			end = text.size();
+		}
+		if (end > start) {
+			parts.push_back(text.substr(start, end - start));
+		}
+		start = end + 1;
+	}
+	return parts;
+}
+
+std::string Env(const char *name) {
+	const char *value = std::getenv(name);
+	return value ? value : "";
+}
+
+// Runs DUCKDB_PRAGMAS on a new connection.
+void Setup(Connection &con) {
+	for (auto &sql : Split(Env("DUCKDB_PRAGMAS"), ';')) {
+		Must(con, sql);
+	}
 }
 
 int64_t Scalar(Connection &con, const std::string &sql) {
@@ -76,14 +113,25 @@ int main(int argc, char **argv) {
 		std::perror("mkdtemp");
 		return 2;
 	}
-	const std::string path = std::string(dir_template) + "/stress.db";
+	const std::string path =
+	    Env("DUCKDB_PATH") == ":memory:" ? std::string(":memory:") : std::string(dir_template) + "/stress.db";
 
 	DBConfig config;
 	config.options.maximum_threads = db_threads;
 	config.SetOptionByName("checkpoint_threshold", Value("256KB"));
+	config.SetOptionByName("temp_directory", Value(std::string(dir_template) + "/tmp"));
+	for (auto &setting : Split(Env("DUCKDB_SETTINGS"), ',')) {
+		auto eq = setting.find('=');
+		if (eq == std::string::npos) {
+			std::fprintf(stderr, "DUCKDB_SETTINGS: expected name=value, got %s\n", setting.c_str());
+			return 2;
+		}
+		config.SetOptionByName(setting.substr(0, eq), Value(setting.substr(eq + 1)));
+	}
 	DuckDB db(path, &config);
 	{
 		Connection con(db);
+		Setup(con);
 		Must(con, "CREATE TABLE t (id BIGINT, k INTEGER, v BIGINT)");
 		Must(con, "CREATE TABLE hot (id INTEGER PRIMARY KEY, n BIGINT)");
 		Must(con, "INSERT INTO hot VALUES (1, 0)");
@@ -98,6 +146,7 @@ int main(int argc, char **argv) {
 	for (int64_t a = 0; a < appenders; a++) {
 		threads.emplace_back([&, a] {
 			Connection con(db);
+			Setup(con);
 			Appender appender(con, "t");
 			for (int64_t i = 0; i < rows_per_appender; i++) {
 				int64_t id = a * rows_per_appender + i;
@@ -117,6 +166,7 @@ int main(int argc, char **argv) {
 	for (int64_t w = 0; w < inserters; w++) {
 		threads.emplace_back([&, w] {
 			Connection con(db);
+			Setup(con);
 			for (int64_t txn = 0; txn < txns_per_inserter; txn++) {
 				Must(con, "BEGIN TRANSACTION");
 				Must(con, "INSERT INTO t SELECT -1, (i % 97)::INTEGER, 1 FROM range(" +
@@ -137,6 +187,7 @@ int main(int argc, char **argv) {
 	for (int64_t u = 0; u < updaters; u++) {
 		threads.emplace_back([&] {
 			Connection con(db);
+			Setup(con);
 			for (int64_t i = 0; i < updates_per_updater;) {
 				auto result = con.Query("UPDATE hot SET n = n + 1 WHERE id = 1");
 				if (result->HasError()) {
@@ -153,6 +204,7 @@ int main(int argc, char **argv) {
 	// Checkpoints race with writers; "other write transactions active" is fine.
 	threads.emplace_back([&] {
 		Connection con(db);
+		Setup(con);
 		while (!writers_done.load()) {
 			auto result = con.Query("CHECKPOINT");
 			if (!result->HasError()) {
@@ -167,6 +219,7 @@ int main(int argc, char **argv) {
 	for (int64_t r = 0; r < readers; r++) {
 		threads.emplace_back([&] {
 			Connection con(db);
+			Setup(con);
 			const std::string n = std::to_string(range_n);
 			int64_t last_count = 0;
 			for (int64_t q = 0; q < queries_per_reader; q++) {
@@ -195,6 +248,7 @@ int main(int argc, char **argv) {
 
 	// One connection runs a long query while another thread interrupts it.
 	Connection victim(db);
+	Setup(victim);
 	threads.emplace_back([&] {
 		for (int attempt = 0; attempt < 20 && !interrupted.load(); attempt++) {
 			auto result = victim.Query("SELECT count(*) FROM range(" + std::to_string(range_n * 50) +
@@ -225,6 +279,7 @@ int main(int argc, char **argv) {
 
 	{
 		Connection con(db);
+		Setup(con);
 		Expect(con, "SELECT count(*) FROM t", committed_rows.load());
 		Expect(con, "SELECT sum(v) FROM t", committed_sum.load());
 		Expect(con, "SELECT n FROM hot WHERE id = 1", hot_commits.load());

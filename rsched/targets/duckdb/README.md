@@ -27,5 +27,23 @@ the workload; rsched runs need a fraction because every atomic is a scheduling
 point.
 
 `build.sh` compiles DuckDB with `clang -fpass-plugin=librsched_llvm_pass.so`.
-The binary references a few glibc 2.36+ symbols through the host headers and
-the static libstdc++; the instrumented glibc bundle exports them.
+
+## Configurations
+
+`stress.cpp` reads three variables, so DuckDB settings that change how it
+uses threads can be tried without a rebuild:
+
+- `DUCKDB_SETTINGS`: comma-separated `name=value` database options, such as
+  `external_threads=2,scheduler_process_partial=true`.
+- `DUCKDB_PRAGMAS`: semicolon-separated SQL run on every connection, such as
+  `PRAGMA verify_parallelism` or `SET debug_force_external=true`.
+- `DUCKDB_PATH=:memory:`: an in-memory database instead of a file.
+
+`matrix.sh` runs a set of such configurations once natively and under rsched
+for several seeds on each glibc provider, and replays the first seed to
+check that it takes the same schedule:
+
+```sh
+targets/duckdb/matrix.sh                     # every configuration
+SEEDS="0 1" targets/duckdb/matrix.sh threads1 partial
+```
