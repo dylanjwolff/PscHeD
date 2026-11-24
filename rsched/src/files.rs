@@ -3,28 +3,32 @@
 //! The kernel stamps a file's times with the real clock, which under rsched
 //! disagrees with the virtual clock (see `virt`): a program that writes a
 //! file, sleeps, and compares the file's mtime with `time()` would see the
-//! real time barely move. rsched keeps a table, in process-shared memory, of
-//! the access, modification, and change times of files keyed by device and
+//! wrong order. rsched keeps a table, in process-shared memory, of the
+//! access, modification, and change times of files keyed by device and
 //! inode, and the stat calls report those instead of the kernel's.
 //!
 //! - A write, `truncate`, `ftruncate`, or `fallocate` that succeeds sets the
 //!   file's mtime and ctime to the current virtual time.
-//! - Any other change, which rsched does not see, such as creating a file or
-//!   a write through `mmap`, shows up as a kernel time newer than the one the
-//!   table recorded. rsched then reports the virtual time at which the stat
-//!   call observed it; a kernel time from before rsched started, such as on a
-//!   file that already existed, is reported unchanged.
+//! - A file the table has not seen yet reports the virtual epoch
+//!   ([`virt::REALTIME_BASE_NS`]) for every time, so files that existed
+//!   before rsched started look older than anything it stamps.
+//! - Any other change to a recorded file, which rsched does not see, such as
+//!   a write through `mmap` or `utimensat`, shows up as a kernel time that
+//!   differs from the one the table recorded, and is reported as the virtual
+//!   time of the stat call that saw it.
 //!
-//! The table holds [`SLOTS`] files; once it is full, a file outside it gets
-//! the current virtual time for each time that changed after rsched started.
-//! Times set explicitly with `utimensat` count as such a change: a date
-//! after rsched started is reported as the virtual time of the stat call
-//! that saw it.
+//! The table holds [`SLOTS`] files; a file outside a full table reports the
+//! virtual epoch. All syscalls go through the safe wrappers in `sys`.
 
-use libc::{c_int, c_long};
+use crate::sys::{self, STATX_ATIME, STATX_CTIME, STATX_INO, STATX_MTIME, Statx};
+use crate::virt;
+use libc::{c_char, c_int, c_long};
+use std::ffi::CStr;
+use std::io;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 const SLOTS: usize = 4096;
+const NS: i64 = 1_000_000_000;
 
 /// Atime, mtime, ctime.
 type Times = [i64; 3];
@@ -49,53 +53,17 @@ pub(crate) struct SharedFiles {
     slots: [Slot; SLOTS],
 }
 
-/// The kernel's `struct statx` up to the device numbers; the `libc` crate
-/// has none for musl. Only read through a pointer to the caller's buffer.
-#[repr(C)]
-pub struct Statx {
-    stx_mask: u32,
-    stx_blksize: u32,
-    stx_attributes: u64,
-    stx_nlink: u32,
-    stx_uid: u32,
-    stx_gid: u32,
-    stx_mode: u16,
-    __spare0: u16,
-    stx_ino: u64,
-    stx_size: u64,
-    stx_blocks: u64,
-    stx_attributes_mask: u64,
-    stx_atime: StatxTimestamp,
-    stx_btime: StatxTimestamp,
-    stx_ctime: StatxTimestamp,
-    stx_mtime: StatxTimestamp,
-    stx_rdev_major: u32,
-    stx_rdev_minor: u32,
-    stx_dev_major: u32,
-    stx_dev_minor: u32,
-}
-
-#[repr(C)]
-struct StatxTimestamp {
-    tv_sec: i64,
-    tv_nsec: u32,
-    __reserved: i32,
-}
-
-const STATX_ATIME: u32 = 0x20;
-const STATX_MTIME: u32 = 0x40;
-const STATX_CTIME: u32 = 0x80;
-const STATX_INO: u32 = 0x100;
-
 fn table() -> &'static SharedFiles {
+    // SAFETY: the process-shared mapping lives as long as the process.
     unsafe { &*crate::task_provider::shared_files() }
 }
 
+/// The file's slot, and whether it was just claimed.
 fn slot(dev: u64, ino: u64) -> Option<(&'static Slot, bool)> {
     let key = ino.wrapping_add(1);
     let start = (ino ^ dev.rotate_left(32)).wrapping_mul(0x9e37_79b9_7f4a_7c15) as usize;
     for probe in 0..SLOTS {
-        let s = &table().slots[(start.wrapping_add(probe)) % SLOTS];
+        let s = &table().slots[start.wrapping_add(probe) % SLOTS];
         match s.ino.load(Ordering::Relaxed) {
             0 => {
                 s.dev.store(dev, Ordering::Relaxed);
@@ -109,28 +77,24 @@ fn slot(dev: u64, ino: u64) -> Option<(&'static Slot, bool)> {
     None
 }
 
-/// The time to report for a kernel time the table has not recorded.
-fn first_seen(real: i64, now: i64) -> i64 {
-    if real < crate::virt::REALTIME_BASE_NS {
-        real
-    } else {
-        now
-    }
-}
-
 /// Records the file's kernel times `real` and returns the times to report.
 /// `stamp` lists the times a write just set.
 fn observe(dev: u64, ino: u64, real: Times, stamp: &[usize]) -> Times {
-    let now = crate::virt::realtime_now_ns();
+    if !virt::started() {
+        return real;
+    }
+    let now = virt::realtime_now_ns();
     let Some((s, new)) = slot(dev, ino) else {
-        return real.map(|t| first_seen(t, now));
+        return [virt::REALTIME_BASE_NS; 3];
     };
     let mut out = [0; 3];
     for i in 0..3 {
         if stamp.contains(&i) {
             s.virt[i].store(now, Ordering::Relaxed);
-        } else if new || s.real[i].load(Ordering::Relaxed) != real[i] {
-            s.virt[i].store(first_seen(real[i], now), Ordering::Relaxed);
+        } else if new {
+            s.virt[i].store(virt::REALTIME_BASE_NS, Ordering::Relaxed);
+        } else if s.real[i].load(Ordering::Relaxed) != real[i] {
+            s.virt[i].store(now, Ordering::Relaxed);
         }
         s.real[i].store(real[i], Ordering::Relaxed);
         out[i] = s.virt[i].load(Ordering::Relaxed);
@@ -139,7 +103,11 @@ fn observe(dev: u64, ino: u64, real: Times, stamp: &[usize]) -> Times {
 }
 
 fn ns(sec: i64, nsec: i64) -> i64 {
-    sec.saturating_mul(1_000_000_000).saturating_add(nsec)
+    sec.saturating_mul(NS).saturating_add(nsec)
+}
+
+fn split(t: i64) -> (i64, i64) {
+    (t.div_euclid(NS), t.rem_euclid(NS))
 }
 
 fn stat_times(st: &libc::stat) -> Times {
@@ -150,38 +118,30 @@ fn stat_times(st: &libc::stat) -> Times {
     ]
 }
 
-unsafe fn fix_stat(st: *mut libc::stat) {
-    let st = &mut *st;
+/// Replaces the kernel's times in `st` with the table's.
+fn fix_stat(st: &mut libc::stat) {
     let t = observe(st.st_dev, st.st_ino, stat_times(st), &[]);
-    (st.st_atime, st.st_atime_nsec) = (
-        t[0].div_euclid(1_000_000_000),
-        t[0].rem_euclid(1_000_000_000),
-    );
-    (st.st_mtime, st.st_mtime_nsec) = (
-        t[1].div_euclid(1_000_000_000),
-        t[1].rem_euclid(1_000_000_000),
-    );
-    (st.st_ctime, st.st_ctime_nsec) = (
-        t[2].div_euclid(1_000_000_000),
-        t[2].rem_euclid(1_000_000_000),
-    );
+    (st.st_atime, st.st_atime_nsec) = split(t[0]);
+    (st.st_mtime, st.st_mtime_nsec) = split(t[1]);
+    (st.st_ctime, st.st_ctime_nsec) = split(t[2]);
 }
 
-unsafe fn fix_statx(stx: *mut Statx) {
-    let stx = &mut *stx;
+/// Replaces the kernel's times in `stx` with the table's, when it has them.
+fn fix_statx(stx: &mut Statx) {
     let wanted = STATX_ATIME | STATX_MTIME | STATX_CTIME | STATX_INO;
-    if stx.stx_mask & wanted != wanted {
+    if stx.mask & wanted != wanted {
         return;
     }
-    let dev = libc::makedev(stx.stx_dev_major, stx.stx_dev_minor);
-    let fields = [&mut stx.stx_atime, &mut stx.stx_mtime, &mut stx.stx_ctime];
-    let real = fields
-        .each_ref()
-        .map(|t| ns(t.tv_sec, i64::from(t.tv_nsec)));
-    let t = observe(dev, stx.stx_ino, real, &[]);
-    for (field, t) in fields.into_iter().zip(t) {
-        field.tv_sec = t.div_euclid(1_000_000_000);
-        field.tv_nsec = t.rem_euclid(1_000_000_000) as u32;
+    let dev = libc::makedev(stx.dev_major, stx.dev_minor);
+    let real = [stx.atime, stx.mtime, stx.ctime].map(|t| ns(t.sec, i64::from(t.nsec)));
+    let t = observe(dev, stx.ino, real, &[]);
+    for (field, t) in [&mut stx.atime, &mut stx.mtime, &mut stx.ctime]
+        .into_iter()
+        .zip(t)
+    {
+        let (sec, nsec) = split(t);
+        field.sec = sec;
+        field.nsec = nsec as u32;
     }
 }
 
@@ -190,20 +150,14 @@ fn stamp(st: &libc::stat) {
     observe(st.st_dev, st.st_ino, stat_times(st), &[MTIME, CTIME]);
 }
 
-unsafe fn stamp_fd(fd: c_long) {
-    let mut st: libc::stat = core::mem::zeroed();
-    if crate::seccomp::raw_syscall6(libc::SYS_fstat, fd, &mut st as *mut _ as c_long, 0, 0, 0, 0)
-        == 0
-    {
+fn stamp_fd(fd: c_int) {
+    if let Ok(st) = sys::fstat(fd) {
         stamp(&st);
     }
 }
 
-unsafe fn stamp_path(path: c_long) {
-    let mut st: libc::stat = core::mem::zeroed();
-    let at_fdcwd = c_long::from(libc::AT_FDCWD);
-    let buf = &mut st as *mut _ as c_long;
-    if crate::seccomp::raw_syscall6(libc::SYS_newfstatat, at_fdcwd, path, buf, 0, 0, 0) == 0 {
+fn stamp_path(path: &CStr) {
+    if let Ok(st) = sys::fstatat(libc::AT_FDCWD, path, 0) {
         stamp(&st);
     }
 }
@@ -211,10 +165,16 @@ unsafe fn stamp_path(path: c_long) {
 /// Updates the table after syscall `nr` returned `ret`, which is a byte or
 /// zero count on success and negative on failure: a write stamps its file,
 /// and a stat call gets the table's times. Ignores other syscalls.
+///
+/// # Safety
+///
+/// `args` must be the arguments of that call, so that after a success its
+/// pointers are valid.
 pub(crate) unsafe fn after_syscall(nr: c_long, args: &[c_long; 6], ret: c_long) {
-    if ret < 0 || !crate::virt::started() {
+    if ret < 0 || !virt::started() {
         return;
     }
+    let fd = |i: usize| args[i] as c_int;
     match nr {
         libc::SYS_write
         | libc::SYS_pwrite64
@@ -224,14 +184,16 @@ pub(crate) unsafe fn after_syscall(nr: c_long, args: &[c_long; 6], ret: c_long) 
         | libc::SYS_sendfile
             if ret > 0 =>
         {
-            stamp_fd(args[0])
+            stamp_fd(fd(0))
         }
-        libc::SYS_copy_file_range | libc::SYS_splice if ret > 0 => stamp_fd(args[2]),
-        libc::SYS_ftruncate | libc::SYS_fallocate => stamp_fd(args[0]),
-        libc::SYS_truncate => stamp_path(args[0]),
-        libc::SYS_stat | libc::SYS_fstat | libc::SYS_lstat => fix_stat(args[1] as *mut _),
-        libc::SYS_newfstatat => fix_stat(args[2] as *mut _),
-        libc::SYS_statx => fix_statx(args[4] as *mut _),
+        libc::SYS_copy_file_range | libc::SYS_splice if ret > 0 => stamp_fd(fd(2)),
+        libc::SYS_ftruncate | libc::SYS_fallocate => stamp_fd(fd(0)),
+        libc::SYS_truncate => stamp_path(CStr::from_ptr(args[0] as *const c_char)),
+        libc::SYS_stat | libc::SYS_fstat | libc::SYS_lstat => {
+            fix_stat(&mut *(args[1] as *mut libc::stat))
+        }
+        libc::SYS_newfstatat => fix_stat(&mut *(args[2] as *mut libc::stat)),
+        libc::SYS_statx => fix_statx(&mut *(args[4] as *mut Statx)),
         _ => {}
     }
 }
@@ -247,103 +209,110 @@ pub unsafe extern "C" fn rsched_file_call_done(nr: c_long, ret: c_long, args: *c
     after_syscall(nr, &*(args as *const [c_long; 6]), ret);
 }
 
-/// `stat` and friends for programs built against rsched: the raw syscall,
-/// with the table's times.
-unsafe fn stat_call(nr: c_long, args: [c_long; 6]) -> c_int {
-    let r = crate::seccomp::raw_syscall6(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
-    if r < 0 {
-        *libc::__errno_location() = -r as c_int;
-        return -1;
+// ── Entry points for programs built against rsched ────────────────────────
+
+/// Stores `value` in `*out` and returns 0, or sets errno and returns -1.
+/// A null pointer fails with `EFAULT`, as in the kernel.
+unsafe fn report<T>(result: io::Result<T>, out: *mut T) -> c_int {
+    match result {
+        Ok(_) if out.is_null() => fail(libc::EFAULT),
+        Ok(value) => {
+            out.write(value);
+            0
+        }
+        Err(e) => fail(e.raw_os_error().unwrap_or(libc::EIO)),
     }
-    after_syscall(nr, &args, r);
-    0
+}
+
+unsafe fn fail(errno: c_int) -> c_int {
+    *libc::__errno_location() = errno;
+    -1
+}
+
+/// `path` as a C string, or None when it is null.
+unsafe fn c_path<'a>(path: *const c_char) -> Option<&'a CStr> {
+    (!path.is_null()).then(|| CStr::from_ptr(path))
+}
+
+unsafe fn stat_at(dirfd: c_int, path: *const c_char, buf: *mut libc::stat, flags: c_int) -> c_int {
+    let Some(path) = c_path(path) else {
+        return fail(libc::EFAULT);
+    };
+    let result = sys::fstatat(dirfd, path, flags).map(|mut st| {
+        fix_stat(&mut st);
+        st
+    });
+    report(result, buf)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rsched_stat(path: *const libc::c_char, buf: *mut libc::stat) -> c_int {
-    stat_call(
-        libc::SYS_newfstatat,
-        [
-            libc::AT_FDCWD as c_long,
-            path as c_long,
-            buf as c_long,
-            0,
-            0,
-            0,
-        ],
-    )
+pub unsafe extern "C" fn rsched_stat(path: *const c_char, buf: *mut libc::stat) -> c_int {
+    stat_at(libc::AT_FDCWD, path, buf, 0)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rsched_lstat(path: *const libc::c_char, buf: *mut libc::stat) -> c_int {
-    let flags = libc::AT_SYMLINK_NOFOLLOW as c_long;
-    stat_call(
-        libc::SYS_newfstatat,
-        [
-            libc::AT_FDCWD as c_long,
-            path as c_long,
-            buf as c_long,
-            flags,
-            0,
-            0,
-        ],
-    )
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rsched_fstat(fd: c_int, buf: *mut libc::stat) -> c_int {
-    stat_call(libc::SYS_fstat, [fd as c_long, buf as c_long, 0, 0, 0, 0])
+pub unsafe extern "C" fn rsched_lstat(path: *const c_char, buf: *mut libc::stat) -> c_int {
+    stat_at(libc::AT_FDCWD, path, buf, libc::AT_SYMLINK_NOFOLLOW)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_fstatat(
     dirfd: c_int,
-    path: *const libc::c_char,
+    path: *const c_char,
     buf: *mut libc::stat,
     flags: c_int,
 ) -> c_int {
-    stat_call(
-        libc::SYS_newfstatat,
-        [
-            dirfd as c_long,
-            path as c_long,
-            buf as c_long,
-            flags as c_long,
-            0,
-            0,
-        ],
-    )
+    stat_at(dirfd, path, buf, flags)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_fstat(fd: c_int, buf: *mut libc::stat) -> c_int {
+    let result = sys::fstat(fd).map(|mut st| {
+        fix_stat(&mut st);
+        st
+    });
+    report(result, buf)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_statx(
     dirfd: c_int,
-    path: *const libc::c_char,
+    path: *const c_char,
     flags: c_int,
     mask: libc::c_uint,
     buf: *mut Statx,
 ) -> c_int {
-    let args = [
-        dirfd as c_long,
-        path as c_long,
-        flags as c_long,
-        mask as c_long,
-        buf as c_long,
-        0,
-    ];
-    stat_call(libc::SYS_statx, args)
+    let Some(path) = c_path(path) else {
+        return fail(libc::EFAULT);
+    };
+    let result = sys::statx(dirfd, path, flags, mask).map(|mut stx| {
+        fix_statx(&mut stx);
+        stx
+    });
+    report(result, buf)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_ftruncate(fd: c_int, length: libc::off_t) -> c_int {
-    let r = crate::rsched_raw_syscall(libc::SYS_ftruncate, fd as c_long, length, 0, 0, 0, 0);
-    after_syscall(libc::SYS_ftruncate, &[fd as c_long, 0, 0, 0, 0, 0], r);
-    r as c_int
+    match sys::ftruncate(fd, length) {
+        Ok(()) => {
+            stamp_fd(fd);
+            0
+        }
+        Err(e) => fail(e.raw_os_error().unwrap_or(libc::EIO)),
+    }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rsched_truncate(path: *const libc::c_char, length: libc::off_t) -> c_int {
-    let r = crate::rsched_raw_syscall(libc::SYS_truncate, path as c_long, length, 0, 0, 0, 0);
-    after_syscall(libc::SYS_truncate, &[path as c_long, 0, 0, 0, 0, 0], r);
-    r as c_int
+pub unsafe extern "C" fn rsched_truncate(path: *const c_char, length: libc::off_t) -> c_int {
+    let Some(path) = c_path(path) else {
+        return fail(libc::EFAULT);
+    };
+    match sys::truncate(path, length) {
+        Ok(()) => {
+            stamp_path(path);
+            0
+        }
+        Err(e) => fail(e.raw_os_error().unwrap_or(libc::EIO)),
+    }
 }

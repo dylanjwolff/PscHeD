@@ -180,10 +180,11 @@ their CPU, and randomness from deterministic models:
   memory shared by the process tree. A successful `write`, `pwrite`,
   `writev`, `pwritev`, `truncate`, `ftruncate`, or `fallocate` sets the
   file's mtime and ctime to the virtual time, and `stat`, `fstat`,
-  `lstat`, `fstatat`, and `statx` report the table's times. A change rsched
-  does not see, such as creating a file, shows up as a newer kernel time and
-  is reported as the virtual time of the stat call that saw it; times from
-  before the virtual epoch (2024) are reported unchanged. With instrumented glibc,
+  `lstat`, `fstatat`, and `statx` report the table's times. A file seen
+  for the first time reports the virtual epoch for every time. A change
+  rsched does not see on a recorded file, such as a write through `mmap`,
+  shows up as a different kernel time and is reported as the virtual time
+  of the stat call that saw it. With instrumented glibc,
   stdio's internal writes are stamped too; with instrumented musl, only the
   public functions are.
 - `sched_getcpu` reports a CPU derived from the calling task.
