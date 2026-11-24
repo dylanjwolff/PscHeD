@@ -15,6 +15,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -462,6 +463,98 @@ static int run_once(void) {
     close(epoll_pipe[0]);
     close(epoll_pipe[1]);
     return bad || worker_result != 0;
+}
+
+#elif defined(CASE_IO_TIMED_POLL_THREADS)
+
+/* A worker polls a pipe with a one-second timeout while the main thread
+   yields TIMED_POLL_YIELDS times before it writes. The timeout is a timed
+   wait: it can only expire once virtual time reaches it or no task can
+   run, and the main thread stays runnable, so the poll always reports the
+   write ("R"), never a timeout ("T"). */
+#define EXPECTED_TRACES 1
+#define TIMED_POLL_YIELDS 4
+static int timed_pipe[2];
+
+static void *timed_poller(void *arg) {
+    (void)arg;
+    struct pollfd pfd = {.fd = timed_pipe[0], .events = POLLIN};
+    int r = poll(&pfd, 1, 1000);
+    mark(r == 1 ? 'R' : 'T');
+    return (void *)(long)(r < 0);
+}
+
+static int run_once(void) {
+    if (pipe(timed_pipe) != 0)
+        return fail("pipe");
+    pthread_t worker;
+    if (pthread_create(&worker, 0, timed_poller, 0) != 0)
+        return fail("pthread_create");
+    for (int i = 0; i < TIMED_POLL_YIELDS; i++)
+        sched_yield();
+    int bad = write(timed_pipe[1], "x", 1) != 1;
+    void *worker_result;
+    pthread_join(worker, &worker_result);
+    close(timed_pipe[0]);
+    close(timed_pipe[1]);
+    return bad || worker_result != 0;
+}
+
+#elif defined(CASE_IO_SIGNAL_INTERRUPTS_READ)
+
+/* A forked child reads a pipe that nobody writes until its parent sends it
+   SIGTERM, as Apache's prefork master does to stop idle children. The
+   signal must reach the child at a scheduling point: its handler runs
+   ("S"), the read fails with EINTR or is skipped, and the child exits, so
+   the parent's waitpid returns. Delivered while the child is parked
+   instead, the handler would run out of turn and the child would stay
+   blocked. */
+#define EXPECTED_TRACES 1
+static volatile sig_atomic_t got_term;
+
+static void on_term(int sig) {
+    (void)sig;
+    got_term = 1;
+    mark('S');
+}
+
+static int run_once(void) {
+    int p[2];
+    if (pipe(p) != 0)
+        return fail("pipe");
+    got_term = 0;
+    /* Installed before fork, so the signal never finds the default action. */
+    struct sigaction sa = {.sa_handler = on_term};
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGTERM, &sa, 0) != 0)
+        return fail("sigaction");
+    pid_t child = fork();
+    if (child < 0)
+        return fail("fork");
+    if (child == 0) {
+        char c;
+        close(p[1]);
+        int bad = 0;
+        while (!got_term) {
+            ssize_t r = read(p[0], &c, 1);
+            bad |= r >= 0 || errno != EINTR;
+            if (bad)
+                break;
+        }
+#ifdef RSCHED
+        rsched_process_exit();
+#endif
+        _exit(bad || !got_term);
+    }
+    close(p[0]);
+    int bad = kill(child, SIGTERM) != 0;
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0)
+        if (errno != EINTR)
+            return fail("waitpid");
+    close(p[1]);
+    signal(SIGTERM, SIG_DFL);
+    return bad || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
 }
 
 #else

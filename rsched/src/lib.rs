@@ -25,6 +25,7 @@ pub use event::{AccessKind, Event, EventKind};
 mod fuzzing;
 mod io;
 mod seccomp;
+mod signals;
 mod sync;
 mod sys;
 mod task_provider;
@@ -863,6 +864,7 @@ unsafe fn rsched_gunlock() {
 }
 
 pub(crate) unsafe fn thread_cond_wait(cond: *mut CondT) {
+    signals::hold();
     tsan::sync_release();
     with_internal_depth(|| (rpt().cond_wait)(cond, addr_of_mut!(GMTX)));
     tsan::sync_acquire();
@@ -1182,6 +1184,10 @@ pub unsafe extern "C" fn rsched_waitpid(
         if !io::wait_for_child(pid) {
             rsched_sched_yield();
         }
+        if signals::interrupts(true) {
+            *libc::__errno_location() = libc::EINTR;
+            return -1;
+        }
     }
 }
 
@@ -1306,11 +1312,14 @@ pub extern "C" fn rsched_exit() {
         return;
     }
     #[cfg(feature = "instrumented-libc")]
-    instrumented_depth_fetch_sub(1);
+    let previous = instrumented_depth_fetch_sub(1);
     #[cfg(not(feature = "instrumented-libc"))]
-    CALL_DEPTH.with(|d| {
-        d.fetch_sub(1, Ordering::Release);
-    });
+    let previous = CALL_DEPTH.with(|d| d.fetch_sub(1, Ordering::Release));
+    if previous == 1 {
+        // Back in the program: signals held while rsched parked this
+        // thread run now.
+        unsafe { signals::deliver(false) };
+    }
 }
 
 #[cfg(all(feature = "instrumented-libc", target_env = "musl"))]
@@ -1426,6 +1435,25 @@ fn depth_exit() {
     });
 }
 
+/// Runs `f` at depth zero, as if called from the program, so that the libc
+/// calls of a signal handler it runs reach rsched's models.
+pub(crate) fn with_outer_depth<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "instrumented-libc")]
+    let saved = {
+        let depth = instrumented_depth_load();
+        instrumented_depth_store(0);
+        depth
+    };
+    #[cfg(not(feature = "instrumented-libc"))]
+    let saved = CALL_DEPTH.with(|d| d.swap(0, Ordering::AcqRel));
+    let r = f();
+    #[cfg(feature = "instrumented-libc")]
+    instrumented_depth_store(saved);
+    #[cfg(not(feature = "instrumented-libc"))]
+    CALL_DEPTH.with(|d| d.store(saved, Ordering::Release));
+    r
+}
+
 #[inline]
 fn is_in_rsched() -> bool {
     #[cfg(feature = "instrumented-libc")]
@@ -1455,13 +1483,13 @@ unsafe fn with_internal_depth<T>(f: impl FnOnce() -> T) -> T {
 #[inline]
 unsafe fn with_libc_wrappers_bypassed<T>(f: impl FnOnce() -> T) -> T {
     #[cfg(feature = "instrumented-libc")]
-    {
-        with_internal_depth(f)
-    }
+    let r = with_internal_depth(f);
     #[cfg(not(feature = "instrumented-libc"))]
-    {
-        f()
-    }
+    let r = f();
+    // Back in the program: signals held while rsched parked this thread
+    // run now.
+    signals::deliver(false);
+    r
 }
 
 unsafe fn st() -> &'static mut State {
@@ -1705,6 +1733,7 @@ pub(crate) extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void
 
         st().task_provider.global_unlock();
         depth_exit();
+        signals::deliver(false);
 
         // Run the user's thread function with CALL_DEPTH back to 0 so that
         // user calls to pthread_* are correctly intercepted by instrumented libc.

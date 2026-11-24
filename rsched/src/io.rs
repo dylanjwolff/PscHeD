@@ -14,6 +14,7 @@
 
 use crate::event::{Event, EventKind};
 use crate::seccomp::raw_syscall6;
+use crate::sync::Deadline;
 use crate::sys::{Epoll, Interest};
 use libc::{c_int, c_long, c_void};
 
@@ -152,19 +153,30 @@ pub(crate) unsafe fn wait_for_child(pid: libc::pid_t) -> bool {
 /// `fds` reports its events, an error, or a hang-up. Ready descriptors can
 /// become unready again before the task runs, so callers check again.
 unsafe fn wait_until_ready(fds: &[libc::pollfd]) {
-    if !block_until_ready(fds) {
-        // rsched cannot watch these descriptors, for example a user epoll
-        // nested as deep as the kernel allows: let the other tasks run once
-        // before the caller checks again.
-        crate::rsched_sched_yield();
+    wait_until_ready_or(fds, None);
+}
+
+/// Like [`wait_until_ready`], but also returns, reporting true, once
+/// `deadline` passes in virtual time.
+unsafe fn wait_until_ready_or(fds: &[libc::pollfd], deadline: Option<Deadline>) -> bool {
+    match block_until_ready(fds, deadline) {
+        Some(timed_out) => timed_out,
+        None => {
+            // rsched cannot watch these descriptors, for example a user
+            // epoll nested as deep as the kernel allows: let the other tasks
+            // run once before the caller checks again.
+            crate::rsched_sched_yield();
+            deadline.is_some_and(|d| crate::sync::passed(d))
+        }
     }
 }
 
-/// Does the work of [`wait_until_ready`]; returns false, without blocking,
-/// when the descriptors cannot be watched.
-unsafe fn block_until_ready(fds: &[libc::pollfd]) -> bool {
+/// Does the work of [`wait_until_ready_or`]: returns whether the deadline
+/// passed, or None, without blocking, when the descriptors cannot be
+/// watched.
+unsafe fn block_until_ready(fds: &[libc::pollfd], deadline: Option<Deadline>) -> Option<bool> {
     let Ok(waits) = Epoll::new() else {
-        return false;
+        return None;
     };
     for (i, pfd) in fds.iter().enumerate().filter(|(_, pfd)| pfd.fd >= 0) {
         // poll may list a descriptor more than once; epoll takes it once.
@@ -180,7 +192,7 @@ unsafe fn block_until_ready(fds: &[libc::pollfd]) -> bool {
             waits.add(pfd.fd, interest, 0)
         };
         if watched.is_err() {
-            return false;
+            return None;
         }
     }
     crate::rsched_glock();
@@ -190,50 +202,64 @@ unsafe fn block_until_ready(fds: &[libc::pollfd]) -> bool {
     // kernel, makes a descriptor in `waits` ready and the scheduler picks
     // this task again. Like a mutex waiter, it parks if the scheduler had no
     // other task to switch to.
-    let waited = crate::task_provider::io_wait(task, &waits, || {
-        crate::st().context_switch(caller);
-        crate::st().park_if_blocked(caller);
+    let mut timed_out = false;
+    let waited = crate::task_provider::io_wait(task, &waits, || match deadline {
+        Some(deadline) => timed_out = crate::sync::block_until_deadline(caller, deadline),
+        None => {
+            crate::st().context_switch(caller);
+            crate::st().park_if_blocked(caller);
+        }
     });
     crate::rsched_gunlock();
-    waited
+    waited.then_some(timed_out)
 }
 
 /// Waits, as a scheduling point, until epoll instance `epfd` has an event
-/// or `timeout` milliseconds pass in virtual time, like a modeled `poll` on
-/// `epfd`, and returns the timeout for the real `epoll_wait`, which is then
-/// zero so the call cannot block in the kernel while the task holds the
-/// turn. A negative timeout blocks the task until `epfd` is ready.
-pub(crate) unsafe fn prepare_epoll_wait(instr_addr: u64, epfd: c_int, timeout: c_int) -> c_int {
+/// or `timeout` milliseconds pass, like a modeled `poll` on `epfd`, and
+/// returns the timeout for the real `epoll_wait`, which is then zero so the
+/// call cannot block in the kernel while the task holds the turn. A
+/// negative timeout blocks the task until `epfd` is ready. Returns None when
+/// a signal handler interrupted the wait, which then fails with EINTR.
+pub(crate) unsafe fn prepare_epoll_wait(
+    instr_addr: u64,
+    epfd: c_int,
+    timeout: c_int,
+) -> Option<c_int> {
     crate::ensure_init();
     io_point(instr_addr, epfd, libc::SYS_epoll_wait);
-    if timeout == 0 || poll_one(epfd, libc::POLLIN) {
-        return 0;
-    }
-    if timeout > 0 {
-        // As for poll: one more choice decides whether an event comes first.
-        crate::rsched_sched_yield();
-        if !poll_one(epfd, libc::POLLIN) {
-            crate::virt::advance_by(i64::from(timeout) * 1_000_000);
+    let deadline = (timeout > 0).then(|| crate::sync::deadline_in_ms(timeout));
+    let fds = [libc::pollfd {
+        fd: epfd,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    while timeout != 0 && !poll_one(epfd, libc::POLLIN) {
+        if wait_until_ready_or(&fds, deadline) {
+            break;
         }
-        return 0;
+        if crate::signals::interrupts(false) {
+            return None;
+        }
     }
-    while !poll_one(epfd, libc::POLLIN) {
-        wait_until_ready(&[libc::pollfd {
-            fd: epfd,
-            events: libc::POLLIN,
-            revents: 0,
-        }]);
-    }
-    0
+    Some(0)
 }
 
 /// Makes `nr` a scheduling point when `schedule` is set, then blocks until
 /// the call can no longer block. May rewrite `args`: a `poll` whose timeout
 /// would only elapse while every other task waits gets a zero timeout, so
 /// timeouts expire in virtual time. Non-I/O syscalls are left untouched.
-pub(crate) unsafe fn prepare(instr_addr: u64, nr: c_long, args: &mut [c_long; 6], schedule: bool) {
+/// Returns true, without the call having run, when a signal handler
+/// interrupted the wait and the call must fail with EINTR: always for
+/// `poll`, and for the other calls when the handler lacks SA_RESTART.
+#[must_use]
+pub(crate) unsafe fn prepare(
+    instr_addr: u64,
+    nr: c_long,
+    args: &mut [c_long; 6],
+    schedule: bool,
+) -> bool {
     let Some(blocking) = classify(nr, args) else {
-        return;
+        return false;
     };
     crate::ensure_init();
     if schedule {
@@ -244,7 +270,7 @@ pub(crate) unsafe fn prepare(instr_addr: u64, nr: c_long, args: &mut [c_long; 6]
         Blocking::Until(events) => {
             let fd = args[0] as c_int;
             if is_nonblocking(fd) {
-                return;
+                return false;
             }
             while !poll_one(fd, events) {
                 wait_until_ready(&[libc::pollfd {
@@ -252,40 +278,47 @@ pub(crate) unsafe fn prepare(instr_addr: u64, nr: c_long, args: &mut [c_long; 6]
                     events,
                     revents: 0,
                 }]);
+                if crate::signals::interrupts(true) {
+                    return true;
+                }
             }
         }
         Blocking::Poll => {
             let (fds, nfds, timeout) = (args[0], args[1], args[2] as c_int);
             let ready = || raw_syscall6(libc::SYS_poll, fds, nfds, 0, 0, 0, 0) != 0;
             if timeout == 0 || ready() {
-                return;
-            }
-            // A timeout may fire at any scheduling point: one more choice
-            // decides whether the descriptors become ready first.
-            if timeout > 0 {
-                crate::rsched_sched_yield();
-                if !ready() {
-                    args[2] = 0;
-                    crate::virt::advance_by(i64::from(timeout) * 1_000_000);
-                }
-                return;
+                return false;
             }
             // poll(NULL, 0, -1) sleeps forever, so it waits on no descriptors.
-            let fds = if nfds == 0 {
+            let fds_slice = if nfds == 0 {
                 &[][..]
             } else {
                 core::slice::from_raw_parts(fds as *const libc::pollfd, nfds as usize)
             };
+            // A positive timeout is a timed wait: it expires once virtual
+            // time reaches it or no task can run, and the real call then
+            // reports it with a zero timeout.
+            let deadline = (timeout > 0).then(|| crate::sync::deadline_in_ms(timeout));
             while !ready() {
-                wait_until_ready(fds);
+                if wait_until_ready_or(fds_slice, deadline) {
+                    args[2] = 0;
+                    return false;
+                }
+                if crate::signals::interrupts(false) {
+                    return true;
+                }
             }
         }
     }
+    false
 }
 
 #[inline(always)]
 unsafe fn modeled_syscall(instr_addr: u64, nr: c_long, mut args: [c_long; 6]) -> c_long {
-    prepare(instr_addr, nr, &mut args, true);
+    if prepare(instr_addr, nr, &mut args, true) {
+        *libc::__errno_location() = libc::EINTR;
+        return -1;
+    }
     let r = crate::rsched_raw_syscall(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
     crate::files::after_syscall(nr, &args, r);
     r
@@ -303,7 +336,10 @@ pub unsafe extern "C" fn rsched_io_prepare_syscall(
     if !crate::instrumented_libc_ready() || crate::is_in_rsched() {
         return;
     }
-    crate::with_libc_wrappers_bypassed(|| prepare(instr_addr as u64, nr, &mut *args, true));
+    // The hooked instruction runs the syscall afterwards, so an interrupted
+    // wait cannot fail it: the handler has run, and the call waits again as
+    // if restarted.
+    crate::with_libc_wrappers_bypassed(|| while prepare(instr_addr as u64, nr, &mut *args, true) {});
 }
 
 /// Routes a modeled syscall issued through `syscall(2)`.

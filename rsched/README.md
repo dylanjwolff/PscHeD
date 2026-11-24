@@ -153,6 +153,17 @@ can run, rsched picks one timed wait, moves the clock to its deadline, and
 expires it. A timeout is never reported early, and which wait expires and
 when depends only on the schedule.
 
+`kill` (and `killpg`) between scheduled processes is a scheduling point.
+rsched blocks signals in a thread while it parks it, so a signal runs only
+once the thread holds the turn and returns to the program. The sender wakes
+the target's tasks blocked on I/O or in a sleep; the woken task runs the
+handler and its call fails with EINTR, or restarts under SA_RESTART (`poll`,
+`epoll_wait`, and sleeps never restart). A signal whose default action ends
+the process hands the schedule on first. Signals do not interrupt mutex,
+semaphore, or condition variable waits, stop signals are not modeled, and
+kernel-generated signals such as SIGCHLD arrive whenever the kernel sends
+them (see `src/signals.rs`).
+
 Calls that wait in the kernel and that rsched does not model, such as
 `ppoll`, `select`, `pselect`, `epoll_pwait2`, and `sigtimedwait`, move the
 virtual clock by one tick, and by their timeout when they report that it
@@ -206,9 +217,10 @@ would stall the task that could unblock it. On a blocking descriptor that is
 not ready, the calling task instead blocks, like a task waiting for a mutex:
 it is not runnable, so it adds no scheduling points, until the descriptor is
 ready, and then performs the call. When every task is blocked and some wait
-on I/O, rsched waits in the kernel for one of their descriptors. A `poll`
-with a positive timeout expires in virtual time: if no descriptor is ready
-after the other tasks have had a turn, it returns 0.
+on I/O, rsched waits in the kernel for one of their descriptors. A `poll`,
+`epoll_wait`, or `epoll_pwait` with a positive timeout is a timed wait: it
+blocks until a descriptor is ready or its deadline passes, which happens
+once virtual time reaches it or no task can run, and then returns 0.
 
 Each integration mode reaches these operations differently:
 
@@ -245,7 +257,12 @@ mode reaches `fork` differently:
 - Source annotations: `rsched.h` maps `fork` to `rsched_fork`, and
   `syscall()` routes `SYS_fork` and process-style `SYS_clone`.
 - Instrumented libc: the glibc and musl `fork` and `_exit` functions are
-  wrapped, and libc's clone boundary routes process-style clones.
+  wrapped, and libc's clone boundary routes process-style clones. `execve`
+  is not wrapped, so a program the application executes leaves rsched; the
+  bundled libc exports `rsched_execve`, which keeps the process in its
+  rsched slot across the exec. Call it on the runner to start another
+  instrumented program as part of the same execution, such as a driver
+  that runs a server and its client as one process tree.
 - LLVM pass: `rsched-atomics<direct-pthread>` rewrites `fork`, `waitpid`,
   `_exit`, `execv`, `execve`, and `syscall`.
 - Binary instrumentation: a raw `fork` or process-style `clone` instruction

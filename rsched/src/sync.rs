@@ -93,6 +93,12 @@ impl State {
         deadline: Option<Deadline>,
     ) -> bool {
         self.t(caller).timed_out = false;
+        let sleeping = matches!(on, WaitOn::Sleep);
+        // A signal sent before the task got here interrupts a sleep at once.
+        if sleeping && crate::signals::pending() {
+            self.task(caller).set_interrupted();
+            return false;
+        }
         if let Some(deadline) = deadline {
             self.timed_waits.push(TimedWait {
                 pthread: caller,
@@ -102,9 +108,15 @@ impl State {
             self.task(caller)
                 .set_deadline(virt::elapsed_at(deadline.clock, &deadline.at));
         }
+        if sleeping {
+            self.task(caller).set_sleeping(true);
+        }
         self.task(caller).set_blocking(true);
         self.context_switch(caller);
         self.park_if_blocked(caller);
+        if sleeping {
+            self.task(caller).set_sleeping(false);
+        }
         self.reap_remote_expiries();
         self.timed_waits.retain(|w| w.pthread != caller);
         self.task(caller).set_deadline(task_provider::NO_DEADLINE);
@@ -234,6 +246,14 @@ unsafe fn sync_point(caller: PthreadT, op: &'static str, obj: *const c_void, ins
     );
     st().context_switch(caller);
     st().clear_event(caller);
+}
+
+/// `kill` as a scheduling point. Must be called with GMTX held.
+pub(crate) unsafe fn kill_point(instr_addr: u64) {
+    let caller = my_pt();
+    if st().threads.contains(&caller) {
+        sync_point(caller, "kill", std::ptr::null(), instr_addr);
+    }
 }
 
 // ── Semaphores ────────────────────────────────────────────────────────────
@@ -618,7 +638,10 @@ pub unsafe extern "C" fn rsched_pthread_once(
 
 /// Sleeps the calling task until `deadline` (None: a zero-length sleep,
 /// which is only a scheduling point). The deadline passes in virtual time.
-unsafe fn sleep_impl(deadline: Option<Deadline>, instr_addr: u64) {
+/// Sleeps until `deadline`, as a scheduling point. Returns the nanoseconds
+/// left when a signal handler interrupts the sleep, which then fails with
+/// EINTR.
+unsafe fn sleep_impl(deadline: Option<Deadline>, instr_addr: u64) -> Option<i64> {
     ensure_init();
     rsched_glock();
     let caller = my_pt();
@@ -630,25 +653,75 @@ unsafe fn sleep_impl(deadline: Option<Deadline>, instr_addr: u64) {
         if let Some(deadline) = deadline {
             virt::advance_to(deadline.clock, &deadline.at);
         }
-        return;
+        return None;
     }
     sync_point(caller, "sleep", std::ptr::null(), instr_addr);
-    if let Some(deadline) = deadline {
+    let Some(deadline) = deadline else {
+        rsched_gunlock();
+        return None;
+    };
+    loop {
         st().block_on(caller, WaitOn::Sleep, Some(deadline));
+        let interrupted = st().task(caller).take_interrupted();
+        rsched_gunlock();
+        if !interrupted {
+            return None;
+        }
+        if crate::signals::deliver(false) {
+            return Some(virt::remaining_ns(deadline.clock, &deadline.at));
+        }
+        if passed(deadline) {
+            return None;
+        }
+        rsched_glock();
     }
-    rsched_gunlock();
+}
+
+/// The deadline `ms` milliseconds from now on the monotonic clock, for
+/// I/O waits with a timeout.
+pub(crate) unsafe fn deadline_in_ms(ms: c_int) -> Deadline {
+    let ms = i64::from(ms);
+    after(
+        libc::CLOCK_MONOTONIC,
+        timespec {
+            tv_sec: ms / 1000,
+            tv_nsec: (ms % 1000) * 1_000_000,
+        },
+    )
+}
+
+/// Whether virtual time has reached `deadline`.
+pub(crate) unsafe fn passed(deadline: Deadline) -> bool {
+    virt::remaining_ns(deadline.clock, &deadline.at) == 0
+}
+
+/// Blocks `caller`, already marked as waiting on I/O, until a descriptor
+/// wakes it or `deadline` passes; returns whether it passed. The deadline
+/// expires like any timed wait: once virtual time reaches it, or when no
+/// task can run.
+pub(crate) unsafe fn block_until_deadline(caller: PthreadT, deadline: Deadline) -> bool {
+    st().block_on(caller, WaitOn::Sleep, Some(deadline))
 }
 
 /// Sleeps `ns` nanoseconds of virtual time, as a scheduling point; zero
 /// only yields. For kernel waits that watch no descriptor, such as
 /// `select(0, NULL, NULL, NULL, &tv)`, which programs use as a sleep.
-pub(crate) unsafe fn sleep_for(ns: i64, instr_addr: u64) {
+/// Returns whether a signal handler interrupted the sleep.
+pub(crate) unsafe fn sleep_for(ns: i64, instr_addr: u64) -> bool {
     let rel = timespec {
         tv_sec: ns / 1_000_000_000,
         tv_nsec: ns % 1_000_000_000,
     };
     let deadline = (ns > 0).then(|| after(libc::CLOCK_MONOTONIC, rel));
-    sleep_impl(deadline, instr_addr);
+    sleep_impl(deadline, instr_addr).is_some()
+}
+
+/// Splits nanoseconds into a timespec.
+fn to_timespec(ns: i64) -> timespec {
+    timespec {
+        tv_sec: ns / 1_000_000_000,
+        tv_nsec: ns % 1_000_000_000,
+    }
 }
 
 fn is_zero(ts: &timespec) -> bool {
@@ -657,7 +730,6 @@ fn is_zero(ts: &timespec) -> bool {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_nanosleep(req: *const timespec, rem: *mut timespec) -> c_int {
-    let _ = rem; // Only written when a signal interrupts the sleep.
     if req.is_null() {
         set_errno(libc::EFAULT);
         return -1;
@@ -668,7 +740,13 @@ pub unsafe extern "C" fn rsched_nanosleep(req: *const timespec, rem: *mut timesp
         return -1;
     }
     let deadline = (!is_zero(&req)).then(|| after(libc::CLOCK_MONOTONIC, req));
-    sleep_impl(deadline, return_address());
+    if let Some(left) = sleep_impl(deadline, return_address()) {
+        if !rem.is_null() {
+            *rem = to_timespec(left);
+        }
+        set_errno(libc::EINTR);
+        return -1;
+    }
     0
 }
 
@@ -704,7 +782,12 @@ pub unsafe extern "C" fn rsched_clock_nanosleep(
     } else {
         (!is_zero(&req)).then(|| after(clock, req))
     };
-    sleep_impl(deadline, return_address());
+    if let Some(left) = sleep_impl(deadline, return_address()) {
+        if flags & libc::TIMER_ABSTIME == 0 && !rem.is_null() {
+            *rem = to_timespec(left);
+        }
+        return libc::EINTR;
+    }
     0
 }
 
@@ -715,7 +798,10 @@ pub unsafe extern "C" fn rsched_usleep(usec: libc::useconds_t) -> c_int {
         tv_nsec: (usec % 1_000_000) as libc::c_long * 1000,
     };
     let deadline = (!is_zero(&req)).then(|| after(libc::CLOCK_MONOTONIC, req));
-    sleep_impl(deadline, return_address());
+    if sleep_impl(deadline, return_address()).is_some() {
+        set_errno(libc::EINTR);
+        return -1;
+    }
     0
 }
 
@@ -726,6 +812,8 @@ pub unsafe extern "C" fn rsched_sleep(seconds: c_uint) -> c_uint {
         tv_nsec: 0,
     };
     let deadline = (seconds != 0).then(|| after(libc::CLOCK_MONOTONIC, req));
-    sleep_impl(deadline, return_address());
-    0
+    match sleep_impl(deadline, return_address()) {
+        Some(left) => ((left + 999_999_999) / 1_000_000_000) as c_uint,
+        None => 0,
+    }
 }

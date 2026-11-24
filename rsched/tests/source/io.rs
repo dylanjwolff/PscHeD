@@ -125,6 +125,18 @@ fn epoll_wait_blocks_the_task_instead_of_the_kernel() {
 }
 
 #[test]
+fn poll_timeout_waits_while_another_task_can_run() {
+    let stdout = run_case("CASE_IO_TIMED_POLL_THREADS", &[]);
+    assert!(stdout.contains("traces=1: R"), "{stdout}");
+}
+
+#[test]
+fn signal_from_another_process_interrupts_a_blocked_read() {
+    let stdout = run_case("CASE_IO_SIGNAL_INTERRUPTS_READ", &[]);
+    assert!(stdout.contains("traces=1: S"), "{stdout}");
+}
+
+#[test]
 fn tcp_loopback_poll_accept_connect() {
     let stdout = run_case("CASE_IO_TCP_THREADS", &[]);
     assert!(stdout.contains("traces=2"), "{stdout}");

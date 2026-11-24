@@ -201,12 +201,15 @@ pub(crate) unsafe fn kernel_wait(
         // Modeled: wait for an event as a scheduling point, then collect it
         // with a zero timeout.
         let mut args = args;
-        args[3] = crate::io::prepare_epoll_wait(
+        let Some(timeout) = crate::io::prepare_epoll_wait(
             crate::return_address(),
             args[0] as c_int,
             args[3] as c_int,
-        )
-        .into();
+        ) else {
+            *libc::__errno_location() = libc::EINTR;
+            return -1;
+        };
+        args[3] = timeout.into();
         if nr == libc::SYS_epoll_pwait && args[4] != 0 {
             // The libc entry point passes no sigset size; the kernel's is 8.
             args[5] = 8;
@@ -223,7 +226,10 @@ pub(crate) unsafe fn kernel_wait(
     if let Some(ns) = timeout
         && waits_on_nothing(nr, &args)
     {
-        crate::sync::sleep_for(ns, crate::return_address());
+        if crate::sync::sleep_for(ns, crate::return_address()) {
+            *libc::__errno_location() = libc::EINTR;
+            return -1;
+        }
         clear_time_left(nr, &args);
         return 0;
     }

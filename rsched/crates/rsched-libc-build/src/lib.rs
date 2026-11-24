@@ -551,7 +551,8 @@ fn build_musl(
              -Wl,--export-dynamic-symbol=rsched_atomic_instrument_ra \
              -Wl,--export-dynamic-symbol=rsched_io_prepare_syscall \
              -Wl,--export-dynamic-symbol=rsched_process_syscall \
-             -Wl,--export-dynamic-symbol=rsched_fuzzer_test_one_input",
+             -Wl,--export-dynamic-symbol=rsched_fuzzer_test_one_input \
+             -Wl,--export-dynamic-symbol=rsched_execve",
         )
         .arg(format!("--prefix={}", install_dir.display()))
         .arg(format!("--syslibdir={}/lib", install_dir.display()))
@@ -932,6 +933,9 @@ fn export_glibc_hooks(libc_map: &Path) -> Result<()> {
         "rsched_io_prepare_syscall",
         "rsched_process_syscall",
         "rsched_fuzzer_test_one_input",
+        // For a program that execs another under rsched, such as a driver
+        // that runs a server and its client as one process tree.
+        "rsched_execve",
     ]
     .iter()
     .filter(|hook| !map.contains(&format!("{hook};")))
