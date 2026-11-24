@@ -85,6 +85,7 @@ fn seccomp_case_define(name: &str) -> &'static str {
     match name {
         "seccomp_ok" => "CASE_SECCOMP_OK",
         "seccomp_raw_futex" => "CASE_SECCOMP_RAW_FUTEX",
+        "seccomp_signals_blocked" => "CASE_SECCOMP_SIGNALS_BLOCKED",
         "seccomp_raw_fork" => "CASE_SECCOMP_RAW_FORK",
         other => panic!("unknown seccomp example: {other}"),
     }
@@ -130,6 +131,19 @@ fn seccomp_allows_rsched_internal_futexes() {
     assert!(
         output.stdout.contains("counter = 1"),
         "seccomp_ok did not complete expected work\nstdout:\n{}\nstderr:\n{}",
+        output.stdout,
+        output.stderr
+    );
+}
+
+#[test]
+fn seccomp_traps_reach_threads_that_block_every_signal() {
+    let program = build_example("seccomp_signals_blocked");
+    let output = run_with_timeout(&program, &[("RSCHED_SECCOMP", "1")]);
+    assert!(
+        output.status.success() && output.stdout.contains("counter = 3000"),
+        "failed with status {} (signal 31 means SIGSYS killed it)\nstdout:\n{}\nstderr:\n{}",
+        output.status,
         output.stdout,
         output.stderr
     );

@@ -349,13 +349,48 @@ fn instruments_llvm_atomic_operations() {
     let ir = run_pass("rsched-atomics", &input, "atomics.out.ll");
 
     assert!(
-        ir.contains("call void @rsched_atomic_instrument"),
+        ir.contains("call void @rsched.atomic.hook"),
         "pass did not insert rsched atomic hook:\n{ir}"
     );
     assert!(
         ir.contains("atomicrmw") || ir.contains("load atomic"),
         "pass should leave original LLVM atomic operation in place:\n{ir}"
     );
+}
+
+#[test]
+fn fpass_plugin_instruments_atomics_once_at_every_opt_level() {
+    let src = write_input("fpass.c", atomic_pthread_input());
+    for level in ["-O0", "-O2"] {
+        let ll = temp_dir().join(format!("fpass{level}.ll"));
+        let output = run_timeout(
+            "clang-18",
+            [
+                OsString::from(format!("-fpass-plugin={}", plugin_path().display())),
+                OsString::from(level),
+                OsString::from("-S"),
+                OsString::from("-emit-llvm"),
+                OsString::from("-o"),
+                ll.as_os_str().to_owned(),
+                src.as_os_str().to_owned(),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "clang-18 {level} failed\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let ir = std::fs::read_to_string(&ll).expect("read -fpass-plugin IR");
+        let hooks = ir.matches("call void @rsched.atomic.hook").count();
+        assert!(hooks > 0, "-fpass-plugin {level} inserted no hook:\n{ir}");
+        // Running the pass again must not add a second hook per atomic.
+        let again = run_pass("rsched-atomics", &ll, &format!("fpass{level}.again.ll"));
+        assert_eq!(
+            again.matches("call void @rsched.atomic.hook").count(),
+            hooks,
+            "second pass doubled the hooks:\n{again}"
+        );
+    }
 }
 
 #[test]
@@ -390,7 +425,7 @@ fn musl_libc_mode_wraps_pthread_implementation_and_weak_alias() {
         "wrappers did not dispatch to rsched and the original musl body:\n{ir}"
     );
     assert!(
-        !ir.contains("call void @rsched_atomic_instrument"),
+        !ir.contains("call void @rsched.atomic.hook"),
         "libc internals must not schedule at atomics around native futexes:\n{ir}"
     );
     assert!(
@@ -690,7 +725,7 @@ fn fuzzer_sanitizer_ir_is_supported() {
         "clang did not emit sanitizer coverage for fuzzer input:\n{ir}"
     );
     assert!(
-        ir.contains("call void @rsched_atomic_instrument"),
+        ir.contains("call void @rsched.atomic.hook"),
         "pass did not instrument atomic operation in fuzzer harness:\n{ir}"
     );
     assert!(

@@ -85,14 +85,20 @@ extern "C" fn sigsys_handler(
             regs[libc::REG_R8 as usize] as libc::c_long,
             regs[libc::REG_R9 as usize] as libc::c_long,
         ];
+        if nr == libc::SYS_rt_sigprocmask {
+            let ret = emulate_sigprocmask(&mut ctx.uc_sigmask, &args);
+            ctx.uc_mcontext.gregs[libc::REG_RAX as usize] = ret;
+            return;
+        }
         if !crate::is_in_rsched() && crate::io::is_modeled(nr) {
             // Usually libc internals such as stdio, which may hold their own
             // locks: yield only while the call would block, without adding
             // an unconditional scheduling point.
             let ip = regs[libc::REG_RIP as usize] as u64;
             crate::io::prepare(ip, nr, &mut args, false);
-            regs[libc::REG_RAX as usize] =
-                raw_syscall6(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
+            let ret = raw_syscall6(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
+            crate::files::after_syscall(nr, &args, ret);
+            regs[libc::REG_RAX as usize] = ret;
             return;
         }
 
@@ -124,6 +130,43 @@ extern "C" fn sigsys_handler(
         let _ = raw_syscall6(libc::SYS_exit_group as libc::c_long, 101, 0, 0, 0, 0, 0);
         core::hint::unreachable_unchecked();
     }
+}
+
+/// Runs a trapped `rt_sigprocmask` without ever blocking SIGSYS.
+///
+/// A trapped syscall in a thread that blocks SIGSYS kills the process
+/// instead of reaching the handler, and glibc blocks every signal around
+/// thread creation and exit, where rsched takes its own futex-based lock.
+/// The kernel restores the mask from the handler's ucontext on return, so
+/// the call is emulated on that saved mask.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+unsafe fn emulate_sigprocmask(
+    saved: &mut libc::sigset_t,
+    args: &[libc::c_long; 6],
+) -> libc::greg_t {
+    let (how, set, old, size) = (args[0] as libc::c_int, args[1], args[2], args[3]);
+    if size != 8 {
+        return -(libc::EINVAL as libc::greg_t);
+    }
+    let bit = |sig: libc::c_int| 1u64 << (sig - 1);
+    let mask = (saved as *mut libc::sigset_t).cast::<u64>();
+    let current = mask.read();
+    // Read the new set before writing the old one: they may alias.
+    let requested = (set != 0).then(|| (set as *const u64).read_unaligned());
+    let next = match requested {
+        None => current,
+        Some(set) => match how {
+            libc::SIG_BLOCK => current | set,
+            libc::SIG_UNBLOCK => current & !set,
+            libc::SIG_SETMASK => set,
+            _ => return -(libc::EINVAL as libc::greg_t),
+        },
+    };
+    if old != 0 {
+        (old as *mut u64).write_unaligned(current);
+    }
+    mask.write(next & !(bit(libc::SIGKILL) | bit(libc::SIGSTOP) | bit(libc::SIGSYS)));
+    0
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -200,6 +243,11 @@ unsafe fn install_filter() {
     let mut trapped = vec![
         libc::SYS_futex as u32,
         libc::SYS_fork as u32,
+        // Emulated so SIGSYS stays deliverable; see emulate_sigprocmask.
+        libc::SYS_rt_sigprocmask as u32,
+        // Raw reads of these come from rsched's deterministic models.
+        libc::SYS_getrandom as u32,
+        libc::SYS_clock_gettime as u32,
         clone_syscall,
         clone3_syscall,
     ];

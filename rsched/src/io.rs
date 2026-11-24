@@ -126,6 +126,28 @@ unsafe fn io_point(instr_addr: u64, fd: c_int, syscall: c_long) {
     crate::rsched_gunlock();
 }
 
+/// Blocks the calling task until child process `pid` changes state, by
+/// watching its pidfd like any other descriptor. Returns false, without
+/// blocking, for a `pid` that names no single process or when the kernel
+/// has no pidfds; the caller then yields instead.
+pub(crate) unsafe fn wait_for_child(pid: libc::pid_t) -> bool {
+    const SYS_PIDFD_OPEN: c_long = 434;
+    if pid <= 0 {
+        return false;
+    }
+    let fd = raw_syscall6(SYS_PIDFD_OPEN, pid as c_long, 0, 0, 0, 0, 0);
+    if fd < 0 {
+        return false;
+    }
+    wait_until_ready(&[libc::pollfd {
+        fd: fd as c_int,
+        events: libc::POLLIN,
+        revents: 0,
+    }]);
+    raw_syscall6(libc::SYS_close, fd, 0, 0, 0, 0, 0);
+    true
+}
+
 /// Blocks the calling task, which is not runnable meanwhile, until one of
 /// `fds` reports its events, an error, or a hang-up. Ready descriptors can
 /// become unready again before the task runs, so callers check again.
@@ -215,6 +237,7 @@ pub(crate) unsafe fn prepare(instr_addr: u64, nr: c_long, args: &mut [c_long; 6]
                 crate::rsched_sched_yield();
                 if !ready() {
                     args[2] = 0;
+                    crate::virt::advance_by(i64::from(timeout) * 1_000_000);
                 }
                 return;
             }
@@ -234,7 +257,9 @@ pub(crate) unsafe fn prepare(instr_addr: u64, nr: c_long, args: &mut [c_long; 6]
 #[inline(always)]
 unsafe fn modeled_syscall(instr_addr: u64, nr: c_long, mut args: [c_long; 6]) -> c_long {
     prepare(instr_addr, nr, &mut args, true);
-    crate::rsched_raw_syscall(nr, args[0], args[1], args[2], args[3], args[4], args[5])
+    let r = crate::rsched_raw_syscall(nr, args[0], args[1], args[2], args[3], args[4], args[5]);
+    crate::files::after_syscall(nr, &args, r);
+    r
 }
 
 /// Entry point for code that is about to execute a raw I/O `syscall`

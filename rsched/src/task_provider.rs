@@ -823,12 +823,22 @@ struct SharedTask {
 struct ProcessShared {
     task_count: usize,
     dfs: SharedDfsState,
+    env: crate::virt::SharedEnv,
+    files: crate::files::SharedFiles,
     tasks: [SharedTask; MAX_TASKS],
     slots: [ProcessSlot; MAX_PROCESSES],
 }
 
 pub(crate) unsafe fn shared_dfs_state() -> *mut SharedDfsState {
     addr_of_mut!((*process_shared_ptr()).dfs)
+}
+
+pub(crate) unsafe fn shared_env() -> *mut crate::virt::SharedEnv {
+    addr_of_mut!((*process_shared_ptr()).env)
+}
+
+pub(crate) unsafe fn shared_files() -> *mut crate::files::SharedFiles {
+    addr_of_mut!((*process_shared_ptr()).files)
 }
 
 unsafe fn process_shared_ptr() -> *mut ProcessShared {
@@ -879,7 +889,9 @@ unsafe fn process_shared_ptr() -> *mut ProcessShared {
         libc::MAP_FAILED,
         "rsched: mmap shared process state failed"
     );
-    core::ptr::write_bytes(raw, 0, size);
+    // A fresh memfd reads as zeros, which every field starts as. Writing
+    // them would commit every page, including the megabytes of DFS path
+    // that most runs never reach.
     p = raw.cast::<ProcessShared>();
     PROCESS_SHARED_FD.store(fd, Ordering::Release);
     set_env_usize("RSCHED_SHM_FD", fd as usize);
@@ -1435,8 +1447,10 @@ impl ProcessTaskProvider {
 
     pub(crate) unsafe fn fork(&mut self) -> libc::pid_t {
         self.before_fork();
+        let depth = crate::fork_depth();
         let pid = crate::with_internal_depth(|| libc::fork());
         if pid == 0 {
+            crate::inherit_depth(depth);
             self.after_fork_child();
         } else if self.after_fork_parent(pid) {
             crate::rsched_glock();
@@ -1468,6 +1482,7 @@ impl ProcessTaskProvider {
         }
 
         self.before_fork();
+        let depth = crate::fork_depth();
         let result = crate::seccomp::raw_syscall6(
             libc::SYS_clone,
             flags,
@@ -1484,6 +1499,7 @@ impl ProcessTaskProvider {
         }
         let pid = result as libc::pid_t;
         if pid == 0 {
+            crate::inherit_depth(depth);
             self.after_fork_child();
         } else if self.after_fork_parent(pid) {
             crate::rsched_glock();
@@ -1585,6 +1601,20 @@ pub(crate) unsafe fn io_wait(task: TaskHandle, waits: &Epoll, switch: impl FnOnc
 /// as a free-running thread under TSAN, may need GMTX to make the descriptor
 /// ready. Returns whether any task is blocked on I/O. Must be called with
 /// GMTX held.
+/// Makes every task blocked on I/O runnable; each checks its descriptors
+/// again and waits anew if they are still not ready.
+pub(crate) unsafe fn wake_all_io_waiters() {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if ps.is_null() {
+        return;
+    }
+    for id in 0..(*ps).task_count.min(MAX_TASKS) {
+        if (*ps).tasks[id].io_wait != 0 {
+            (*ps).tasks[id].is_blocking = 0;
+        }
+    }
+}
+
 pub(crate) unsafe fn wake_io_waiters(block: bool) -> bool {
     let ps = PROCESS_SHARED.load(Ordering::Acquire);
     if ps.is_null() {
@@ -1617,11 +1647,7 @@ pub(crate) unsafe fn wake_io_waiters(block: bool) -> bool {
                 // epoll. Wake every I/O waiter: each checks its descriptors
                 // again and, unable to register a new wait, falls back to
                 // yielding.
-                for id in 0..(*ps).task_count.min(MAX_TASKS) {
-                    if (*ps).tasks[id].io_wait != 0 {
-                        (*ps).tasks[id].is_blocking = 0;
-                    }
-                }
+                wake_all_io_waiters();
                 return true;
             }
         }

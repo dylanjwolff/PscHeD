@@ -25,6 +25,12 @@ pub enum EventKind {
     LockAcq { lock: *const libc::c_void },
     /// Mutex release (`pthread_mutex_unlock`).
     LockRel { lock: *const libc::c_void },
+    /// Semaphore, rwlock, once, timed wait, or sleep operation `op` on the
+    /// object at `obj` (null for sleeps).
+    Sync {
+        op: &'static str,
+        obj: *const libc::c_void,
+    },
     /// File or socket operation on `fd`, identified by its syscall number.
     Io {
         fd: libc::c_int,

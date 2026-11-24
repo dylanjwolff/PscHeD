@@ -22,8 +22,19 @@ operations from inside libc. Atomic LLVM IR instructions are instrumented by
 inserting calls to:
 
 ```c
-void rsched_atomic_instrument(const void *ptr, size_t size, unsigned access);
+void rsched_atomic_instrument_ra(const void *call_site, const void *ptr, size_t size,
+                                 unsigned access);
 ```
+
+Each atomic calls a per-module internal thunk, `rsched.atomic.hook`, which
+passes its return address (the atomic's call site) to that function. The
+thunk references the runtime weakly and does nothing when no rsched runtime
+is loaded, so instrumented programs link and run without one. The pass marks
+each module it instruments and skips one that is already marked.
+
+With `clang -fpass-plugin=...`, the plugin adds `rsched-atomics` at the
+optimizer-last extension point, which runs at every `-O` level. The other
+modes below are selected by name with `opt -passes=...`.
 
 Pass names:
 

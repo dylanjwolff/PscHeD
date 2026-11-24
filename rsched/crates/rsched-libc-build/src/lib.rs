@@ -908,21 +908,11 @@ fn prepare_clang_asan_runtime(
          local: *;\n\
          } CXXABI_1.3;\n",
     )?;
-    // A host libsupc++ built against glibc 2.38+ calls the C23 strtoul,
-    // which the instrumented glibc 2.35 does not export.
-    let compat = root.join("asan-cxxabi-compat.c");
-    fs::write(
-        &compat,
-        "#include <stdlib.h>\n\
-         unsigned long __isoc23_strtoul(const char *s, char **end, int base)\n\
-         {\n    return strtoul(s, end, base);\n}\n",
-    )?;
     let mut command = Command::new("clang-18");
     command
         .args(["-shared", "-static-libgcc", "-std=gnu17", "-fPIC"])
         .arg("-Wl,-soname,libstdc++.so.6")
         .arg(format!("-Wl,--version-script={}", cxxabi_map.display()))
-        .arg(&compat)
         .arg("-Wl,--whole-archive")
         .arg(&libsupcxx)
         .arg("-Wl,--no-whole-archive")
@@ -980,6 +970,9 @@ fn glibc_build_library_paths(build_dir: &Path) -> String {
     .join(":")
 }
 
+/// Writes the launcher. It passes the preload to the bundled loader instead
+/// of exporting LD_PRELOAD, so programs the application starts, such as
+/// `/bin/sh` from `system`, load with the host libc as usual.
 fn write_glibc_runner(path: &Path) -> Result<()> {
     fs::write(
         path,
@@ -998,8 +991,8 @@ fn write_glibc_runner(path: &Path) -> Result<()> {
            GLIBC_TUNABLES='glibc.pthread.rseq=0' LD_PRELOAD=\"$preload\" \
              LD_LIBRARY_PATH=\"$library_path\" exec \"$@\"\n\
          fi\n\
-         GLIBC_TUNABLES='glibc.pthread.rseq=0' LD_PRELOAD=\"$preload\" \
-           exec \"$root/ld-linux-x86-64.so.2\" --library-path \"$library_path\" \"$@\"\n",
+         GLIBC_TUNABLES='glibc.pthread.rseq=0' exec \"$root/ld-linux-x86-64.so.2\" \
+           --preload \"$preload\" --library-path \"$library_path\" \"$@\"\n",
     )?;
     executable(path)
 }

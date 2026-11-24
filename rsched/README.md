@@ -81,6 +81,10 @@ Run an ordinary dynamically linked program through the bundle:
 The launcher selects the bundled dynamic loader and preloads the instrumented
 libc. Applications retain the libc pthread ABI and normal libc thread-local
 storage setup. Thread creation is intercepted at libc's clone boundary.
+The preload goes to the loader's `--preload` option rather than
+`LD_PRELOAD`, so programs the application executes, such as `/bin/sh` from
+`system()`, run uninstrumented with the host libc. Forks without `exec` stay
+instrumented and scheduled.
 
 The instrumented libc covers synchronization operations implemented by libc.
 To make application atomic instructions into scheduling points as well,
@@ -90,6 +94,16 @@ compile the application with the bundled LLVM plugin:
 clang -fpass-plugin=/path/to/runtime/librsched_llvm_pass.so \
   -o my_program my_program.c
 ```
+
+The plugin joins clang's pipeline at its last optimization step, at every
+`-O` level, and inserts a call before each atomic instruction. That call
+reaches rsched through a weak reference, so the same binary also links and
+runs natively, where the calls do nothing. C++ works the same way; header
+code such as `std::atomic` and `shared_ptr` is instrumented, while a
+precompiled libstdc++ is not.
+
+The instrumented glibc is 2.39, the version on Ubuntu 24.04, so programs
+built against that host glibc or an older one load against it.
 
 The LLVM pass has separate glibc and musl modes when it is used to build libc.
 Application builds do not need to select those internal modes.
@@ -122,6 +136,58 @@ Useful environment variables:
 | `RSCHED_LOG` | unset | Set to `1` to log scheduling decisions |
 | `RSCHED_FUZZ_SCHEDULES` | `5` | Schedules executed for each libFuzzer input |
 | `RSCHED_SECCOMP` | unset | Set to `1` on Linux x86_64 to trap unsupported raw synchronization syscalls and route I/O issued outside rsched through the I/O model |
+
+## Synchronization and time
+
+Mutexes, condition variables (including `pthread_cond_timedwait` and
+`pthread_cond_clockwait`), barriers, semaphores (`sem_wait`, `sem_trywait`,
+`sem_timedwait`, `sem_clockwait`, `sem_post`), reader-writer locks,
+`pthread_once`, and sleeps (`nanosleep`, `clock_nanosleep`, `usleep`,
+`sleep`) are scheduling points. A task blocked on one is not runnable until
+another task releases it.
+
+Deadlines pass in virtual time. A timed wait or sleep expires once the
+virtual clock reaches its deadline. Every scheduling point moves the clock
+forward, so a task that spins on a flag cannot starve a sleeper. When no task
+can run, rsched picks one timed wait, moves the clock to its deadline, and
+expires it. A timeout is never reported early, and which wait expires and
+when depends only on the schedule.
+
+Calls that wait in the kernel and that rsched does not model, such as
+`ppoll`, `select`, `pselect`, `epoll_wait`, `epoll_pwait`, and
+`sigtimedwait`, move the virtual clock by one tick, and by their timeout
+when they report that it passed. Time never depends on how long they
+really blocked.
+
+So that one seed always takes the same path, programs also read time,
+their CPU, and randomness from deterministic models:
+
+- `clock_gettime` on the realtime, monotonic, and boot-time clocks returns
+  virtual time. It starts at a fixed time, 2024-01-01T00:00:00Z for the
+  realtime clock and 1000 s for the monotonic clocks, and advances
+  by 1 µs at every scheduling point and every clock read, so a loop that
+  spins on the clock still ends. `time` and `gettimeofday` read the same
+  virtual realtime clock. CPU-time clocks stay real.
+- File times follow virtual time. rsched keeps a table of the access,
+  modification, and change times of files, keyed by device and inode, in
+  memory shared by the process tree. A successful `write`, `pwrite`,
+  `writev`, `pwritev`, `truncate`, `ftruncate`, or `fallocate` sets the
+  file's mtime and ctime to the virtual time, and `stat`, `fstat`,
+  `lstat`, `fstatat`, and `statx` report the table's times. A file seen
+  for the first time reports the virtual epoch for every time. A change
+  rsched does not see on a recorded file, such as a write through `mmap`,
+  shows up as a different kernel time and is reported as the virtual time
+  of the stat call that saw it. With instrumented glibc,
+  stdio's internal writes are stamped too; with instrumented musl, only the
+  public functions are.
+- `sched_getcpu` reports a CPU derived from the calling task.
+- `getrandom`, including `syscall(SYS_getrandom)` and, under
+  `RSCHED_SECCOMP=1`, the raw syscall, returns bytes from a generator seeded
+  by `RANDOM_SEED`. Reads of `/dev/urandom` are not modeled.
+
+Semaphores must be shared within one process. Process-shared rwlocks and
+`pthread_once` routines that unwind are not modeled; a routine that throws
+aborts the process.
 
 ## File and socket I/O
 

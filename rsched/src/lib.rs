@@ -19,14 +19,17 @@ mod scheduler;
 use scheduler::{Scheduler, SchedulerImpl};
 
 mod event;
+mod files;
 pub use event::{AccessKind, Event, EventKind};
 
 mod fuzzing;
 mod io;
 mod seccomp;
+mod sync;
 mod sys;
 mod task_provider;
 mod tsan;
+mod virt;
 #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
 use task_provider::CloneArgs;
 use task_provider::{
@@ -78,6 +81,8 @@ struct Thread {
     /// What this thread is about to do at the next scheduling point.
     /// Set before each context switch, cleared after the operation completes.
     pub next_event: Option<Event>,
+    /// Set when the thread's timed wait expired; see `State::block_on`.
+    timed_out: bool,
 }
 
 impl Thread {
@@ -96,6 +101,7 @@ impl Thread {
             joiner: None,
             is_exited: false,
             next_event: None,
+            timed_out: false,
         }
     }
 }
@@ -129,6 +135,13 @@ struct State {
     recursive_mutex_attrs: HashSet<usize>,
     conds: HashMap<usize, SCond>,
     barriers: HashMap<usize, SBarrier>,
+    /// Tasks blocked on each semaphore; see `sync`.
+    sem_waiters: HashMap<usize, Vec<PthreadT>>,
+    rwlocks: HashMap<usize, sync::SRwLock>,
+    /// pthread_once controls being initialized, with the tasks waiting.
+    once_running: HashMap<usize, Vec<PthreadT>>,
+    /// Blocked tasks whose wait has a deadline.
+    timed_waits: Vec<sync::TimedWait>,
     /// A child thread created but not yet processed at a scheduling point.
     /// rsched_pthread_create stores the (StartArg*, child pthread_t) here and
     /// returns immediately so sanitiser post-create hooks can run.  The next
@@ -154,6 +167,10 @@ impl State {
             recursive_mutex_attrs: HashSet::new(),
             conds: HashMap::new(),
             barriers: HashMap::new(),
+            sem_waiters: HashMap::new(),
+            rwlocks: HashMap::new(),
+            once_running: HashMap::new(),
+            timed_waits: Vec::new(),
             pending_child: None,
             #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
             pending_pthread_clones: Vec::new(),
@@ -162,7 +179,15 @@ impl State {
 
     unsafe fn add(&mut self, mut t: Thread) {
         let pt = t.pthread;
-        t.task = Some(self.task_provider.register_task(pt));
+        let task = self.task_provider.register_task(pt);
+        t.task = Some(task);
+        if scheduler::logging_enabled() {
+            log_line!(
+                "[rsched] TaskRegistered(tid={}) task={}",
+                t.tid,
+                task.creation_idx()
+            );
+        }
         self.threads.push(pt);
         self.info.insert(pt, Box::new(t));
     }
@@ -171,6 +196,11 @@ impl State {
         self.threads.retain(|&x| x != pt);
         if let Some(t) = self.info.get_mut(&pt) {
             t.is_exited = true;
+            if scheduler::logging_enabled()
+                && let Some(task) = t.task
+            {
+                log_line!("[rsched] TaskExit task={}", task.creation_idx());
+            }
             unsafe {
                 t.task
                     .expect("rsched: registered thread has no task handle")
@@ -237,7 +267,10 @@ impl State {
     }
 
     unsafe fn park_if_blocked(&mut self, caller: PthreadT) {
-        if self.task(caller).is_blocking() {
+        // A retired task, such as one running thread-exit destructors, is
+        // marked blocking but nothing will ever wake it; as in
+        // context_switch, it runs straight through.
+        if self.threads.contains(&caller) && self.task(caller).is_blocking() {
             self.task(caller).set_waiting(true);
             let cond = addr_of_mut!(self.t(caller).suspend_cond);
             self.task_provider.park(ParkingHandle::new(cond));
@@ -258,9 +291,11 @@ impl State {
         if !self.task(caller).startup_done() {
             self.task(caller).set_startup_done(true);
         }
+        virt::tick();
 
         let event = self.info.get(&caller).and_then(|t| t.next_event);
-        self.scheduler.on_event(event.as_ref());
+        let caller_task = self.task(caller).creation_idx();
+        self.scheduler.on_event(caller_task, event.as_ref());
         if event.is_some() {
             self.clear_event(caller);
         }
@@ -275,7 +310,26 @@ impl State {
                     })
                 ));
 
-        if let Some(choice) = self.choose_task(caller, avoid_self) {
+        let choice = self.choose_task(caller, avoid_self);
+        if scheduler::logging_enabled() {
+            let blocked = if self.task(caller).is_blocking() {
+                " blocked"
+            } else {
+                ""
+            };
+            match choice {
+                Some(choice) if choice.pthread != caller => match choice.creation_idx {
+                    Some(to) => log_line!("[rsched] Switch(to={to}{blocked}) task={caller_task}"),
+                    None => log_line!(
+                        "[rsched] Switch(to=domain {}{blocked}) task={caller_task}",
+                        choice.domain
+                    ),
+                },
+                Some(_) => {}
+                None => log_line!("[rsched] NoRunnableTask({blocked}) task={caller_task}"),
+            }
+        }
+        if let Some(choice) = choice {
             self.mark_waiting(caller, true);
             if let SwitchResult::WakeLocal {
                 pthread,
@@ -295,9 +349,14 @@ impl State {
     /// on I/O, this waits in the kernel for one of them.
     unsafe fn choose_task(&mut self, caller: PthreadT, avoid_self: bool) -> Option<TaskChoice> {
         task_provider::wake_io_waiters(false);
+        self.expire_due_waits();
         loop {
             if let Some(choice) = self.choose_runnable_task(caller, avoid_self) {
                 return Some(choice);
+            }
+            // Deadlines pass in virtual time: once no task can run.
+            if self.expire_timed_wait() {
+                continue;
             }
             if !task_provider::wake_io_waiters(true) {
                 return None;
@@ -862,6 +921,11 @@ pub unsafe extern "C" fn rsched_process_exit() {
     // run next. Retire them first so that one of them blocked on I/O does
     // not make the scheduler wait for a descriptor nobody will touch.
     task_provider::deactivate_current_domain_tasks();
+    // The exit itself can make a waiter's descriptor ready, such as a
+    // parent's pidfd in waitpid or the other end of a pipe, but only once
+    // this process is gone. Waiting for that here would deadlock, so wake
+    // the waiters to check again in their own processes.
+    task_provider::wake_all_io_waiters();
     let next = st().choose_task(0 as PthreadT, false);
     st().task_provider.process_exit(next);
     rsched_gunlock();
@@ -877,17 +941,32 @@ pub unsafe extern "C" fn rsched_process_exit_status(status: libc::c_int) -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_fork() -> libc::pid_t {
     ensure_init();
-    // The instrumented-libc depth is keyed by thread id, so the child starts
-    // at 0; give it the caller's depth so the libc fork wrapper's exit does
-    // not underflow it.
+    st().task_provider.fork()
+}
+
+/// The caller's rsched recursion depth, for a forked child to inherit with
+/// [`inherit_depth`].
+pub(crate) fn fork_depth() -> u32 {
     #[cfg(feature = "instrumented-libc")]
-    let depth = instrumented_depth_load();
-    let pid = st().task_provider.fork();
-    #[cfg(feature = "instrumented-libc")]
-    if pid == 0 {
-        instrumented_depth_store(depth);
+    {
+        instrumented_depth_load()
     }
-    pid
+    #[cfg(not(feature = "instrumented-libc"))]
+    {
+        0
+    }
+}
+
+/// Gives a forked child its parent's recursion depth. The instrumented-libc
+/// depth is keyed by thread id, so the child's new thread starts without
+/// one; it must inherit it before running any wrapped libc function, or a
+/// call rsched makes internally, such as the fork gate's `sem_wait`, looks
+/// like an outermost application call and re-enters the scheduler.
+pub(crate) fn inherit_depth(depth: u32) {
+    #[cfg(feature = "instrumented-libc")]
+    instrumented_depth_store(depth);
+    #[cfg(not(feature = "instrumented-libc"))]
+    let _ = depth;
 }
 
 #[unsafe(no_mangle)]
@@ -907,14 +986,25 @@ pub unsafe extern "C" fn rsched_syscall(
     if number == libc::SYS_fork {
         return rsched_fork().into();
     }
+    if let Some(r) = virt_syscall(number, &[a0, a1, a2, a3, a4, a5]) {
+        return io::libc_result(r);
+    }
     if io::is_modeled(number) {
         return io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5]);
     }
     if let Some(r) = io::guarded_syscall(number, &[a0, a1, a2, a3, a4, a5]) {
         return io::libc_result(r);
     }
+    if virt::waits_in_kernel(number) {
+        let args = [a0, a1, a2, a3, a4, a5];
+        return virt::kernel_wait(number, args, || {
+            libc::syscall(number, a0, a1, a2, a3, a4, a5)
+        });
+    }
 
-    libc::syscall(number, a0, a1, a2, a3, a4, a5)
+    let r = libc::syscall(number, a0, a1, a2, a3, a4, a5);
+    files::after_syscall(number, &[a0, a1, a2, a3, a4, a5], r);
+    r
 }
 
 /// Runs a syscall instruction reached outside rsched that rsched must run
@@ -923,6 +1013,40 @@ pub unsafe extern "C" fn rsched_syscall(
 /// closes descriptors spares rsched's reserved ones. Stores the raw syscall
 /// result (or -errno) in `ret` and returns true; returns false when the
 /// instruction should run unchanged, including thread-style clones.
+/// Runs `getrandom`, `clock_gettime`, or a sleep against rsched's
+/// deterministic models (see `virt` and `sync`), returning the raw result or
+/// -errno; None for other syscalls and before rsched starts.
+unsafe fn virt_syscall(number: libc::c_long, args: &[libc::c_long; 6]) -> Option<libc::c_long> {
+    match number {
+        libc::SYS_getrandom if virt::models_random() => Some(virt::fill_random(
+            args[0] as *mut libc::c_void,
+            args[1] as usize,
+            args[2] as libc::c_uint,
+        )),
+        libc::SYS_nanosleep => Some(
+            match sync::rsched_nanosleep(args[0] as *const _, args[1] as *mut _) {
+                0 => 0,
+                _ => -libc::c_long::from(*libc::__errno_location()),
+            },
+        ),
+        libc::SYS_clock_nanosleep => Some(-libc::c_long::from(sync::rsched_clock_nanosleep(
+            args[0] as libc::clockid_t,
+            args[1] as libc::c_int,
+            args[2] as *const _,
+            args[3] as *mut _,
+        ))),
+        libc::SYS_clock_gettime => {
+            let r = virt::rsched_clock_gettime(args[0] as libc::clockid_t, args[1] as *mut _);
+            Some(if r == 0 {
+                0
+            } else {
+                -libc::c_long::from(*libc::__errno_location())
+            })
+        }
+        _ => None,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_process_syscall(
     number: libc::c_long,
@@ -934,6 +1058,10 @@ pub unsafe extern "C" fn rsched_process_syscall(
     }
     let args = &*(args as *const [libc::c_long; 6]);
     if let Some(r) = io::guarded_syscall(number, args) {
+        *ret = r;
+        return true;
+    }
+    if let Some(r) = virt_syscall(number, args) {
         *ret = r;
         return true;
     }
@@ -969,12 +1097,19 @@ pub unsafe extern "C" fn rsched_libc_syscall(
     let outermost = rsched_try_enter();
     let result = if outermost && number == libc::SYS_clone {
         rsched_syscall(number, a0, a1, a2, a3, a4, a5)
+    } else if outermost && let Some(r) = virt_syscall(number, &[a0, a1, a2, a3, a4, a5]) {
+        io::libc_result(r)
     } else if outermost && io::is_modeled(number) {
         io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5])
     } else if let Some(r) = io::guarded_syscall(number, &[a0, a1, a2, a3, a4, a5])
         && outermost
     {
         io::libc_result(r)
+    } else if outermost && virt::waits_in_kernel(number) {
+        let args = [a0, a1, a2, a3, a4, a5];
+        virt::kernel_wait(number, args, || {
+            rsched_raw_syscall(number, a0, a1, a2, a3, a4, a5)
+        })
     } else {
         rsched_raw_syscall(number, a0, a1, a2, a3, a4, a5)
     };
@@ -1039,7 +1174,11 @@ pub unsafe extern "C" fn rsched_waitpid(
         if r != 0 {
             return r;
         }
-        rsched_sched_yield();
+        // A blocked waiter lets the child's timed waits expire; one that
+        // yields stays runnable and holds them off.
+        if !io::wait_for_child(pid) {
+            rsched_sched_yield();
+        }
     }
 }
 
@@ -1143,7 +1282,7 @@ fn instrumented_libc_ready() -> bool {
 /// Increment depth; return true iff this is the outermost (non-reentrant) call.
 /// Called by instrumented libc wrappers on every entry.
 #[unsafe(no_mangle)]
-pub fn rsched_try_enter() -> bool {
+pub extern "C" fn rsched_try_enter() -> bool {
     if !instrumented_libc_ready() {
         return false;
     }
@@ -1159,7 +1298,7 @@ pub fn rsched_try_enter() -> bool {
 
 /// Decrement depth. Called by instrumented libc wrappers on every exit.
 #[unsafe(no_mangle)]
-pub fn rsched_exit() {
+pub extern "C" fn rsched_exit() {
     if !instrumented_libc_ready() {
         return;
     }
@@ -1366,6 +1505,7 @@ pub unsafe extern "C" fn rsched_init() {
     }
     let seed = seed_from_env();
     STATE = Some(State::new(seed));
+    virt::start(seed);
     let first_process = st().task_provider.current_domain() < 0;
     st().task_provider.register_current_domain(first_process);
     #[cfg(not(feature = "instrumented-libc"))]
@@ -1406,6 +1546,7 @@ pub unsafe extern "C" fn rsched_reinit(seed: u64) {
     // Drop any existing state (previous test run's threads/mutexes/etc.).
     STATE = None;
     STATE = Some(State::new(seed));
+    virt::start(seed);
     INITED.store(true, Ordering::SeqCst);
     if st().task_provider.current_domain() < 0 {
         st().task_provider.register_current_domain(true);
@@ -1981,7 +2122,19 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
     cond: *mut CondT,
     lock: *mut MutexT,
 ) -> libc::c_int {
+    cond_wait_impl(cond, lock, None)
+}
+
+/// Waits on `cond`, which `deadline`, if any, ends with ETIMEDOUT.
+pub(crate) unsafe fn cond_wait_impl(
+    cond: *mut CondT,
+    lock: *mut MutexT,
+    deadline: Option<sync::Deadline>,
+) -> libc::c_int {
     ensure_init();
+    if !sync::valid_deadline(deadline) {
+        return libc::EINVAL;
+    }
     let ckey = cond as usize;
     let lkey = lock as usize;
     rsched_glock();
@@ -2002,13 +2155,11 @@ pub unsafe extern "C" fn rsched_pthread_cond_wait(
         })
         .waiters
         .push(caller);
-    st().task(caller).set_blocking(true);
-    st().context_switch(caller);
-    st().park_if_blocked(caller);
+    let expired = st().block_on(caller, sync::WaitOn::Cond(ckey), deadline);
 
     st().mutex_lock(lkey, caller);
     rsched_gunlock();
-    0
+    if expired { libc::ETIMEDOUT } else { 0 }
 }
 
 // ── rsched_pthread_cond_signal ────────────────────────────────────────────

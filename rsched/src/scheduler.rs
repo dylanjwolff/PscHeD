@@ -1,25 +1,18 @@
 use crate::event::{AccessKind, Event, EventKind};
 
-pub(crate) const DFS_MAX_EVENTS: usize = 256;
+/// Branching scheduling points DFS records per execution. The path lives in
+/// process-shared memory, which is mapped lazily, so unused depth costs no
+/// memory. Past this depth an execution continues without branching.
+pub(crate) const DFS_MAX_EVENTS: usize = 1 << 20;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
 pub(crate) struct DfsPath {
     len: usize,
     choices: [u16; DFS_MAX_EVENTS],
 }
 
 impl DfsPath {
-    const EMPTY: Self = Self {
-        len: 0,
-        choices: [0; DFS_MAX_EVENTS],
-    };
-
     fn push(&mut self, choice: usize) {
-        assert!(
-            self.len < DFS_MAX_EVENTS,
-            "rsched: dfs execution exceeded DFS_MAX_EVENTS"
-        );
         assert!(
             choice <= u16::MAX as usize,
             "rsched: dfs choice ordinal does not fit in u16"
@@ -38,13 +31,16 @@ impl DfsPath {
     }
 }
 
+/// Zero-initialized in process-shared memory. It is several megabytes, so it
+/// is only ever reset in place, never built as a value.
 #[repr(C)]
-#[derive(Clone, Copy)]
 pub(crate) struct SharedDfsState {
     initialized: u8,
     in_progress: u8,
     has_next: u8,
-    _pad: [u8; 5],
+    /// An execution reached DFS_MAX_EVENTS; exploration is incomplete.
+    truncated: u8,
+    _pad: [u8; 4],
     completed: usize,
     path: DfsPath,
     replay_depth: usize,
@@ -52,19 +48,15 @@ pub(crate) struct SharedDfsState {
 }
 
 impl SharedDfsState {
-    pub(crate) const EMPTY: Self = Self {
-        initialized: 0,
-        in_progress: 0,
-        has_next: 0,
-        _pad: [0; 5],
-        completed: 0,
-        path: DfsPath::EMPTY,
-        replay_depth: 0,
-        choices_at_depth: [0; DFS_MAX_EVENTS],
-    };
-
     fn reset(&mut self) {
-        *self = Self::EMPTY;
+        // Entries past the recorded prefix are rewritten before they are read.
+        self.path.choices[..self.path.len].fill(0);
+        self.choices_at_depth[..self.replay_depth.min(DFS_MAX_EVENTS)].fill(0);
+        self.path.len = 0;
+        self.replay_depth = 0;
+        self.completed = 0;
+        self.in_progress = 0;
+        self.truncated = 0;
         self.initialized = 1;
         self.has_next = 1;
     }
@@ -83,17 +75,13 @@ impl SharedDfsState {
         if self.has_next == 0 {
             return;
         }
+        self.choices_at_depth[..self.replay_depth.min(DFS_MAX_EVENTS)].fill(0);
         self.replay_depth = 0;
-        self.choices_at_depth = [0; DFS_MAX_EVENTS];
         self.has_next = 0;
         self.in_progress = 1;
     }
 
     fn record_choice_count(&mut self, depth: usize, choices: usize) {
-        assert!(
-            depth < DFS_MAX_EVENTS,
-            "rsched: dfs execution exceeded DFS_MAX_EVENTS"
-        );
         assert!(
             choices <= u16::MAX as usize,
             "rsched: dfs choice count does not fit in u16"
@@ -103,6 +91,16 @@ impl SharedDfsState {
 
     fn next_choice(&mut self, choices: usize) -> usize {
         let depth = self.replay_depth;
+        if depth >= DFS_MAX_EVENTS {
+            if self.truncated == 0 {
+                self.truncated = 1;
+                crate::log_line!(
+                    "rsched: dfs execution exceeded {DFS_MAX_EVENTS} branching points; \
+                     later points do not branch, so exploration is incomplete"
+                );
+            }
+            return 0;
+        }
         self.record_choice_count(depth, choices);
         let choice = self.path.choice(depth).unwrap_or(0);
         assert!(
@@ -134,7 +132,8 @@ impl SharedDfsState {
             }
         }
         self.has_next = 0;
-        self.path = DfsPath::EMPTY;
+        self.path.choices[..self.path.len].fill(0);
+        self.path.len = 0;
     }
 }
 
@@ -150,9 +149,9 @@ fn dfs_state() -> &'static mut SharedDfsState {
 pub trait Scheduler: Sized {
     fn choose(&mut self, is_blocking: &[bool]) -> Option<usize>;
 
-    /// Called just before each scheduling decision with the event the current
-    /// thread is about to execute.  Default implementation is a no-op.
-    fn on_event(&mut self, _event: Option<&Event>) {}
+    /// Called just before each scheduling decision with the event that task
+    /// `task` (its creation index) is about to execute. Default: no-op.
+    fn on_event(&mut self, _task: usize, _event: Option<&Event>) {}
 
     /// Called when the current execution is complete and the scheduler can
     /// commit any run-local state.  Default implementation is a no-op.
@@ -244,13 +243,28 @@ pub enum SchedulerImpl {
 
 impl SchedulerImpl {
     pub fn new(seed: u64) -> Self {
-        let logging = env_is("RSCHED_LOG", "1");
+        let logging = logging_enabled();
         let use_dfs = env_is("RSCHED_SCHEDULER", "dfs");
         match (use_dfs, logging) {
             (true, true) => Self::LoggingDfs(LoggingScheduler::new(DfsScheduler::new())),
             (true, false) => Self::Dfs(DfsScheduler::new()),
             (false, true) => Self::LoggingRandom(LoggingScheduler::new(RandomWalk::new(seed))),
             (false, false) => Self::Random(RandomWalk::new(seed)),
+        }
+    }
+}
+
+/// Whether `RSCHED_LOG=1`; read once, since logging sites are hot.
+pub(crate) fn logging_enabled() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static LOGGING: AtomicU8 = AtomicU8::new(0);
+    match LOGGING.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let enabled = env_is("RSCHED_LOG", "1");
+            LOGGING.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
+            enabled
         }
     }
 }
@@ -284,12 +298,12 @@ impl Scheduler for SchedulerImpl {
         }
     }
 
-    fn on_event(&mut self, event: Option<&Event>) {
+    fn on_event(&mut self, task: usize, event: Option<&Event>) {
         match self {
-            Self::Random(scheduler) => scheduler.on_event(event),
-            Self::Dfs(scheduler) => scheduler.on_event(event),
-            Self::LoggingRandom(scheduler) => scheduler.on_event(event),
-            Self::LoggingDfs(scheduler) => scheduler.on_event(event),
+            Self::Random(scheduler) => scheduler.on_event(task, event),
+            Self::Dfs(scheduler) => scheduler.on_event(task, event),
+            Self::LoggingRandom(scheduler) => scheduler.on_event(task, event),
+            Self::LoggingDfs(scheduler) => scheduler.on_event(task, event),
         }
     }
 
@@ -342,7 +356,7 @@ impl Scheduler for DfsScheduler {
         Some(runnable[choice])
     }
 
-    fn on_event(&mut self, event: Option<&Event>) {
+    fn on_event(&mut self, _task: usize, event: Option<&Event>) {
         self.should_branch = !matches!(
             event.map(|event| event.kind),
             None | Some(EventKind::SchedYield)
@@ -396,32 +410,39 @@ impl<S: Scheduler> Scheduler for LoggingScheduler<S> {
         self.inner.choose(is_blocking)
     }
 
-    fn on_event(&mut self, event: Option<&Event>) {
+    fn on_event(&mut self, task: usize, event: Option<&Event>) {
         if let Some(ev) = event {
             match ev.kind {
                 EventKind::ThreadCreate => {
-                    crate::log_line!("[rsched] ThreadCreate @ 0x{:x}", ev.instr_addr);
+                    crate::log_line!("[rsched] ThreadCreate @ 0x{:x} task={task}", ev.instr_addr);
                 }
                 EventKind::LockAcq { lock } => {
                     crate::log_line!(
-                        "[rsched] LockAcq(lock=0x{:x}) @ 0x{:x}",
+                        "[rsched] LockAcq(lock=0x{:x}) @ 0x{:x} task={task}",
                         lock as usize,
                         ev.instr_addr
                     );
                 }
                 EventKind::LockRel { lock } => {
                     crate::log_line!(
-                        "[rsched] LockRel(lock=0x{:x}) @ 0x{:x}",
+                        "[rsched] LockRel(lock=0x{:x}) @ 0x{:x} task={task}",
                         lock as usize,
                         ev.instr_addr
                     );
                 }
                 EventKind::SchedYield => {
-                    crate::log_line!("[rsched] SchedYield @ 0x{:x}", ev.instr_addr);
+                    crate::log_line!("[rsched] SchedYield @ 0x{:x} task={task}", ev.instr_addr);
+                }
+                EventKind::Sync { op, obj } => {
+                    crate::log_line!(
+                        "[rsched] Sync({op}, obj=0x{:x}) @ 0x{:x} task={task}",
+                        obj as usize,
+                        ev.instr_addr
+                    );
                 }
                 EventKind::Io { fd, syscall } => {
                     crate::log_line!(
-                        "[rsched] Io(syscall={syscall}, fd={fd}) @ 0x{:x}",
+                        "[rsched] Io(syscall={syscall}, fd={fd}) @ 0x{:x} task={task}",
                         ev.instr_addr
                     );
                 }
@@ -436,14 +457,14 @@ impl<S: Scheduler> Scheduler for LoggingScheduler<S> {
                         AccessKind::ReadWrite => "RW",
                     };
                     crate::log_line!(
-                        "[rsched] MemOp({kind}, mem=0x{:x}, size={size}) @ 0x{:x}",
+                        "[rsched] MemOp({kind}, mem=0x{:x}, size={size}) @ 0x{:x} task={task}",
                         mem_addr as usize,
                         ev.instr_addr
                     );
                 }
             }
         }
-        self.inner.on_event(event);
+        self.inner.on_event(task, event);
     }
 
     fn finish(&mut self) {

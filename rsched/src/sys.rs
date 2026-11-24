@@ -1,4 +1,4 @@
-//! Safe wrappers for the descriptor syscalls rsched makes itself.
+//! Safe wrappers for the descriptor and file syscalls rsched makes itself.
 //!
 //! Every call goes through rsched's own syscall instruction,
 //! [`raw_syscall6`]: libc's functions could re-enter rsched's instrumented
@@ -8,6 +8,7 @@
 
 use crate::seccomp::raw_syscall6;
 use libc::{c_int, c_long};
+use std::ffi::CStr;
 use std::io;
 use std::mem::ManuallyDrop;
 use std::ops::BitOr;
@@ -189,4 +190,64 @@ impl Drop for Epoll {
     fn drop(&mut self) {
         let _ = close(self.fd);
     }
+}
+
+// ── File metadata, for the virtual file times in `files` ──────────────────
+
+/// The kernel's `struct statx`, generated from the Linux UAPI headers.
+pub(crate) use linux_raw_sys::general::{
+    STATX_ATIME, STATX_CTIME, STATX_INO, STATX_MTIME, statx as Statx,
+};
+
+/// The metadata of the file open as `fd`.
+pub(crate) fn fstat(fd: c_int) -> io::Result<libc::stat> {
+    // SAFETY: all-zero is a valid `stat`.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let buf = &mut st as *mut libc::stat as c_long;
+    syscall(libc::SYS_fstat, fd.into(), buf, 0, 0)?;
+    Ok(st)
+}
+
+/// The metadata of `path`, relative to `dirfd`, as `fstatat` reports it.
+pub(crate) fn fstatat(dirfd: c_int, path: &CStr, flags: c_int) -> io::Result<libc::stat> {
+    // SAFETY: all-zero is a valid `stat`.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let buf = &mut st as *mut libc::stat as c_long;
+    let path = path.as_ptr() as c_long;
+    syscall(libc::SYS_newfstatat, dirfd.into(), path, buf, flags.into())?;
+    Ok(st)
+}
+
+/// The metadata of `path`, relative to `dirfd`, as `statx` reports it.
+pub(crate) fn statx(dirfd: c_int, path: &CStr, flags: c_int, mask: u32) -> io::Result<Statx> {
+    // SAFETY: all-zero is a valid `Statx`.
+    let mut stx: Statx = unsafe { std::mem::zeroed() };
+    let buf = &mut stx as *mut Statx as c_long;
+    let path = path.as_ptr() as c_long;
+    // SAFETY: as in `syscall`; statx takes a fifth argument.
+    let r = unsafe {
+        raw_syscall6(
+            libc::SYS_statx,
+            dirfd.into(),
+            path,
+            flags.into(),
+            mask.into(),
+            buf,
+            0,
+        )
+    };
+    if (-4095..0).contains(&r) {
+        return Err(io::Error::from_raw_os_error(-r as c_int));
+    }
+    Ok(stx)
+}
+
+/// Sets the length of the file open as `fd`.
+pub(crate) fn ftruncate(fd: c_int, length: libc::off_t) -> io::Result<()> {
+    syscall(libc::SYS_ftruncate, fd.into(), length, 0, 0).map(drop)
+}
+
+/// Sets the length of the file at `path`.
+pub(crate) fn truncate(path: &CStr, length: libc::off_t) -> io::Result<()> {
+    syscall(libc::SYS_truncate, path.as_ptr() as c_long, length, 0, 0).map(drop)
 }

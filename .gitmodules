@@ -10,4 +10,4 @@
 [submodule "rsched/glibc/glibc"]
 	path = rsched/glibc/glibc
 	url = https://sourceware.org/git/glibc.git
-	branch = release/2.35/master
+	branch = release/2.39/master
