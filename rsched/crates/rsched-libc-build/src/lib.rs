@@ -970,6 +970,19 @@ fn glibc_build_library_paths(build_dir: &Path) -> String {
     .join(":")
 }
 
+/// Shell lines, shared by the launchers, that set `no_aslr` to a command
+/// prefix running the program without address-space randomization. The
+/// prefix must run before LD_PRELOAD is set, or `setarch` itself would load
+/// the instrumented libc: programs
+/// hash addresses, such as thread ids in DuckDB's lock-free queues, and
+/// those hashes then steer the schedule differently on every run of one
+/// seed. `RSCHED_ASLR=1` keeps randomization, as does a host without
+/// `setarch` or one that forbids changing the personality.
+const NO_ASLR: &str = "no_aslr=\n\
+     if [ -z \"${RSCHED_ASLR:-}\" ] && setarch \"$(uname -m)\" -R true 2>/dev/null; then\n\
+       no_aslr=\"setarch $(uname -m) -R\"\n\
+     fi\n";
+
 /// Writes the launcher. It passes the preload to the bundled loader instead
 /// of exporting LD_PRELOAD, so programs the application starts, such as
 /// `/bin/sh` from `system`, load with the host libc as usual.
@@ -978,7 +991,10 @@ fn write_glibc_runner(path: &Path) -> Result<()> {
         path,
         "#!/bin/sh\n\
          set -eu\n\
-         root=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
+         "
+        .to_owned()
+            + NO_ASLR
+            + "root=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
          library_path=\"$root/lib\"\n\
          if [ -n \"${RSCHED_EXTRA_LIBRARY_PATH:-}\" ]; then\n\
            library_path=\"$RSCHED_EXTRA_LIBRARY_PATH:$library_path\"\n\
@@ -988,10 +1004,10 @@ fn write_glibc_runner(path: &Path) -> Result<()> {
            preload=\"$RSCHED_EXTRA_PRELOAD:$preload\"\n\
          fi\n\
          if [ -n \"${RSCHED_DIRECT_EXEC:-}\" ]; then\n\
-           GLIBC_TUNABLES='glibc.pthread.rseq=0' LD_PRELOAD=\"$preload\" \
-             LD_LIBRARY_PATH=\"$library_path\" exec \"$@\"\n\
+           exec $no_aslr env GLIBC_TUNABLES='glibc.pthread.rseq=0' LD_PRELOAD=\"$preload\" \
+             LD_LIBRARY_PATH=\"$library_path\" \"$@\"\n\
          fi\n\
-         GLIBC_TUNABLES='glibc.pthread.rseq=0' exec \"$root/ld-linux-x86-64.so.2\" \
+         GLIBC_TUNABLES='glibc.pthread.rseq=0' exec $no_aslr \"$root/ld-linux-x86-64.so.2\" \
            --preload \"$preload\" --library-path \"$library_path\" \"$@\"\n",
     )?;
     executable(path)
@@ -1002,9 +1018,12 @@ fn write_musl_runner(path: &Path) -> Result<()> {
         path,
         "#!/bin/sh\n\
          set -eu\n\
-         root=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
-         LD_PRELOAD=\"$root/lib/libc.so\" \
-           exec \"$root/ld-musl-x86_64.so.1\" --library-path \"$root/lib\" \"$@\"\n",
+         "
+        .to_owned()
+            + NO_ASLR
+            + "root=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
+         exec $no_aslr env LD_PRELOAD=\"$root/lib/libc.so\" \
+           \"$root/ld-musl-x86_64.so.1\" --library-path \"$root/lib\" \"$@\"\n",
     )?;
     executable(path)
 }

@@ -136,6 +136,7 @@ Useful environment variables:
 | `RSCHED_LOG` | unset | Set to `1` to log scheduling decisions |
 | `RSCHED_FUZZ_SCHEDULES` | `5` | Schedules executed for each libFuzzer input |
 | `RSCHED_SECCOMP` | unset | Set to `1` on Linux x86_64 to trap unsupported raw synchronization syscalls and route I/O issued outside rsched through the I/O model |
+| `RSCHED_ASLR` | unset | Set to `1` to keep address-space randomization when running through an instrumented-libc runner |
 
 ## Synchronization and time
 
@@ -160,7 +161,7 @@ when they report that it passed. Time never depends on how long they
 really blocked.
 
 So that one seed always takes the same path, programs also read time,
-their CPU, and randomness from deterministic models:
+their CPU, and randomness from deterministic models, and run without address-space randomization:
 
 - `clock_gettime` on the realtime, monotonic, and boot-time clocks returns
   virtual time. It starts at a fixed time, 2024-01-01T00:00:00Z for the
@@ -181,6 +182,14 @@ their CPU, and randomness from deterministic models:
   stdio's internal writes are stamped too; with instrumented musl, only the
   public functions are.
 - `sched_getcpu` reports a CPU derived from the calling task.
+- Addresses stay fixed. Programs hash them, as DuckDB's lock-free queues
+  hash thread ids (`pthread_self`), and a different hash takes a different
+  number of atomic steps, so with ASLR one seed would schedule differently
+  on every run. The instrumented-libc runners start the program under
+  `setarch -R` unless `RSCHED_ASLR=1` is set or the host does not allow it;
+  run source-mode programs under `setarch -R` yourself. Addresses also
+  depend on the environment and arguments, so replay a seed with the same
+  ones. rsched itself orders runnable tasks by creation, not by address.
 - `getrandom`, including `syscall(SYS_getrandom)` and, under
   `RSCHED_SECCOMP=1`, the raw syscall, returns bytes from a generator seeded
   by `RANDOM_SEED`. Reads of `/dev/urandom` are not modeled.

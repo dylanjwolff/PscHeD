@@ -407,6 +407,9 @@ impl State {
             if avoid_self && tasks.len() > 1 {
                 tasks.retain(|task| task.pthread != caller);
             }
+            // `threads` is ordered by pthread_t, an address that ASLR moves
+            // between runs; the seed must pick from a list in creation order.
+            tasks.sort_by_key(|task| task.creation_idx);
             let blocking = vec![false; tasks.len()];
             self.choose_index(&blocking).map(|idx| tasks[idx])
         }
@@ -1613,6 +1616,8 @@ pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
             local_tasks.push(pt);
         }
     }
+    // In creation order, not by address (see `choose_runnable_task`).
+    local_tasks.sort_by_key(|&pt| st().task(pt).creation_idx());
     if !local_tasks.is_empty() {
         let blocking = vec![false; local_tasks.len()];
         let idx = st()

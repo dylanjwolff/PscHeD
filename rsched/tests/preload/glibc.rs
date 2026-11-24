@@ -187,3 +187,53 @@ int main(void)
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn runner_keeps_addresses_fixed_across_runs() {
+    // Programs hash addresses such as pthread_self, and those hashes steer
+    // the schedule, so one seed replays only if every run gets the same
+    // addresses. The runner turns address-space randomization off.
+    let allowed = Command::new("setarch")
+        .args([std::env::consts::ARCH, "-R", "true"])
+        .status()
+        .is_ok_and(|status| status.success());
+    if !allowed {
+        eprintln!("skipped: this host does not allow setarch -R");
+        return;
+    }
+    let glibc = build_instrumented_glibc();
+    let temp = temp_dir();
+    let source = temp.join("addresses.c");
+    let binary = temp.join("addresses");
+    std::fs::write(
+        &source,
+        r#"
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+static __thread int local;
+static void *worker(void *arg) { return (void *)&local; }
+int main(void)
+{
+    pthread_t thread;
+    void *worker_local;
+    pthread_create(&thread, 0, worker, 0);
+    pthread_join(thread, &worker_local);
+    printf("main=%p worker=%p thread=%#lx heap=%p\n", (void *)&local, worker_local,
+           (unsigned long)thread, malloc(64));
+    return 0;
+}
+"#,
+    )
+    .expect("write address test");
+    let mut command = Command::new("gcc");
+    command.args(["-pthread", "-o"]).arg(&binary).arg(&source);
+    run(command, "build address test");
+    let addresses = || {
+        let mut command = Command::new(&glibc.preload_runner);
+        command.arg(&binary);
+        String::from_utf8_lossy(&run(command, "run address test").stdout).into_owned()
+    };
+    let first = addresses();
+    assert_eq!(first, addresses(), "addresses moved between runs");
+}
