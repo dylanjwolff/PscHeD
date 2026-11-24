@@ -160,7 +160,7 @@ when they report that it passed. Time never depends on how long they
 really blocked.
 
 So that one seed always takes the same path, programs also read time,
-their CPU, and randomness from deterministic models:
+their CPU, and randomness from deterministic models, and run without address-space randomization:
 
 - `clock_gettime` on the realtime, monotonic, and boot-time clocks returns
   virtual time. It starts at a fixed time, 2024-01-01T00:00:00Z for the
@@ -181,6 +181,12 @@ their CPU, and randomness from deterministic models:
   stdio's internal writes are stamped too; with instrumented musl, only the
   public functions are.
 - `sched_getcpu` reports a CPU derived from the calling task.
+- Addresses stay fixed. Programs hash them, and a different hash takes a
+  different number of atomic steps, so with ASLR one seed would schedule
+  differently on every run. The instrumented-libc runners start the program
+  under `setarch -R`, and warn when the host does not allow it; run
+  source-mode programs under `setarch -R` yourself. Addresses also depend on
+  the environment and arguments, so replay a seed with the same ones.
 - `getrandom`, including `syscall(SYS_getrandom)` and, under
   `RSCHED_SECCOMP=1`, the raw syscall, returns bytes from a generator seeded
   by `RANDOM_SEED`. Reads of `/dev/urandom` are not modeled.
