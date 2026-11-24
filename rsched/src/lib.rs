@@ -1653,16 +1653,31 @@ pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
         let cond_ptr = addr_of_mut!(st().t(next).suspend_cond);
         st().task_provider.wake(ParkingHandle::new(cond_ptr));
     } else if let Some(choice) = st().choose_task(0 as PthreadT, false) {
-        let next = if !cfg!(feature = "coro")
-            && choice.domain != st().task_provider.current_domain()
-            && !st().threads.is_empty()
-        {
+        let domain = st().task_provider.current_domain();
+        let next = if choice.domain != domain && !st().threads.is_empty() {
             // This thread runs its process's turn, and the process's other
-            // threads are all parked on their own conditions. Hand the turn
-            // to the other process and wait for it to come back here, as a
-            // switching thread does, then pass it to the local task chosen
-            // then. Exiting at once would leave no thread to take the turn.
-            st().task_provider.hand_off_and_wait(choice)
+            // tasks are all blocked. Hand the turn to the other process and
+            // wait for it to come back here, as a switching task does, then
+            // pass it to the local task chosen then. Exiting at once would
+            // leave no task to take the turn back; with coroutines, the
+            // blocked task that resumed this one would run on without it.
+            st().task_provider
+                .hand_off_and_wait(choice)
+                .and_then(|pthread| {
+                    let local = TaskChoice {
+                        creation_idx: None,
+                        domain,
+                        pthread,
+                    };
+                    match st().task_provider.switch_task(
+                        local,
+                        0 as PthreadT,
+                        SwitchMode::ReleaseCurrent,
+                    ) {
+                        SwitchResult::WakeLocal { pthread, .. } => Some(pthread),
+                        SwitchResult::Done => None,
+                    }
+                })
         } else {
             match st().task_provider.switch_task(
                 choice,
