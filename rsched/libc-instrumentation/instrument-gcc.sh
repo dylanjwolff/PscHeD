@@ -5,6 +5,11 @@ set -euo pipefail
 : "${RSCHED_WORKSPACE:?set RSCHED_WORKSPACE to the rsched workspace root}"
 
 compiler=${RSCHED_GLIBC_CC:-gcc}
+# Ubuntu's gcc defines _FORTIFY_SOURCE when optimizing unless the driver
+# itself sees -U or -D _FORTIFY_SOURCE; glibc's -Wp,-U_FORTIFY_SOURCE does
+# not count, and glibc 2.39's fortified syslog then fails to build. A later
+# -D_FORTIFY_SOURCE on the command line, as in glibc's own tests, still wins.
+set -- -U_FORTIFY_SOURCE "$@"
 args=("$@")
 compile=false
 source_file=
