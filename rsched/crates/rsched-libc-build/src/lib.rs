@@ -971,16 +971,18 @@ fn glibc_build_library_paths(build_dir: &Path) -> String {
 }
 
 /// Shell lines, shared by the launchers, that set `no_aslr` to a command
-/// prefix running the program without address-space randomization. The
+/// prefix running the program without address-space randomization: programs
+/// hash addresses, and a different hash takes a different number of atomic
+/// steps, so with ASLR one seed schedules differently on every run. The
 /// prefix must run before LD_PRELOAD is set, or `setarch` itself would load
-/// the instrumented libc: programs
-/// hash addresses, such as thread ids in DuckDB's lock-free queues, and
-/// those hashes then steer the schedule differently on every run of one
-/// seed. `RSCHED_ASLR=1` keeps randomization, as does a host without
-/// `setarch` or one that forbids changing the personality.
+/// the instrumented libc. A host without `setarch`, or one that forbids
+/// changing the personality, runs the program with randomization and a
+/// warning.
 const NO_ASLR: &str = "no_aslr=\n\
-     if [ -z \"${RSCHED_ASLR:-}\" ] && setarch \"$(uname -m)\" -R true 2>/dev/null; then\n\
+     if setarch \"$(uname -m)\" -R true 2>/dev/null; then\n\
        no_aslr=\"setarch $(uname -m) -R\"\n\
+     else\n\
+       echo 'rsched: cannot disable ASLR (setarch -R failed); runs of one seed may differ' >&2\n\
      fi\n";
 
 /// Writes the launcher. It passes the preload to the bundled loader instead
