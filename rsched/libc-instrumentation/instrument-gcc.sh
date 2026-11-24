@@ -76,10 +76,8 @@ work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 object="$work_dir/input.o"
 wrapped_object="$work_dir/wrapped.o"
-wrapper_source="$work_dir/wrappers.S"
+wrapper_source="$work_dir/wrappers.c"
 wrapper_object="$work_dir/wrappers.o"
-file_hook_source="$work_dir/file-hooks.c"
-file_hook_object="$work_dir/file-hooks.o"
 symbols_file="$work_dir/symbols"
 
 compile_args=()
@@ -106,77 +104,29 @@ symbol_defined() {
     grep -Fxq "$1" "$symbols_file"
 }
 
+# The wrappers are C macros from wrappers.h; each emit_* call writes one
+# macro call into $wrapper_source.
+emit_c() {
+    printf '%s\n' "$1" >>"$wrapper_source"
+}
+
+visibility() {
+    if [[ "$1" == yes ]]; then echo hidden; else echo default; fi
+}
+
+# Defines `symbol` to run `target` (rsched's model) or, for a nested call,
+# `real`. `activate` marks the instrumented libc ready first.
 emit_wrapper() {
     local symbol=$1
     local target=$2
     local real=$3
-    local activate=$4
-    local hidden=$5
-
-    {
-        printf '\n.text\n'
-        printf '.globl %s\n' "$symbol"
-        if [[ "$hidden" == yes ]]; then
-            printf '.hidden %s\n' "$symbol"
-        fi
-        printf '.type %s, @function\n' "$symbol"
-        printf '%s:\n' "$symbol"
-        printf '    pushq %%rdi\n'
-        printf '    pushq %%rsi\n'
-        printf '    pushq %%rdx\n'
-        printf '    pushq %%rcx\n'
-        printf '    pushq %%r8\n'
-        printf '    pushq %%r9\n'
-        printf '    subq $8, %%rsp\n'
-        if [[ "$activate" == yes ]]; then
-            printf '    call rsched_activate_instrumented_libc@PLT\n'
-        fi
-        printf '    call rsched_try_enter@PLT\n'
-        printf '    addq $8, %%rsp\n'
-        printf '    popq %%r9\n'
-        printf '    popq %%r8\n'
-        printf '    popq %%rcx\n'
-        printf '    popq %%rdx\n'
-        printf '    popq %%rsi\n'
-        printf '    popq %%rdi\n'
-        printf '    testb %%al, %%al\n'
-        printf '    je .Lrsched_nested_%s\n' "$symbol"
-        printf '    subq $8, %%rsp\n'
-        printf '    call %s@PLT\n' "$target"
-        printf '    addq $8, %%rsp\n'
-        printf '    pushq %%rax\n'
-        printf '    pushq %%rdx\n'
-        printf '    subq $8, %%rsp\n'
-        printf '    call rsched_exit@PLT\n'
-        printf '    addq $8, %%rsp\n'
-        printf '    popq %%rdx\n'
-        printf '    popq %%rax\n'
-        printf '    ret\n'
-        printf '.Lrsched_nested_%s:\n' "$symbol"
-        printf '    subq $8, %%rsp\n'
-        printf '    call %s\n' "$real"
-        printf '    addq $8, %%rsp\n'
-        printf '    pushq %%rax\n'
-        printf '    pushq %%rdx\n'
-        printf '    subq $8, %%rsp\n'
-        printf '    call rsched_exit@PLT\n'
-        printf '    addq $8, %%rsp\n'
-        printf '    popq %%rdx\n'
-        printf '    popq %%rax\n'
-        printf '    ret\n'
-        printf '.size %s, .-%s\n' "$symbol" "$symbol"
-    } >>"$wrapper_source"
+    local activate=0
+    [[ "$4" == yes ]] && activate=1
+    emit_c "WRAPPER($symbol, $target, $real, $activate, \"$(visibility "$5")\")"
 }
 
 emit_syscall_trampoline() {
-    {
-        printf '\n.text\n'
-        printf '.globl syscall\n'
-        printf '.type syscall, @function\n'
-        printf 'syscall:\n'
-        printf '    jmp rsched_libc_syscall@PLT\n'
-        printf '.size syscall, .-syscall\n'
-    } >>"$wrapper_source"
+    emit_c "SYSCALL_TRAMPOLINE()"
 }
 
 add_versioned_public_wrappers() {
@@ -191,7 +141,7 @@ add_versioned_public_wrappers() {
         local wrapper="__rsched_public_version_${public}_${index}"
         objcopy_args+=(--redefine-sym "$versioned=$old_alias")
         emit_wrapper "$wrapper" "$rsched" "$real" yes no
-        printf '.symver %s,%s\n' "$wrapper" "$versioned" >>"$wrapper_source"
+        emit_c "WRAPPER_VERSION($wrapper, \"$versioned\")"
         ((index += 1))
     done < <(grep -E "^${public}@@?[^@]+$" "$symbols_file" || true)
 }
@@ -245,18 +195,9 @@ add_io_rewrite() {
 }
 
 # Defines `symbol` as a hook that calls `real` and then reports the call to
-# rsched (see file-hook.h). `width` is int or long, the result type.
+# rsched. `width` is int or long, the result type.
 emit_file_hook() {
-    local symbol=$1
-    local real=$2
-    local nr=$3
-    local width=$4
-    local hidden=$5
-    local visibility=default
-
-    [[ "$hidden" == yes ]] && visibility=hidden
-    printf 'FILE_HOOK(%s, %s, %s, %s, "%s")\n' \
-        "$symbol" "$real" "$nr" "$width" "$visibility" >>"$file_hook_source"
+    emit_c "FILE_HOOK($1, $2, $3, $4, \"$(visibility "$5")\")"
 }
 
 # Hooks `impl` and each defined alias of it, including glibc's hidden
@@ -288,7 +229,6 @@ add_file_hook() {
 
 objcopy_args=()
 : >"$wrapper_source"
-: >"$file_hook_source"
 
 if symbol_defined syscall; then
     objcopy_args+=(--redefine-sym "syscall=__rsched_replaced_syscall")
@@ -393,22 +333,14 @@ if [[ ${#objcopy_args[@]} -eq 0 ]]; then
 fi
 
 objcopy "${objcopy_args[@]}" "$object" "$wrapped_object"
-extra_objects=()
 if [[ -s "$wrapper_source" ]]; then
-    printf '\n.section .note.GNU-stack,"",@progbits\n' >>"$wrapper_source"
-    "$compiler" -c -x assembler "$wrapper_source" -o "$wrapper_object"
-    extra_objects+=("$wrapper_object")
-fi
-if [[ -s "$file_hook_source" ]]; then
-    # Plain C with no glibc headers; built like the rest of libc.so, without
-    # the host's default stack protector or fortification.
+    # Plain C with no glibc headers, built like the rest of libc.so: no
+    # stack protector, which reads TLS that early startup has not set up,
+    # and no fortification.
     "$compiler" -c -x c -O2 -fPIC -fno-stack-protector -U_FORTIFY_SOURCE \
-        -include "$RSCHED_WORKSPACE/libc-instrumentation/file-hook.h" \
-        "$file_hook_source" -o "$file_hook_object"
-    extra_objects+=("$file_hook_object")
-fi
-if [[ ${#extra_objects[@]} -gt 0 ]]; then
-    ld -r "$wrapped_object" "${extra_objects[@]}" -o "$output_file"
+        -include "$RSCHED_WORKSPACE/libc-instrumentation/wrappers.h" \
+        "$wrapper_source" -o "$wrapper_object"
+    ld -r "$wrapped_object" "$wrapper_object" -o "$output_file"
 else
     mv "$wrapped_object" "$output_file"
 fi

@@ -1282,7 +1282,7 @@ fn instrumented_libc_ready() -> bool {
 /// Increment depth; return true iff this is the outermost (non-reentrant) call.
 /// Called by instrumented libc wrappers on every entry.
 #[unsafe(no_mangle)]
-pub fn rsched_try_enter() -> bool {
+pub extern "C" fn rsched_try_enter() -> bool {
     if !instrumented_libc_ready() {
         return false;
     }
@@ -1298,7 +1298,7 @@ pub fn rsched_try_enter() -> bool {
 
 /// Decrement depth. Called by instrumented libc wrappers on every exit.
 #[unsafe(no_mangle)]
-pub fn rsched_exit() {
+pub extern "C" fn rsched_exit() {
     if !instrumented_libc_ready() {
         return;
     }
