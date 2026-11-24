@@ -290,7 +290,13 @@ static int run_once(void) {
     printf("random=");
     for (size_t i = 0; i < sizeof bytes; i++)
         printf("%02x", bytes[i]);
-    printf(" cpu=%d\n", sched_getcpu());
+    /* Time starts at a fixed point and kernel waits move it by constants,
+       so the clocks read the same on every run of a seed. */
+    struct timespec rt, mono;
+    clock_gettime(CLOCK_REALTIME, &rt);
+    clock_gettime(CLOCK_MONOTONIC, &mono);
+    printf(" cpu=%d realtime=%lld.%09ld monotonic=%lld.%09ld\n", sched_getcpu(),
+           (long long)rt.tv_sec, rt.tv_nsec, (long long)mono.tv_sec, mono.tv_nsec);
     return 0;
 }
 

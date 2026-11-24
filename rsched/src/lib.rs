@@ -142,8 +142,6 @@ struct State {
     once_running: HashMap<usize, Vec<PthreadT>>,
     /// Blocked tasks whose wait has a deadline.
     timed_waits: Vec<sync::TimedWait>,
-    /// Scheduling points so far, the clock for the starvation limit.
-    points: u64,
     /// A child thread created but not yet processed at a scheduling point.
     /// rsched_pthread_create stores the (StartArg*, child pthread_t) here and
     /// returns immediately so sanitiser post-create hooks can run.  The next
@@ -173,7 +171,6 @@ impl State {
             rwlocks: HashMap::new(),
             once_running: HashMap::new(),
             timed_waits: Vec::new(),
-            points: 0,
             pending_child: None,
             #[cfg(all(feature = "instrumented-libc", feature = "coro"))]
             pending_pthread_clones: Vec::new(),
@@ -294,7 +291,6 @@ impl State {
         if !self.task(caller).startup_done() {
             self.task(caller).set_startup_done(true);
         }
-        self.points += 1;
         virt::tick();
 
         let event = self.info.get(&caller).and_then(|t| t.next_event);
@@ -353,13 +349,13 @@ impl State {
     /// on I/O, this waits in the kernel for one of them.
     unsafe fn choose_task(&mut self, caller: PthreadT, avoid_self: bool) -> Option<TaskChoice> {
         task_provider::wake_io_waiters(false);
-        self.expire_timed_wait(true);
+        self.expire_due_waits();
         loop {
             if let Some(choice) = self.choose_runnable_task(caller, avoid_self) {
                 return Some(choice);
             }
             // Deadlines pass in virtual time: once no task can run.
-            if self.expire_timed_wait(false) {
+            if self.expire_timed_wait() {
                 continue;
             }
             if !task_provider::wake_io_waiters(true) {
@@ -1000,7 +996,10 @@ pub unsafe extern "C" fn rsched_syscall(
         return io::libc_result(r);
     }
     if virt::waits_in_kernel(number) {
-        return virt::kernel_wait(|| libc::syscall(number, a0, a1, a2, a3, a4, a5));
+        let args = [a0, a1, a2, a3, a4, a5];
+        return virt::kernel_wait(number, args, || {
+            libc::syscall(number, a0, a1, a2, a3, a4, a5)
+        });
     }
 
     let r = libc::syscall(number, a0, a1, a2, a3, a4, a5);
@@ -1014,9 +1013,9 @@ pub unsafe extern "C" fn rsched_syscall(
 /// closes descriptors spares rsched's reserved ones. Stores the raw syscall
 /// result (or -errno) in `ret` and returns true; returns false when the
 /// instruction should run unchanged, including thread-style clones.
-/// Runs `getrandom` or `clock_gettime` against rsched's deterministic models
-/// (see `virt`), returning the raw result or -errno; None for other syscalls
-/// and before rsched starts.
+/// Runs `getrandom`, `clock_gettime`, or a sleep against rsched's
+/// deterministic models (see `virt` and `sync`), returning the raw result or
+/// -errno; None for other syscalls and before rsched starts.
 unsafe fn virt_syscall(number: libc::c_long, args: &[libc::c_long; 6]) -> Option<libc::c_long> {
     match number {
         libc::SYS_getrandom if virt::models_random() => Some(virt::fill_random(
@@ -1024,6 +1023,18 @@ unsafe fn virt_syscall(number: libc::c_long, args: &[libc::c_long; 6]) -> Option
             args[1] as usize,
             args[2] as libc::c_uint,
         )),
+        libc::SYS_nanosleep => Some(
+            match sync::rsched_nanosleep(args[0] as *const _, args[1] as *mut _) {
+                0 => 0,
+                _ => -libc::c_long::from(*libc::__errno_location()),
+            },
+        ),
+        libc::SYS_clock_nanosleep => Some(-libc::c_long::from(sync::rsched_clock_nanosleep(
+            args[0] as libc::clockid_t,
+            args[1] as libc::c_int,
+            args[2] as *const _,
+            args[3] as *mut _,
+        ))),
         libc::SYS_clock_gettime => {
             let r = virt::rsched_clock_gettime(args[0] as libc::clockid_t, args[1] as *mut _);
             Some(if r == 0 {
@@ -1095,7 +1106,10 @@ pub unsafe extern "C" fn rsched_libc_syscall(
     {
         io::libc_result(r)
     } else if outermost && virt::waits_in_kernel(number) {
-        virt::kernel_wait(|| rsched_raw_syscall(number, a0, a1, a2, a3, a4, a5))
+        let args = [a0, a1, a2, a3, a4, a5];
+        virt::kernel_wait(number, args, || {
+            rsched_raw_syscall(number, a0, a1, a2, a3, a4, a5)
+        })
     } else {
         rsched_raw_syscall(number, a0, a1, a2, a3, a4, a5)
     };

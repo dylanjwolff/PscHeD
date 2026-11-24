@@ -142,7 +142,6 @@ Useful environment variables:
 | `RSCHED_SCHEDULER` | random | Set to `dfs` for depth-first exploration |
 | `RSCHED_LOG` | unset | Set to `1` to log scheduling decisions |
 | `RSCHED_FUZZ_SCHEDULES` | `5` | Schedules executed for each libFuzzer input |
-| `RSCHED_STARVATION_LIMIT` | `50000` | Scheduling points a timed wait or sleep may stay blocked while other tasks run |
 | `RSCHED_SECCOMP` | unset | Set to `1` on Linux x86_64 to trap unsupported raw synchronization syscalls and route I/O issued outside rsched through the I/O model |
 
 ## Synchronization and time
@@ -154,23 +153,25 @@ Mutexes, condition variables (including `pthread_cond_timedwait` and
 `sleep`) are scheduling points. A task blocked on one is not runnable until
 another task releases it.
 
-Deadlines pass in virtual time. A task whose timed wait or sleep only its
-deadline can end stays blocked until no other task can run, or until it has
-been blocked for `RSCHED_STARVATION_LIMIT` scheduling points, so a task that
-spins on a flag cannot starve it. Expiring the wait moves the virtual clock
-to its deadline, so a timeout is never reported early. Which wait expires
-and when depends only on the schedule.
+Deadlines pass in virtual time. A timed wait or sleep expires once the
+virtual clock reaches its deadline. Every scheduling point moves the clock
+forward, so a task that spins on a flag cannot starve a sleeper. When no task
+can run, rsched picks one timed wait, moves the clock to its deadline, and
+expires it. A timeout is never reported early, and which wait expires and
+when depends only on the schedule.
 
 Calls that wait in the kernel and that rsched does not model, such as
 `ppoll`, `select`, `pselect`, `epoll_wait`, `epoll_pwait`, and
-`sigtimedwait`, move the virtual clock by the real time they blocked, so
-their timeouts are never seen to end early.
+`sigtimedwait`, move the virtual clock by one tick, and by their timeout
+when they report that it passed. Time never depends on how long they
+really blocked.
 
 So that one seed always takes the same path, programs also read time,
 their CPU, and randomness from deterministic models:
 
 - `clock_gettime` on the realtime, monotonic, and boot-time clocks returns
-  virtual time. It starts at the real time when rsched starts and advances
+  virtual time. It starts at a fixed time, 2024-01-01T00:00:00Z for the
+  realtime clock and 1000 s for the monotonic clocks, and advances
   by 1 µs at every scheduling point and every clock read, so a loop that
   spins on the clock still ends. `time` and `gettimeofday` read the same
   virtual realtime clock. CPU-time clocks stay real.
@@ -182,7 +183,7 @@ their CPU, and randomness from deterministic models:
   `lstat`, `fstatat`, and `statx` report the table's times. A change rsched
   does not see, such as creating a file, shows up as a newer kernel time and
   is reported as the virtual time of the stat call that saw it; times from
-  before rsched started are reported unchanged. With instrumented glibc,
+  before the virtual epoch (2024) are reported unchanged. With instrumented glibc,
   stdio's internal writes are stamped too; with instrumented musl, only the
   public functions are.
 - `sched_getcpu` reports a CPU derived from the calling task.

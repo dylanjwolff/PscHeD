@@ -1,12 +1,12 @@
 //! Models of blocking primitives beyond mutexes and untimed condition waits:
 //! semaphores, timed condition waits, rwlocks, `pthread_once`, and sleeps.
 //!
-//! Timed waits run in virtual time (see `virt`). A waiter that only its
-//! deadline could wake stays blocked until no task can run, or until it has
-//! been blocked for `RSCHED_STARVATION_LIMIT` scheduling points (default
-//! 50000), so a spinning task cannot starve it forever. Both points depend
-//! only on the schedule. Expiring a wait moves virtual time to its deadline,
-//! so a timeout is never reported before its deadline has passed.
+//! Timed waits run in virtual time (see `virt`). A wait expires once virtual
+//! time reaches its deadline, which every scheduling point moves closer, so a
+//! spinning task cannot starve it forever. When no task can run, the
+//! scheduler picks one timed wait and moves virtual time to its deadline. Both
+//! depend only on the schedule, and a timeout is never reported before its
+//! deadline has passed.
 
 use crate::event::{Event, EventKind};
 use crate::scheduler::logging_enabled;
@@ -16,7 +16,7 @@ use crate::{
     rsched_gunlock, seccomp, st, with_internal_depth,
 };
 use libc::{c_int, c_long, c_uint, c_void, clockid_t, timespec};
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 #[derive(Clone, Copy)]
 pub(crate) struct Deadline {
@@ -39,8 +39,6 @@ pub(crate) struct TimedWait {
     pthread: PthreadT,
     on: WaitOn,
     deadline: Deadline,
-    /// `State::points` when the wait began.
-    since: u64,
 }
 
 /// A reader-writer lock. The real `pthread_rwlock_t` is never locked: every
@@ -76,47 +74,6 @@ unsafe fn after(clock: clockid_t, rel: timespec) -> Deadline {
     Deadline { clock, at }
 }
 
-fn starvation_limit() -> u64 {
-    static LIMIT: AtomicU64 = AtomicU64::new(0);
-    let cached = LIMIT.load(Ordering::Relaxed);
-    if cached != 0 {
-        return cached;
-    }
-    let value = unsafe { libc::getenv(c"RSCHED_STARVATION_LIMIT".as_ptr()) };
-    let parsed = if value.is_null() {
-        None
-    } else {
-        unsafe { std::ffi::CStr::from_ptr(value) }
-            .to_str()
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .filter(|&n| n > 0)
-    };
-    let limit = parsed.unwrap_or(50_000);
-    LIMIT.store(limit, Ordering::Relaxed);
-    limit
-}
-
-/// Sleeps a thread rsched does not schedule for real, for as long as
-/// `deadline` is away in virtual time.
-unsafe fn sleep_unscheduled(deadline: Deadline) {
-    let ns = virt::remaining_ns(deadline.clock, &deadline.at);
-    let mut rel = timespec {
-        tv_sec: ns / 1_000_000_000,
-        tv_nsec: ns % 1_000_000_000,
-    };
-    while seccomp::raw_syscall6(
-        libc::SYS_nanosleep,
-        &rel as *const timespec as c_long,
-        &mut rel as *mut timespec as c_long,
-        0,
-        0,
-        0,
-        0,
-    ) == -(libc::EINTR as c_long)
-    {}
-}
-
 unsafe fn errno() -> c_int {
     *libc::__errno_location()
 }
@@ -141,7 +98,6 @@ impl State {
                 pthread: caller,
                 on,
                 deadline,
-                since: self.points,
             });
         }
         self.task(caller).set_blocking(true);
@@ -151,23 +107,33 @@ impl State {
         std::mem::take(&mut self.t(caller).timed_out)
     }
 
-    /// Expires one timed wait, chosen by the scheduler among those still
-    /// blocked (and, when `starved_only`, blocked for the starvation limit).
+    /// Expires every timed wait whose deadline virtual time has reached.
+    pub(crate) unsafe fn expire_due_waits(&mut self) {
+        let due: Vec<TimedWait> = self
+            .timed_waits
+            .iter()
+            .filter(|w| {
+                self.threads.contains(&w.pthread)
+                    && self.task(w.pthread).is_blocking()
+                    && virt::remaining_ns(w.deadline.clock, &w.deadline.at) == 0
+            })
+            .copied()
+            .collect();
+        for wait in due {
+            self.expire(wait, "due");
+        }
+    }
+
+    /// When no task can run: expires one timed wait, chosen by the scheduler
+    /// among those still blocked, and moves virtual time to its deadline.
     /// Returns whether a task may have become runnable.
-    pub(crate) unsafe fn expire_timed_wait(&mut self, starved_only: bool) -> bool {
-        if self.timed_waits.is_empty() {
-            return false;
-        }
-        let limit = starvation_limit();
-        let mut candidates = Vec::new();
-        for (i, w) in self.timed_waits.iter().enumerate() {
-            if self.threads.contains(&w.pthread)
-                && self.task(w.pthread).is_blocking()
-                && (!starved_only || self.points.saturating_sub(w.since) >= limit)
-            {
-                candidates.push(i);
-            }
-        }
+    pub(crate) unsafe fn expire_timed_wait(&mut self) -> bool {
+        let candidates: Vec<TimedWait> = self
+            .timed_waits
+            .iter()
+            .filter(|w| self.threads.contains(&w.pthread) && self.task(w.pthread).is_blocking())
+            .copied()
+            .collect();
         if candidates.is_empty() {
             return false;
         }
@@ -175,8 +141,14 @@ impl State {
         let pick = self
             .choose_index(&blocking)
             .expect("rsched: non-empty timed wait list");
-        let wait = self.timed_waits[candidates[pick]];
+        let wait = candidates[pick];
         virt::advance_to(wait.deadline.clock, &wait.deadline.at);
+        self.expire(wait, "idle");
+        true
+    }
+
+    /// Wakes the task of `wait` as timed out.
+    unsafe fn expire(&mut self, wait: TimedWait, why: &str) {
         let pt = wait.pthread;
         match wait.on {
             WaitOn::Sem(key) => {
@@ -200,11 +172,10 @@ impl State {
         self.task(pt).set_blocking(false);
         if logging_enabled() {
             log_line!(
-                "[rsched] TimedWaitExpired(starved={starved_only}) task={}",
+                "[rsched] TimedWaitExpired({why}) task={}",
                 self.task(pt).creation_idx()
             );
         }
-        true
     }
 
     fn wake_all(&mut self, waiters: Vec<PthreadT>) {
@@ -614,10 +585,12 @@ unsafe fn sleep_impl(deadline: Option<Deadline>, instr_addr: u64) {
     rsched_glock();
     let caller = my_pt();
     if !st().threads.contains(&caller) {
-        // Not a task rsched schedules: sleep for real.
+        // Not a task rsched schedules, such as a thread running TLS
+        // destructors after rsched retired it: no other task can wake it,
+        // so the sleep ends at once, with time moved to its deadline.
         rsched_gunlock();
         if let Some(deadline) = deadline {
-            sleep_unscheduled(deadline);
+            virt::advance_to(deadline.clock, &deadline.at);
         }
         return;
     }

@@ -111,7 +111,7 @@ fn slot(dev: u64, ino: u64) -> Option<(&'static Slot, bool)> {
 
 /// The time to report for a kernel time the table has not recorded.
 fn first_seen(real: i64, now: i64) -> i64 {
-    if real < crate::virt::realtime_base_ns() {
+    if real < crate::virt::REALTIME_BASE_NS {
         real
     } else {
         now
