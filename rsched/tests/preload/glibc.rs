@@ -194,7 +194,8 @@ int main(void)
 #[test]
 fn programs_built_against_newer_glibc_load() {
     // The host headers redirect strtol and sscanf to their C23 names, and
-    // fmod binds to fmod@GLIBC_2.38; glibc 2.35 itself defines none of them.
+    // fmod binds to fmod@GLIBC_2.38, all of which the instrumented glibc
+    // must export.
     let glibc = build_instrumented_glibc();
     let temp = temp_dir();
     let source = temp.join("newer.c");

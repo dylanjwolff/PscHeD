@@ -415,7 +415,6 @@ fn build_glibc(
         .arg(build_dir.join("versions.stmp"));
     run(command, "generate glibc symbol version maps")?;
     export_glibc_hooks(&build_dir.join("libc.map"))?;
-    let (libc_compat, libm_compat) = build_glibc_compat(options, &build_dir)?;
 
     let mut command = Command::new("make");
     command
@@ -425,12 +424,7 @@ fn build_glibc(
         .arg("--silent")
         .arg(format!("-j{jobs}"));
     add_glibc_link_args(&mut command, &shared_gnulib);
-    command
-        .arg(format!(
-            "libc.so-gnulib={} {shared_gnulib}",
-            libc_compat.display()
-        ))
-        .arg("lib");
+    command.arg("lib");
     run(command, "build instrumented glibc libraries")?;
 
     for (subdir, library, soname) in [
@@ -446,9 +440,6 @@ fn build_glibc(
             .arg("--silent")
             .arg(format!("-j{jobs}"));
         add_glibc_link_args(&mut command, &shared_gnulib);
-        if subdir == "math" {
-            command.arg(format!("LDLIBS-m.so={}", libm_compat.display()));
-        }
         command
             .arg(format!("subdir={subdir}"))
             .arg("..=../")
@@ -748,13 +739,6 @@ fn fingerprint(options: &BuildOptions) -> Result<String> {
                 &options.workspace_root.join("glibc/instrument-gcc.sh"),
                 &options.workspace_root,
             )?;
-            for compat in ["glibc/compat.c", "glibc/compat-libm.c"] {
-                hash_path(
-                    &mut hash,
-                    &options.workspace_root.join(compat),
-                    &options.workspace_root,
-                )?;
-            }
             hash_source_checkout(
                 &mut hash,
                 &options.workspace_root.join("glibc/glibc"),
@@ -924,21 +908,11 @@ fn prepare_clang_asan_runtime(
          local: *;\n\
          } CXXABI_1.3;\n",
     )?;
-    // A host libsupc++ built against glibc 2.38+ calls the C23 strtoul,
-    // which the instrumented glibc 2.35 does not export.
-    let compat = root.join("asan-cxxabi-compat.c");
-    fs::write(
-        &compat,
-        "#include <stdlib.h>\n\
-         unsigned long __isoc23_strtoul(const char *s, char **end, int base)\n\
-         {\n    return strtoul(s, end, base);\n}\n",
-    )?;
     let mut command = Command::new("clang-18");
     command
         .args(["-shared", "-static-libgcc", "-std=gnu17", "-fPIC"])
         .arg("-Wl,-soname,libstdc++.so.6")
         .arg(format!("-Wl,--version-script={}", cxxabi_map.display()))
-        .arg(&compat)
         .arg("-Wl,--whole-archive")
         .arg(&libsupcxx)
         .arg("-Wl,--no-whole-archive")
@@ -973,71 +947,6 @@ fn export_glibc_hooks(libc_map: &Path) -> Result<()> {
     let mut output = map;
     output.insert_str(index, &missing);
     fs::write(libc_map, output)?;
-    Ok(())
-}
-
-/// Compiles the glibc 2.36 to 2.38 symbols that programs built against a newer
-/// host glibc reference (see `glibc/compat.c`), and adds their version nodes
-/// to the libc and libm maps. Returns the libc and libm objects.
-fn build_glibc_compat(options: &BuildOptions, build_dir: &Path) -> Result<(PathBuf, PathBuf)> {
-    let mut objects = Vec::new();
-    for name in ["compat", "compat-libm"] {
-        let object = build_dir.join(format!("rsched-{name}.o"));
-        let mut command = Command::new("gcc");
-        command
-            .args(["-std=gnu17", "-O2", "-fPIC", "-c", "-o"])
-            .arg(&object)
-            .arg(options.workspace_root.join(format!("glibc/{name}.c")));
-        run(command, &format!("compile glibc/{name}.c"))?;
-        objects.push(object);
-    }
-    add_version_nodes(
-        &build_dir.join("libc.map"),
-        "GLIBC_PRIVATE {",
-        "GLIBC_2.36 {\n\
-         global:\n\
-           arc4random; arc4random_buf; arc4random_uniform;\n\
-         } GLIBC_2.35;\n\
-         GLIBC_2.38 {\n\
-         global:\n\
-           __isoc23_fscanf; __isoc23_fwscanf; __isoc23_scanf; __isoc23_sscanf;\n\
-           __isoc23_swscanf; __isoc23_vfscanf; __isoc23_vfwscanf; __isoc23_vscanf;\n\
-           __isoc23_vsscanf; __isoc23_vswscanf; __isoc23_vwscanf; __isoc23_wscanf;\n\
-           __isoc23_strtoimax; __isoc23_strtol; __isoc23_strtol_l; __isoc23_strtoll;\n\
-           __isoc23_strtoll_l; __isoc23_strtoul; __isoc23_strtoul_l; __isoc23_strtoull;\n\
-           __isoc23_strtoull_l; __isoc23_strtoumax; __isoc23_wcstoimax; __isoc23_wcstol;\n\
-           __isoc23_wcstol_l; __isoc23_wcstoll; __isoc23_wcstoll_l; __isoc23_wcstoul;\n\
-           __isoc23_wcstoul_l; __isoc23_wcstoull; __isoc23_wcstoull_l; __isoc23_wcstoumax;\n\
-           strlcat; strlcpy; wcslcat; wcslcpy;\n\
-           __strlcat_chk; __strlcpy_chk; __wcslcat_chk; __wcslcpy_chk;\n\
-         } GLIBC_2.36;\n",
-    )?;
-    // fmod@GLIBC_2.38 is bound with .symver, so the node lists no names.
-    add_version_nodes(
-        &build_dir.join("libm.map"),
-        "",
-        "GLIBC_2.38 {\n} GLIBC_2.35;\n",
-    )?;
-    let libm = objects.pop().context("libm compat object")?;
-    let libc = objects.pop().context("libc compat object")?;
-    Ok((libc, libm))
-}
-
-/// Inserts `nodes` before `marker`, or at the end when `marker` is empty,
-/// unless a reused build directory's map already has them.
-fn add_version_nodes(map_path: &Path, marker: &str, nodes: &str) -> Result<()> {
-    let mut map = fs::read_to_string(map_path)?;
-    if map.contains("GLIBC_2.38 {") {
-        return Ok(());
-    }
-    let index = if marker.is_empty() {
-        map.len()
-    } else {
-        map.find(marker)
-            .with_context(|| format!("find {marker:?} in {}", map_path.display()))?
-    };
-    map.insert_str(index, nodes);
-    fs::write(map_path, map)?;
     Ok(())
 }
 

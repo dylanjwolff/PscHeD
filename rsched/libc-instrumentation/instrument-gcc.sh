@@ -360,6 +360,7 @@ add_rewrite "sched_getcpu" "sched_getcpu" "__rsched_real_sched_getcpu" "rsched_s
 add_rewrite "__getrandom" "getrandom" "__rsched_real_getrandom" "rsched_getrandom" ""
 # Kernel waits with a timeout move virtual time by the time they block.
 add_rewrite "__ppoll" "ppoll" "__rsched_real_ppoll" "rsched_ppoll" ""
+add_rewrite "ppoll" "ppoll" "__rsched_real_ppoll" "rsched_ppoll" ""
 add_rewrite "__select" "select" "__rsched_real_select" "rsched_select" ""
 add_rewrite "__pselect" "pselect" "__rsched_real_pselect" "rsched_pselect" ""
 add_rewrite "epoll_wait" "epoll_wait" "__rsched_real_epoll_wait" "rsched_epoll_wait" ""
@@ -400,6 +401,8 @@ add_file_hook "__writev" 20 long __GI___writev
 add_file_hook "__ftruncate64" 77 int __ftruncate ftruncate ftruncate64
 add_file_hook "__truncate64" 76 int truncate truncate64
 add_file_hook "fallocate64" 285 int fallocate
+# glibc 2.39's fstat makes the fstat syscall itself.
+add_file_hook "__fstat64" 5 int __GI___fstat64 __fstat fstat fstat64
 add_file_hook "__fstatat64" 262 int __GI___fstatat __GI___fstatat64 __fstatat fstatat fstatat64
 add_file_hook "statx" 332 int
 
