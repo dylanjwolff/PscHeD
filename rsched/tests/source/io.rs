@@ -175,6 +175,12 @@ fn a_child_that_handed_over_the_schedule_is_reapable() {
 }
 
 #[test]
+fn the_earliest_deadline_expires_first() {
+    let stdout = run_case("CASE_IO_EARLIEST_DEADLINE_FIRST", &[]);
+    assert!(stdout.contains("traces=1: R"), "{stdout}");
+}
+
+#[test]
 fn tcp_loopback_poll_accept_connect() {
     let stdout = run_case("CASE_IO_TCP_THREADS", &[]);
     assert!(stdout.contains("traces=2"), "{stdout}");

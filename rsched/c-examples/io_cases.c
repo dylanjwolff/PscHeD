@@ -706,6 +706,41 @@ static int run_once(void) {
     return 0;
 }
 
+#elif defined(CASE_IO_EARLIEST_DEADLINE_FIRST)
+
+/* A worker polls a pipe with a one-second timeout while the main thread
+   sleeps 10 ms and then writes. Once both block, no task can run and one
+   timed wait must expire: the sleep's deadline comes first, so the main
+   thread always writes before the poll times out ("R"). Expiring the poll
+   first ("T") would be a timeout real time never produces, as when ab's
+   30-second timeout fired before Apache's one-second maintenance tick. */
+#define EXPECTED_TRACES 1
+static int edf_pipe[2];
+
+static void *edf_poller(void *arg) {
+    (void)arg;
+    struct pollfd pfd = {.fd = edf_pipe[0], .events = POLLIN};
+    int r = poll(&pfd, 1, 1000);
+    mark(r == 1 ? 'R' : 'T');
+    return (void *)(long)(r < 0);
+}
+
+static int run_once(void) {
+    if (pipe(edf_pipe) != 0)
+        return fail("pipe");
+    pthread_t worker;
+    if (pthread_create(&worker, 0, edf_poller, 0) != 0)
+        return fail("pthread_create");
+    struct timespec ten_ms = {0, 10 * 1000 * 1000};
+    nanosleep(&ten_ms, 0);
+    int bad = write(edf_pipe[1], "x", 1) != 1;
+    void *worker_result;
+    pthread_join(worker, &worker_result);
+    close(edf_pipe[0]);
+    close(edf_pipe[1]);
+    return bad || worker_result != 0;
+}
+
 #else
 #error "define one CASE_IO_* variant"
 #endif

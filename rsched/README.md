@@ -149,9 +149,10 @@ another task releases it.
 Deadlines pass in virtual time. A timed wait or sleep expires once the
 virtual clock reaches its deadline. Every scheduling point moves the clock
 forward, so a task that spins on a flag cannot starve a sleeper. When no task
-can run, rsched picks one timed wait, moves the clock to its deadline, and
-expires it. A timeout is never reported early, and which wait expires and
-when depends only on the schedule.
+can run, rsched expires the timed wait with the earliest deadline, choosing
+among waits that tie, and moves the clock to it. A timeout is never reported
+early, a later deadline never expires before an earlier one, and which wait
+expires and when depends only on the schedule.
 
 `kill` (and `killpg`) between scheduled processes is a scheduling point.
 rsched blocks signals in a thread while it parks it, so a signal runs only

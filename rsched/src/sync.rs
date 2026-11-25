@@ -159,9 +159,10 @@ impl State {
         }
     }
 
-    /// When no task can run: expires one timed wait, chosen by the scheduler
-    /// among those still blocked, and moves virtual time to its deadline.
-    /// Returns whether a task may have become runnable.
+    /// When no task can run: expires the timed wait with the earliest
+    /// deadline, chosen by the scheduler among those that tie, and moves
+    /// virtual time to its deadline. A later deadline never expires first,
+    /// as in real time. Returns whether a task may have become runnable.
     pub(crate) unsafe fn expire_timed_wait(&mut self) -> bool {
         let candidates: Vec<TimedWait> = self
             .timed_waits
@@ -175,10 +176,19 @@ impl State {
         if candidates.is_empty() && remote.is_empty() {
             return false;
         }
-        let blocking = vec![false; candidates.len() + remote.len()];
-        let pick = self
+        let deadlines: Vec<u64> = candidates
+            .iter()
+            .map(|w| virt::elapsed_at(w.deadline.clock, &w.deadline.at))
+            .chain(remote.iter().map(|&(_, deadline)| deadline))
+            .collect();
+        let earliest = *deadlines.iter().min().expect("rsched: non-empty timed wait list");
+        let ties: Vec<usize> = (0..deadlines.len())
+            .filter(|&i| deadlines[i] == earliest)
+            .collect();
+        let blocking = vec![false; ties.len()];
+        let pick = ties[self
             .choose_index(&blocking)
-            .expect("rsched: non-empty timed wait list");
+            .expect("rsched: non-empty timed wait list")];
         let Some(&wait) = candidates.get(pick) else {
             let (task, deadline) = remote[pick - candidates.len()];
             virt::advance_to_elapsed(deadline);
