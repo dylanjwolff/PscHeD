@@ -256,7 +256,7 @@ pub(crate) unsafe fn interrupts(restartable: bool) -> bool {
 }
 
 /// Waits in the kernel until process `pid` has died.
-unsafe fn wait_dead(pid: libc::pid_t) {
+pub(crate) unsafe fn wait_dead(pid: libc::pid_t) {
     const SYS_PIDFD_OPEN: c_long = 434;
     let fd = raw_syscall6(SYS_PIDFD_OPEN, pid.into(), 0, 0, 0, 0, 0);
     if fd < 0 {

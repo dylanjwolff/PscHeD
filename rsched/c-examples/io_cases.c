@@ -654,6 +654,58 @@ static int run_once(void) {
     return bad || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
 }
 
+#elif defined(CASE_IO_EXITED_CHILD_IS_REAPABLE)
+
+/* A forked child touches a large mapping, so the kernel takes a while to
+   tear it down, sets a shared flag, and exits. There is no scheduling point
+   between the flag and the exit, so once the parent sees the flag, the
+   child has handed over the schedule for good, and waitpid(WNOHANG) must
+   find it exited, as Apache's prefork master expects when it reaps
+   children it signalled ("R"). Reporting it still running ("L") would
+   make the result depend on how fast the kernel tears the child down. */
+#define EXPECTED_TRACES 1
+#define REAP_ROUNDS 8
+#define REAP_MAPPING (64 << 20)
+
+static int run_once(void) {
+    volatile int *exited = mmap(0, sizeof *exited, PROT_READ | PROT_WRITE,
+                                MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+    if (exited == MAP_FAILED)
+        return fail("mmap");
+    int late = 0;
+    for (int round = 0; round < REAP_ROUNDS; round++) {
+        *exited = 0;
+        pid_t child = fork();
+        if (child < 0)
+            return fail("fork");
+        if (child == 0) {
+            char *big = mmap(0, REAP_MAPPING, PROT_READ | PROT_WRITE,
+                             MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+            if (big != MAP_FAILED)
+                memset(big, 1, REAP_MAPPING);
+            *exited = 1;
+#ifdef RSCHED
+            rsched_process_exit();
+#endif
+            _exit(0);
+        }
+        while (!*exited)
+            sched_yield();
+        int status = 0;
+        pid_t r = waitpid(child, &status, WNOHANG);
+        if (r == 0) {
+            late = 1;
+            while (waitpid(child, &status, 0) < 0 && errno == EINTR)
+                ;
+        } else if (r != child) {
+            return fail("waitpid");
+        }
+    }
+    mark(late ? 'L' : 'R');
+    munmap((void *)exited, sizeof *exited);
+    return 0;
+}
+
 #else
 #error "define one CASE_IO_* variant"
 #endif

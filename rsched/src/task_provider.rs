@@ -957,6 +957,51 @@ struct SharedTask {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+struct HandedOff {
+    pid: libc::pid_t,
+    parent: libc::pid_t,
+}
+
+/// Records that the calling process hands over the schedule for good as it
+/// exits. It still runs the rest of its exit, such as atexit handlers and
+/// the stdio flush, before it dies.
+unsafe fn record_handed_off(ps: *mut ProcessShared) {
+    let entry = HandedOff {
+        pid: libc::getpid(),
+        parent: libc::getppid(),
+    };
+    let entries = &mut (*ps).handed_off;
+    // A process that is never reaped leaves its entry behind; once the
+    // table is full, the oldest one gives way.
+    let free = entries.iter().position(|e| e.pid == 0).unwrap_or_else(|| {
+        entries.rotate_left(1);
+        entries.len() - 1
+    });
+    entries[free] = entry;
+}
+
+/// Before the caller asks the kernel whether a child changed state with
+/// `waitpid(pid, ...)`: waits until each matching child that handed over
+/// the schedule as it exited has died, so whether the child is reported
+/// exited never depends on how fast the kernel tears it down. Only the
+/// reaper waits; the process that got the turn runs on. `pid` -1, 0, or a
+/// negative group waits for every such child, which is about to die anyway.
+pub(crate) unsafe fn reap_handed_off(pid: libc::pid_t) {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if ps.is_null() {
+        return;
+    }
+    let me = libc::getpid();
+    for entry in (*ps).handed_off.iter_mut() {
+        if entry.pid > 0 && entry.parent == me && (pid <= 0 || entry.pid == pid) {
+            let child = std::mem::replace(&mut entry.pid, 0);
+            crate::signals::wait_dead(child);
+        }
+    }
+}
+
+#[repr(C)]
 struct ProcessShared {
     task_count: usize,
     dfs: SharedDfsState,
@@ -966,6 +1011,9 @@ struct ProcessShared {
     /// could run; cleared when a task takes a kernel lock or starts to wait
     /// for one. Seeing it set again with no task able to run is a deadlock.
     lock_retried: u8,
+    /// Processes that handed over the schedule as they exited, which may
+    /// not have died yet, with their parents; see [`reap_handed_off`].
+    handed_off: [HandedOff; MAX_PROCESSES * 2],
     tasks: [SharedTask; MAX_TASKS],
     slots: [ProcessSlot; MAX_PROCESSES],
 }
@@ -1467,6 +1515,7 @@ impl ProcessTaskProvider {
         }
         (*ps).slots[current as usize].active = 0;
         deactivate_process_tasks(ps, current);
+        record_handed_off(ps);
         process_log(format_args!(
             "pid {} exit slot {}, next slot {} thread {:#x}",
             libc::getpid(),

@@ -1190,6 +1190,7 @@ pub unsafe extern "C" fn rsched_waitpid(
     options: libc::c_int,
 ) -> libc::pid_t {
     ensure_init();
+    task_provider::reap_handed_off(pid);
     if options & libc::WNOHANG != 0 {
         return with_internal_depth(|| libc::waitpid(pid, status, options));
     }

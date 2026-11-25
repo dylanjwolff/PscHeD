@@ -169,6 +169,12 @@ fn seccomp_routes_kernel_locks_from_libc_internals() {
 }
 
 #[test]
+fn a_child_that_handed_over_the_schedule_is_reapable() {
+    let stdout = run_case("CASE_IO_EXITED_CHILD_IS_REAPABLE", &[]);
+    assert!(stdout.contains("traces=1: R"), "{stdout}");
+}
+
+#[test]
 fn tcp_loopback_poll_accept_connect() {
     let stdout = run_case("CASE_IO_TCP_THREADS", &[]);
     assert!(stdout.contains("traces=2"), "{stdout}");
@@ -249,6 +255,11 @@ fn seccomp_keeps_reserved_descriptors_from_raw_close() {
 #[test]
 fn io_on_a_negative_descriptor_fails_with_ebadf() {
     assert_edge_case("CASE_IO_EDGE_BAD_FD");
+}
+
+#[test]
+fn a_parent_reaping_in_atexit_does_not_block_its_child() {
+    assert_edge_case("CASE_IO_EDGE_ATEXIT_REAPS_CHILD");
 }
 
 #[test]
