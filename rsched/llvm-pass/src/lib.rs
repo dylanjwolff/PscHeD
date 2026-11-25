@@ -778,6 +778,7 @@ const PTHREAD_REWRITES: &[(&str, &str)] = &[
     ("sigtimedwait", "rsched_sigtimedwait"),
     ("fork", "rsched_fork"),
     ("waitpid", "rsched_waitpid"),
+    ("kill", "rsched_kill"),
     ("execv", "rsched_execv"),
     ("execve", "rsched_execve"),
     ("_exit", "rsched_process_exit_status"),
@@ -1396,6 +1397,13 @@ const MUSL_REWRITES: &[LibcRewrite] = &[
         public: "waitpid",
         real: "__rsched_real_waitpid",
         rsched: "rsched_waitpid",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "kill",
+        public: "kill",
+        real: "__rsched_real_kill",
+        rsched: "rsched_kill",
         diverges: false,
     },
     LibcRewrite {

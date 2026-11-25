@@ -107,6 +107,36 @@ fn socketpair_ping_pong_between_processes() {
 }
 
 #[test]
+fn sleep_in_one_process_expires_while_another_waits_on_io() {
+    let stdout = run_case("CASE_IO_SLEEPING_WRITER_PROCESS", &[]);
+    assert!(stdout.contains("traces=1: E"), "{stdout}");
+}
+
+#[test]
+fn thread_exit_in_a_child_process_hands_the_turn_back() {
+    let stdout = run_case("CASE_IO_THREAD_EXIT_IN_CHILD", &[]);
+    assert!(stdout.contains("traces=1: ET"), "{stdout}");
+}
+
+#[test]
+fn epoll_wait_blocks_the_task_instead_of_the_kernel() {
+    let stdout = run_case("CASE_IO_EPOLL_THREADS", &[]);
+    assert!(stdout.contains("traces=2"), "{stdout}");
+}
+
+#[test]
+fn poll_timeout_waits_while_another_task_can_run() {
+    let stdout = run_case("CASE_IO_TIMED_POLL_THREADS", &[]);
+    assert!(stdout.contains("traces=1: R"), "{stdout}");
+}
+
+#[test]
+fn signal_from_another_process_interrupts_a_blocked_read() {
+    let stdout = run_case("CASE_IO_SIGNAL_INTERRUPTS_READ", &[]);
+    assert!(stdout.contains("traces=1: S"), "{stdout}");
+}
+
+#[test]
 fn tcp_loopback_poll_accept_connect() {
     let stdout = run_case("CASE_IO_TCP_THREADS", &[]);
     assert!(stdout.contains("traces=2"), "{stdout}");

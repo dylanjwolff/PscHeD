@@ -83,8 +83,127 @@ impl TaskHandle {
             task.is_blocking = 1;
             task.is_waiting = 0;
             task.io_wait = 0;
+            task.deadline = NO_DEADLINE;
         });
     }
+
+    /// Records the deadline of the timed wait the task blocks in, or
+    /// [`NO_DEADLINE`].
+    pub(crate) unsafe fn set_deadline(self, deadline: u64) {
+        self.with_task(|task| task.deadline = deadline);
+    }
+
+    /// Expires the timed wait of a task in another process: it becomes
+    /// runnable and, once its process runs, sees it timed out.
+    pub(crate) unsafe fn expire_remote(self) {
+        self.with_task(|task| {
+            task.timed_out = 1;
+            task.is_blocking = 0;
+            task.deadline = NO_DEADLINE;
+        });
+    }
+
+    /// Whether another process expired the task's timed wait; clears it.
+    pub(crate) unsafe fn take_timed_out(self) -> bool {
+        self.with_task(|task| std::mem::take(&mut task.timed_out) != 0)
+    }
+
+    /// Marks the task as blocked in a sleep, which a signal can interrupt.
+    pub(crate) unsafe fn set_sleeping(self, sleeping: bool) {
+        self.with_task(|task| task.sleeping = u8::from(sleeping));
+    }
+
+    /// Marks the task as interrupted by a signal before it could block.
+    pub(crate) unsafe fn set_interrupted(self) {
+        self.with_task(|task| task.interrupted = 1);
+    }
+
+    /// Whether a signal woke the task from an interruptible wait; clears it.
+    pub(crate) unsafe fn take_interrupted(self) -> bool {
+        self.with_task(|task| std::mem::take(&mut task.interrupted) != 0)
+    }
+}
+
+/// The scheduled processes, other than the caller's, that `kill(pid, ...)`
+/// signals, as (slot, pid) pairs.
+pub(crate) unsafe fn kill_targets(pid: libc::pid_t) -> Vec<(i32, libc::pid_t)> {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if ps.is_null() {
+        return Vec::new();
+    }
+    let current = PROCESS_SLOT.load(Ordering::Acquire);
+    let getpgid = |pid: libc::c_long| crate::seccomp::raw_syscall6(libc::SYS_getpgid, pid, 0, 0, 0, 0, 0);
+    let own_group = getpgid(0);
+    (0..MAX_PROCESSES)
+        .filter(|&slot| slot as i32 != current && (*ps).slots[slot].active != 0)
+        .map(|slot| (slot as i32, (*ps).slots[slot].pid))
+        .filter(|&(_, target)| {
+            target > 0
+                && match pid {
+                    p if p > 0 => target == p,
+                    -1 => true,
+                    p => {
+                        let group = if p == 0 { own_group } else { -libc::c_long::from(p) };
+                        getpgid(libc::c_long::from(target)) == group
+                    }
+                }
+        })
+        .collect()
+}
+
+/// Makes every task of process `slot` blocked in an interruptible wait,
+/// an I/O wait or a sleep, runnable and marks it interrupted, so that one of
+/// them runs the signal just sent to that process.
+pub(crate) unsafe fn interrupt_process(slot: i32) {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    for id in 0..(*ps).task_count.min(MAX_TASKS) {
+        let task = &mut (*ps).tasks[id];
+        if task.active != 0
+            && task.domain == slot
+            && task.is_blocking != 0
+            && (task.io_wait != 0 || task.sleeping != 0)
+        {
+            task.is_blocking = 0;
+            task.interrupted = 1;
+            process_log(format_args!("interrupted task {id} in slot {slot}"));
+        }
+    }
+}
+
+/// Retires process `slot`, which a signal killed before it could hand
+/// over the schedule itself.
+pub(crate) unsafe fn retire_process(slot: i32) {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if (*ps).slots[slot as usize].active != 0 {
+        (*ps).slots[slot as usize].active = 0;
+        deactivate_process_tasks(ps, slot);
+        process_log(format_args!("retired killed process in slot {slot}"));
+    }
+}
+
+/// [`SharedTask::deadline`] of a task not in a timed wait.
+pub(crate) const NO_DEADLINE: u64 = u64::MAX;
+
+/// Tasks of other processes blocked in a timed wait, in creation order,
+/// with their deadlines.
+pub(crate) unsafe fn remote_timed_waits() -> Vec<(TaskHandle, u64)> {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if ps.is_null() {
+        return Vec::new();
+    }
+    let current = PROCESS_SLOT.load(Ordering::Acquire);
+    (0..(*ps).task_count.min(MAX_TASKS))
+        .filter(|&id| {
+            let t = (*ps).tasks[id];
+            t.active != 0
+                && t.is_blocking != 0
+                && t.deadline != NO_DEADLINE
+                && t.domain >= 0
+                && t.domain != current
+                && (*ps).slots[t.domain as usize].active != 0
+        })
+        .map(|id| (TaskHandle::new(id), (*ps).tasks[id].deadline))
+        .collect()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -814,9 +933,19 @@ struct SharedTask {
     is_waiting: u8,
     /// Blocked in [`io_wait`] until a descriptor is ready.
     io_wait: u8,
-    _pad: [u8; 3],
+    /// Another process expired this task's timed wait; the task finishes
+    /// the expiry in its own process (see `State::reap_remote_expiries`).
+    timed_out: u8,
+    /// Blocked in a sleep, which a signal interrupts like I/O waits.
+    sleeping: u8,
+    /// Another process sent this task's process a signal while the task was
+    /// blocked in an interruptible wait, and made it runnable to handle it.
+    interrupted: u8,
     domain: i32,
     pthread: usize,
+    /// While blocked in a timed wait: the virtual elapsed time at which it
+    /// expires, so that any process can expire it once no task can run.
+    deadline: u64,
 }
 
 #[repr(C)]
@@ -1024,11 +1153,15 @@ unsafe fn deactivate_process_tasks(ps: *mut ProcessShared, domain: i32) {
             (*ps).tasks[id].is_blocking = 1;
             (*ps).tasks[id].is_waiting = 0;
             (*ps).tasks[id].io_wait = 0;
+            (*ps).tasks[id].sleeping = 0;
+            (*ps).tasks[id].interrupted = 0;
+            (*ps).tasks[id].deadline = NO_DEADLINE;
         }
     }
 }
 
 unsafe fn process_wait_on_slot(ps: *mut ProcessShared, slot: i32) {
+    crate::signals::hold();
     loop {
         let r = crate::with_internal_depth(|| {
             libc::sem_wait(addr_of_mut!((*ps).slots[slot as usize].gate))
@@ -1064,9 +1197,12 @@ impl ProcessTaskProvider {
             startup_done: 0,
             is_waiting: 0,
             io_wait: 0,
-            _pad: [0; 3],
+            timed_out: 0,
+            sleeping: 0,
+            interrupted: 0,
             domain: slot,
             pthread: pt as usize,
+            deadline: NO_DEADLINE,
         };
         TaskHandle::new(creation_idx)
     }
@@ -1390,6 +1526,13 @@ impl ProcessTaskProvider {
         self.inner.task_tid(thread)
     }
 
+    /// Passes the turn to `choice`, a task of another process, and waits
+    /// until a task of this process is chosen again; returns it. For a
+    /// thread that leaves without being a task, such as an exiting one.
+    pub(crate) unsafe fn hand_off_and_wait(&mut self, choice: TaskChoice) -> Option<PthreadT> {
+        self.switch_domain(choice, true)
+    }
+
     pub(crate) unsafe fn switch_task(
         &mut self,
         choice: TaskChoice,
@@ -1448,9 +1591,11 @@ impl ProcessTaskProvider {
     pub(crate) unsafe fn fork(&mut self) -> libc::pid_t {
         self.before_fork();
         let depth = crate::fork_depth();
+        let held = crate::signals::held_mask();
         let pid = crate::with_internal_depth(|| libc::fork());
         if pid == 0 {
             crate::inherit_depth(depth);
+            crate::signals::inherit(held);
             self.after_fork_child();
         } else if self.after_fork_parent(pid) {
             crate::rsched_glock();
@@ -1483,6 +1628,7 @@ impl ProcessTaskProvider {
 
         self.before_fork();
         let depth = crate::fork_depth();
+        let held = crate::signals::held_mask();
         let result = crate::seccomp::raw_syscall6(
             libc::SYS_clone,
             flags,
@@ -1500,6 +1646,7 @@ impl ProcessTaskProvider {
         let pid = result as libc::pid_t;
         if pid == 0 {
             crate::inherit_depth(depth);
+            crate::signals::inherit(held);
             self.after_fork_child();
         } else if self.after_fork_parent(pid) {
             crate::rsched_glock();
@@ -1586,6 +1733,12 @@ pub(crate) unsafe fn io_wait(task: TaskHandle, waits: &Epoll, switch: impl FnOnc
     if registered.is_err() {
         return false;
     }
+    // A signal sent before the task got here interrupts the wait at once.
+    if crate::signals::pending() {
+        task.set_interrupted();
+        let _ = io_epoll().delete(waits.as_raw_fd());
+        return true;
+    }
     task.with_task(|t| t.io_wait = 1);
     task.set_blocking(true);
     switch();
@@ -1629,6 +1782,9 @@ pub(crate) unsafe fn wake_io_waiters(block: bool) -> bool {
     }
     let mut events = [Event::EMPTY; 64];
     let timeout = if block { Timeout::Never } else { Timeout::Now };
+    if block {
+        crate::signals::hold();
+    }
     let ready = loop {
         if block {
             crate::rsched_gunlock();

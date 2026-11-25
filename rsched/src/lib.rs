@@ -25,6 +25,7 @@ pub use event::{AccessKind, Event, EventKind};
 mod fuzzing;
 mod io;
 mod seccomp;
+mod signals;
 mod sync;
 mod sys;
 mod task_provider;
@@ -275,6 +276,7 @@ impl State {
             let cond = addr_of_mut!(self.t(caller).suspend_cond);
             self.task_provider.park(ParkingHandle::new(cond));
             self.task(caller).set_waiting(false);
+            self.reap_remote_expiries();
         }
     }
 
@@ -338,8 +340,10 @@ impl State {
                 .task_provider
                 .switch_task(choice, caller, SwitchMode::SuspendCurrent)
             {
+                self.reap_remote_expiries();
                 self.wake_local(pthread, suspend_caller, caller);
             }
+            self.reap_remote_expiries();
             self.mark_waiting(caller, false);
         }
     }
@@ -860,6 +864,7 @@ unsafe fn rsched_gunlock() {
 }
 
 pub(crate) unsafe fn thread_cond_wait(cond: *mut CondT) {
+    signals::hold();
     tsan::sync_release();
     with_internal_depth(|| (rpt().cond_wait)(cond, addr_of_mut!(GMTX)));
     tsan::sync_acquire();
@@ -1179,6 +1184,10 @@ pub unsafe extern "C" fn rsched_waitpid(
         if !io::wait_for_child(pid) {
             rsched_sched_yield();
         }
+        if signals::interrupts(true) {
+            *libc::__errno_location() = libc::EINTR;
+            return -1;
+        }
     }
 }
 
@@ -1303,11 +1312,14 @@ pub extern "C" fn rsched_exit() {
         return;
     }
     #[cfg(feature = "instrumented-libc")]
-    instrumented_depth_fetch_sub(1);
+    let previous = instrumented_depth_fetch_sub(1);
     #[cfg(not(feature = "instrumented-libc"))]
-    CALL_DEPTH.with(|d| {
-        d.fetch_sub(1, Ordering::Release);
-    });
+    let previous = CALL_DEPTH.with(|d| d.fetch_sub(1, Ordering::Release));
+    if previous == 1 {
+        // Back in the program: signals held while rsched parked this
+        // thread run now.
+        unsafe { signals::deliver(false) };
+    }
 }
 
 #[cfg(all(feature = "instrumented-libc", target_env = "musl"))]
@@ -1423,6 +1435,25 @@ fn depth_exit() {
     });
 }
 
+/// Runs `f` at depth zero, as if called from the program, so that the libc
+/// calls of a signal handler it runs reach rsched's models.
+pub(crate) fn with_outer_depth<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "instrumented-libc")]
+    let saved = {
+        let depth = instrumented_depth_load();
+        instrumented_depth_store(0);
+        depth
+    };
+    #[cfg(not(feature = "instrumented-libc"))]
+    let saved = CALL_DEPTH.with(|d| d.swap(0, Ordering::AcqRel));
+    let r = f();
+    #[cfg(feature = "instrumented-libc")]
+    instrumented_depth_store(saved);
+    #[cfg(not(feature = "instrumented-libc"))]
+    CALL_DEPTH.with(|d| d.store(saved, Ordering::Release));
+    r
+}
+
 #[inline]
 fn is_in_rsched() -> bool {
     #[cfg(feature = "instrumented-libc")]
@@ -1452,13 +1483,13 @@ unsafe fn with_internal_depth<T>(f: impl FnOnce() -> T) -> T {
 #[inline]
 unsafe fn with_libc_wrappers_bypassed<T>(f: impl FnOnce() -> T) -> T {
     #[cfg(feature = "instrumented-libc")]
-    {
-        with_internal_depth(f)
-    }
+    let r = with_internal_depth(f);
     #[cfg(not(feature = "instrumented-libc"))]
-    {
-        f()
-    }
+    let r = f();
+    // Back in the program: signals held while rsched parked this thread
+    // run now.
+    signals::deliver(false);
+    r
 }
 
 unsafe fn st() -> &'static mut State {
@@ -1621,14 +1652,48 @@ pub(crate) unsafe fn do_thread_exit(caller: PthreadT) {
         let next = local_tasks[idx];
         let cond_ptr = addr_of_mut!(st().t(next).suspend_cond);
         st().task_provider.wake(ParkingHandle::new(cond_ptr));
-    } else if let Some(choice) = st().choose_task(0 as PthreadT, false)
-        && let SwitchResult::WakeLocal { pthread, .. } =
+    } else if let Some(choice) = st().choose_task(0 as PthreadT, false) {
+        let domain = st().task_provider.current_domain();
+        let next = if choice.domain != domain && !st().threads.is_empty() {
+            // This thread runs its process's turn, and the process's other
+            // tasks are all blocked. Hand the turn to the other process and
+            // wait for it to come back here, as a switching task does, then
+            // pass it to the local task chosen then. Exiting at once would
+            // leave no task to take the turn back; with coroutines, the
+            // blocked task that resumed this one would run on without it.
             st().task_provider
-                .switch_task(choice, 0 as PthreadT, SwitchMode::ReleaseCurrent)
-        && st().info.contains_key(&pthread)
-    {
-        let cond_ptr = addr_of_mut!(st().t(pthread).suspend_cond);
-        st().task_provider.wake(ParkingHandle::new(cond_ptr));
+                .hand_off_and_wait(choice)
+                .and_then(|pthread| {
+                    let local = TaskChoice {
+                        creation_idx: None,
+                        domain,
+                        pthread,
+                    };
+                    match st().task_provider.switch_task(
+                        local,
+                        0 as PthreadT,
+                        SwitchMode::ReleaseCurrent,
+                    ) {
+                        SwitchResult::WakeLocal { pthread, .. } => Some(pthread),
+                        SwitchResult::Done => None,
+                    }
+                })
+        } else {
+            match st().task_provider.switch_task(
+                choice,
+                0 as PthreadT,
+                SwitchMode::ReleaseCurrent,
+            ) {
+                SwitchResult::WakeLocal { pthread, .. } => Some(pthread),
+                SwitchResult::Done => None,
+            }
+        };
+        if let Some(pthread) = next
+            && st().info.contains_key(&pthread)
+        {
+            let cond_ptr = addr_of_mut!(st().t(pthread).suspend_cond);
+            st().task_provider.wake(ParkingHandle::new(cond_ptr));
+        }
     }
     rsched_gunlock();
     depth_exit();
@@ -1683,6 +1748,7 @@ pub(crate) extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void
 
         st().task_provider.global_unlock();
         depth_exit();
+        signals::deliver(false);
 
         // Run the user's thread function with CALL_DEPTH back to 0 so that
         // user calls to pthread_* are correctly intercepted by instrumented libc.
