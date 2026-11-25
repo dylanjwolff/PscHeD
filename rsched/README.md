@@ -248,6 +248,30 @@ writable. `epoll_wait` and `epoll_pwait` wait on the epoll descriptor like a
 `poll` on it, so a wait with a timeout expires in virtual time. `select`,
 `ppoll`, `epoll_pwait2`, and opening FIFOs are not modeled.
 
+### Kernel locks
+
+`fcntl` record locks (`F_SETLK`, `F_SETLKW`, and the `F_OFD_*` forms, which
+`lockf` uses too), `flock`, `semop`, and `semtimedop` are scheduling points,
+and so are the `semctl` commands that change or remove a semaphore
+(`SETVAL`, `SETALL`, `IPC_RMID`). Each runs in its non-blocking form:
+`F_SETLK`, `LOCK_NB`, or `IPC_NOWAIT` on every operation. When that reports
+it would block, the task blocks until some task releases a kernel lock: an
+unlock, a semaphore operation that changes a value, one of those `semctl`
+commands, any `close`, or a process exit. rsched does not track which lock
+each release frees, so every release makes every lock waiter runnable. A
+waiter whose lock is still held blocks again without adding a scheduling
+point. A `semtimedop` timeout is a timed wait in virtual time, and signals
+interrupt lock waits like sleeps; `SA_RESTART` restarts file locks but not
+`semop`.
+
+When no task can run and some wait for kernel locks, rsched sleeps 10 ms in
+real time and lets them try again, in case a lock was released in a way it
+does not watch. If no task takes a lock by the next time no task can run,
+the tasks are deadlocked: rsched prints `rsched: deadlock: ...`, kills every
+scheduled process, and exits with status 101. Each integration mode reaches
+these calls the way it reaches I/O; under `RSCHED_SECCOMP=1` and binary
+instrumentation, they are also scheduling points.
+
 ## Processes
 
 `fork`, `waitpid`, `_exit`, and `execv`/`execve` are scheduled: a forked child

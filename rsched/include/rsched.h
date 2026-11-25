@@ -1,14 +1,17 @@
 #pragma once
 #include <poll.h>
 #include <pthread.h>
+#include <fcntl.h>
 #include <sched.h>
 #include <semaphore.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <signal.h>
 #include <sys/epoll.h>
+#include <sys/file.h>
 #include <sys/random.h>
 #include <sys/select.h>
+#include <sys/sem.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -138,6 +141,16 @@ int rsched_epoll_wait(int, struct epoll_event *, int, int);
 int rsched_epoll_pwait(int, struct epoll_event *, int, int, const sigset_t *);
 int rsched_sigtimedwait(const sigset_t *, siginfo_t *, const struct timespec *);
 
+/* Kernel file locks and SysV semaphores.  Each lock operation is a
+   scheduling point; a task that cannot take a lock waits, not runnable,
+   until some task releases a kernel lock. */
+int rsched_fcntl(int, int, ...);
+int rsched_flock(int, int);
+int rsched_lockf(int, int, off_t);
+int rsched_semop(int, struct sembuf *, size_t);
+int rsched_semtimedop(int, struct sembuf *, size_t, const struct timespec *);
+int rsched_semctl(int, int, int, ...);
+
 /* Descriptor closing.  rsched's own descriptors survive these: closing one
    reports success, and dup2/dup3 onto one fail with EBADF. */
 int rsched_close(int);
@@ -220,6 +233,12 @@ int rsched_dup3(int, int, int);
 #define epoll_wait              rsched_epoll_wait
 #define epoll_pwait             rsched_epoll_pwait
 #define sigtimedwait            rsched_sigtimedwait
+#define fcntl                   rsched_fcntl
+#define flock(fd, op)           rsched_flock(fd, op)
+#define lockf                   rsched_lockf
+#define semop                   rsched_semop
+#define semtimedop              rsched_semtimedop
+#define semctl                  rsched_semctl
 #define close                   rsched_close
 #define close_range             rsched_close_range
 #define closefrom               rsched_closefrom

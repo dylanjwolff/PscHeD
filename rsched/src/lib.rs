@@ -24,6 +24,7 @@ pub use event::{AccessKind, Event, EventKind};
 
 mod fuzzing;
 mod io;
+mod locks;
 mod seccomp;
 mod signals;
 mod sync;
@@ -360,6 +361,9 @@ impl State {
             }
             // Deadlines pass in virtual time: once no task can run.
             if self.expire_timed_wait() {
+                continue;
+            }
+            if task_provider::retry_lock_waiters() {
                 continue;
             }
             if !task_provider::wake_io_waiters(true) {
@@ -931,6 +935,8 @@ pub unsafe extern "C" fn rsched_process_exit() {
     // this process is gone. Waiting for that here would deadlock, so wake
     // the waiters to check again in their own processes.
     task_provider::wake_all_io_waiters();
+    // The exit also drops the process's kernel locks.
+    task_provider::wake_lock_waiters();
     let next = st().choose_task(0 as PthreadT, false);
     st().task_provider.process_exit(next);
     rsched_gunlock();
@@ -997,7 +1003,12 @@ pub unsafe extern "C" fn rsched_syscall(
     if io::is_modeled(number) {
         return io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5]);
     }
+    if locks::is_lock_syscall(number) {
+        let args = [a0, a1, a2, a3, a4, a5];
+        return io::libc_result(locks::syscall(return_address(), number, &args, true));
+    }
     if let Some(r) = io::guarded_syscall(number, &[a0, a1, a2, a3, a4, a5]) {
+        locks::after_close(number, r);
         return io::libc_result(r);
     }
     if virt::waits_in_kernel(number) {
@@ -1063,7 +1074,12 @@ pub unsafe extern "C" fn rsched_process_syscall(
     }
     let args = &*(args as *const [libc::c_long; 6]);
     if let Some(r) = io::guarded_syscall(number, args) {
+        locks::after_close(number, r);
         *ret = r;
+        return true;
+    }
+    if locks::is_lock_syscall(number) {
+        *ret = locks::syscall(return_address(), number, args, true);
         return true;
     }
     if let Some(r) = virt_syscall(number, args) {
@@ -1106,9 +1122,13 @@ pub unsafe extern "C" fn rsched_libc_syscall(
         io::libc_result(r)
     } else if outermost && io::is_modeled(number) {
         io::syscall(return_address(), number, [a0, a1, a2, a3, a4, a5])
+    } else if outermost && locks::is_lock_syscall(number) {
+        let args = [a0, a1, a2, a3, a4, a5];
+        io::libc_result(locks::syscall(return_address(), number, &args, true))
     } else if let Some(r) = io::guarded_syscall(number, &[a0, a1, a2, a3, a4, a5])
         && outermost
     {
+        locks::after_close(number, r);
         io::libc_result(r)
     } else if outermost && virt::waits_in_kernel(number) {
         let args = [a0, a1, a2, a3, a4, a5];

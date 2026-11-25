@@ -61,7 +61,7 @@ fn supported_clock(clock: clockid_t) -> bool {
 }
 
 /// The deadline `rel` after now on `clock`, which must be virtual.
-unsafe fn after(clock: clockid_t, rel: timespec) -> Deadline {
+pub(crate) unsafe fn after(clock: clockid_t, rel: timespec) -> Deadline {
     let now = virt::now(clock);
     let mut at = timespec {
         tv_sec: now.tv_sec.saturating_add(rel.tv_sec),

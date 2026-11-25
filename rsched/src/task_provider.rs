@@ -83,8 +83,14 @@ impl TaskHandle {
             task.is_blocking = 1;
             task.is_waiting = 0;
             task.io_wait = 0;
+            task.lock_wait = 0;
             task.deadline = NO_DEADLINE;
         });
+    }
+
+    /// Marks the task as waiting for a kernel lock to be released.
+    pub(crate) unsafe fn set_lock_wait(self, lock_wait: bool) {
+        self.with_task(|task| task.lock_wait = u8::from(lock_wait));
     }
 
     /// Records the deadline of the timed wait the task blocks in, or
@@ -938,6 +944,8 @@ struct SharedTask {
     timed_out: u8,
     /// Blocked in a sleep, which a signal interrupts like I/O waits.
     sleeping: u8,
+    /// Blocked until some task releases a kernel lock (see `locks`).
+    lock_wait: u8,
     /// Another process sent this task's process a signal while the task was
     /// blocked in an interruptible wait, and made it runnable to handle it.
     interrupted: u8,
@@ -954,6 +962,10 @@ struct ProcessShared {
     dfs: SharedDfsState,
     env: crate::virt::SharedEnv,
     files: crate::files::SharedFiles,
+    /// Set once rsched has let every lock waiter retry because no task
+    /// could run; cleared when a task takes a kernel lock or starts to wait
+    /// for one. Seeing it set again with no task able to run is a deadlock.
+    lock_retried: u8,
     tasks: [SharedTask; MAX_TASKS],
     slots: [ProcessSlot; MAX_PROCESSES],
 }
@@ -1154,6 +1166,7 @@ unsafe fn deactivate_process_tasks(ps: *mut ProcessShared, domain: i32) {
             (*ps).tasks[id].is_waiting = 0;
             (*ps).tasks[id].io_wait = 0;
             (*ps).tasks[id].sleeping = 0;
+            (*ps).tasks[id].lock_wait = 0;
             (*ps).tasks[id].interrupted = 0;
             (*ps).tasks[id].deadline = NO_DEADLINE;
         }
@@ -1199,6 +1212,7 @@ impl ProcessTaskProvider {
             io_wait: 0,
             timed_out: 0,
             sleeping: 0,
+            lock_wait: 0,
             interrupted: 0,
             domain: slot,
             pthread: pt as usize,
@@ -1814,6 +1828,124 @@ pub(crate) unsafe fn wake_io_waiters(block: bool) -> bool {
             (*ps).tasks[id].is_blocking = 0;
         }
     }
+    true
+}
+
+unsafe fn lock_waiters(ps: *mut ProcessShared) -> impl Iterator<Item = usize> {
+    (0..(*ps).task_count.min(MAX_TASKS)).filter(move |&id| {
+        let t = (*ps).tasks[id];
+        t.active != 0 && t.lock_wait != 0 && t.is_blocking != 0
+    })
+}
+
+/// Whether some task is blocked waiting for a kernel lock. Reads shared
+/// state without GMTX, as a cheap check before taking it.
+pub(crate) unsafe fn lock_waiters_exist() -> bool {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    !ps.is_null() && lock_waiters(ps).next().is_some()
+}
+
+/// Makes every task blocked waiting for a kernel lock runnable; each tries
+/// its lock again and waits anew if it is still held. Must be called with
+/// GMTX held.
+pub(crate) unsafe fn wake_lock_waiters() {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if ps.is_null() {
+        return;
+    }
+    let ids: Vec<usize> = lock_waiters(ps).collect();
+    for id in ids {
+        (*ps).tasks[id].is_blocking = 0;
+    }
+}
+
+/// Records that a task took a kernel lock or started to wait for one, so
+/// the lock waiters may retry again once no task can run.
+pub(crate) unsafe fn lock_progress() {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if !ps.is_null() {
+        (*ps).lock_retried = 0;
+    }
+}
+
+/// When no task can run: lets the tasks waiting for kernel locks try them
+/// once more after a short real sleep, in case a lock was released in a way
+/// rsched does not watch, and returns true. Returns false when no task waits
+/// for a lock, or when they already retried and some task waits on I/O,
+/// which may still release a lock. When only lock waiters remain and they
+/// already retried, the tasks are deadlocked: reports it and ends every
+/// scheduled process. Must be
+/// called with GMTX held.
+pub(crate) unsafe fn retry_lock_waiters() -> bool {
+    let ps = PROCESS_SHARED.load(Ordering::Acquire);
+    if ps.is_null() {
+        return false;
+    }
+    let waiting: Vec<usize> = lock_waiters(ps).collect();
+    if waiting.is_empty() {
+        return false;
+    }
+    if (*ps).lock_retried != 0 {
+        let io_blocked = (0..(*ps).task_count.min(MAX_TASKS)).any(|id| {
+            let t = (*ps).tasks[id];
+            t.active != 0 && t.io_wait != 0 && t.is_blocking != 0
+        });
+        if io_blocked {
+            return false;
+        }
+        let msg = format!(
+            "rsched: deadlock: no task can run and tasks {waiting:?} wait for kernel locks \
+             that no task releases\n"
+        );
+        crate::seccomp::raw_syscall6(
+            libc::SYS_write,
+            libc::STDERR_FILENO.into(),
+            msg.as_ptr() as libc::c_long,
+            msg.len() as libc::c_long,
+            0,
+            0,
+            0,
+        );
+        // The other processes are parked waiting for a turn that never
+        // comes, so they end too.
+        let current = PROCESS_SLOT.load(Ordering::Acquire);
+        for slot in (0..MAX_PROCESSES).filter(|&slot| slot as i32 != current) {
+            let target = (*ps).slots[slot].pid;
+            if (*ps).slots[slot].active != 0 && target > 0 {
+                crate::seccomp::raw_syscall6(
+                    libc::SYS_kill,
+                    target.into(),
+                    libc::SIGKILL.into(),
+                    0,
+                    0,
+                    0,
+                    0,
+                );
+            }
+        }
+        crate::seccomp::raw_syscall6(libc::SYS_exit_group, 101, 0, 0, 0, 0, 0);
+        unreachable!();
+    }
+    (*ps).lock_retried = 1;
+    process_log(format_args!(
+        "no task can run: lock waiters {waiting:?} retry"
+    ));
+    crate::rsched_gunlock();
+    let pause = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 10_000_000,
+    };
+    crate::seccomp::raw_syscall6(
+        libc::SYS_nanosleep,
+        &pause as *const libc::timespec as libc::c_long,
+        0,
+        0,
+        0,
+        0,
+        0,
+    );
+    crate::rsched_glock();
+    wake_lock_waiters();
     true
 }
 
