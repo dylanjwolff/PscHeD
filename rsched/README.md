@@ -186,7 +186,13 @@ their CPU, and randomness from deterministic models, and run without address-spa
   realtime clock and 1000 s for the monotonic clocks, and advances
   by 1 µs at every scheduling point and every clock read, so a loop that
   spins on the clock still ends. `time` and `gettimeofday` read the same
-  virtual realtime clock. CPU-time clocks stay real.
+  virtual realtime clock.
+- CPU time is virtual too: every task is taken to run for all of the
+  elapsed virtual time. The CPU-time clocks, `times`, and `getrusage` report
+  that as user time; system time, children's times, and the other
+  `getrusage` counters, such as memory and context switches, are zero.
+  Sleeping on a CPU-time clock is not modeled and left to the kernel, so
+  an absolute deadline taken from the virtual CPU time can wait far longer.
 - File times follow virtual time. rsched keeps a table of the access,
   modification, and change times of files, keyed by device and inode, in
   memory shared by the process tree. A successful `write`, `pwrite`,

@@ -13,7 +13,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/times.h>
 #include <poll.h>
 #include <time.h>
 #include <unistd.h>
@@ -295,8 +297,23 @@ static int run_once(void) {
     struct timespec rt, mono;
     clock_gettime(CLOCK_REALTIME, &rt);
     clock_gettime(CLOCK_MONOTONIC, &mono);
-    printf(" cpu=%d realtime=%lld.%09ld monotonic=%lld.%09ld\n", sched_getcpu(),
+    printf(" cpu=%d realtime=%lld.%09ld monotonic=%lld.%09ld", sched_getcpu(),
            (long long)rt.tv_sec, rt.tv_nsec, (long long)mono.tv_sec, mono.tv_nsec);
+    /* CPU time is virtual too, as Apache's /server-status reports it, and
+       moves on every read, so a loop that spins on it ends. */
+    clock_t spin_start = clock();
+    while (clock() - spin_start < CLOCKS_PER_SEC / 200)
+        ;
+    struct timespec cpu;
+    struct tms tms;
+    struct rusage ru;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu);
+    clock_t ticks = times(&tms);
+    getrusage(RUSAGE_SELF, &ru);
+    printf(" process_cpu=%lld.%09ld times=%ld/%ld/%ld utime=%ld.%06ld maxrss=%ld\n",
+           (long long)cpu.tv_sec, cpu.tv_nsec, (long)ticks, (long)tms.tms_utime,
+           (long)tms.tms_stime, (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec,
+           ru.ru_maxrss);
     return 0;
 }
 

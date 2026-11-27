@@ -10,11 +10,13 @@
 #include <sys/epoll.h>
 #include <sys/file.h>
 #include <sys/random.h>
+#include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/sem.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/times.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -95,6 +97,8 @@ int  rsched_sched_getcpu(void);
 ssize_t rsched_getrandom(void *, size_t, unsigned int);
 time_t rsched_time(time_t *);
 int  rsched_gettimeofday(struct timeval *, void *);
+clock_t rsched_times(struct tms *);
+int  rsched_getrusage(int, struct rusage *);
 
 /* Stat calls report virtual file times: a successful write or truncate
    sets a file's mtime and ctime to the virtual time. */
@@ -198,6 +202,8 @@ int rsched_dup3(int, int, int);
 /* Function-like where the name is also a struct or field name. */
 #define time(t)                 rsched_time(t)
 #define gettimeofday            rsched_gettimeofday
+#define times(b)                rsched_times(b)
+#define getrusage               rsched_getrusage
 #define stat(p, b)              rsched_stat(p, b)
 #define lstat                   rsched_lstat
 #define fstat                   rsched_fstat

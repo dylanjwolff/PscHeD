@@ -1051,6 +1051,16 @@ unsafe fn virt_syscall(number: libc::c_long, args: &[libc::c_long; 6]) -> Option
             args[2] as *const _,
             args[3] as *mut _,
         ))),
+        libc::SYS_times => Some(match virt::rsched_times(args[0] as *mut _) {
+            -1 => -libc::c_long::from(*libc::__errno_location()),
+            ticks => ticks,
+        }),
+        libc::SYS_getrusage => Some(
+            match virt::rsched_getrusage(args[0] as libc::c_int, args[1] as *mut _) {
+                0 => 0,
+                _ => -libc::c_long::from(*libc::__errno_location()),
+            },
+        ),
         libc::SYS_clock_gettime => {
             let r = virt::rsched_clock_gettime(args[0] as libc::clockid_t, args[1] as *mut _);
             Some(if r == 0 {

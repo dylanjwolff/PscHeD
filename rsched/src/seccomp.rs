@@ -251,6 +251,8 @@ unsafe fn install_filter() {
         // Raw reads of these come from rsched's deterministic models.
         libc::SYS_getrandom as u32,
         libc::SYS_clock_gettime as u32,
+        libc::SYS_times as u32,
+        libc::SYS_getrusage as u32,
         clone_syscall,
         clone3_syscall,
     ];
