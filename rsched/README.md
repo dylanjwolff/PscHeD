@@ -261,7 +261,18 @@ unlock, a semaphore operation that changes a value, one of those `semctl`
 commands, any `close`, or a process exit. rsched does not track which lock
 each release frees, so every release makes every lock waiter runnable. A
 waiter whose lock is still held blocks again without adding a scheduling
-point. A `semtimedop` timeout is a timed wait in virtual time, and signals
+point.
+
+To revisit: a woken waiter that fails its retry is not invisible to the
+scheduler. Its wake is a choice the scheduler can make (a branch under DFS
+that ends in the same state as not choosing it), and blocking again is a
+context switch. Since every `close` anywhere wakes every lock waiter, this
+adds redundant schedules. Options: wake on `close` only when the closing
+process holds kernel locks; check a semaphore waiter's operations against
+the values before waking it; or undo the scheduler's choice when the retry
+fails.
+
+A `semtimedop` timeout is a timed wait in virtual time, and signals
 interrupt lock waits like sleeps; `SA_RESTART` restarts file locks but not
 `semop`.
 
