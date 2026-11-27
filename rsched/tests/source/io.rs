@@ -137,6 +137,38 @@ fn signal_from_another_process_interrupts_a_blocked_read() {
 }
 
 #[test]
+fn processes_contend_for_an_fcntl_lock() {
+    let stdout = run_case("CASE_IO_FCNTL_LOCK_PROCESSES", &[]);
+    assert!(stdout.contains("traces=2"), "{stdout}");
+}
+
+#[test]
+fn processes_contend_for_a_lockf_lock() {
+    let stdout = run_case("CASE_IO_LOCKF_PROCESSES", &[]);
+    assert!(stdout.contains("traces=2"), "{stdout}");
+}
+
+#[test]
+fn processes_contend_for_a_flock_lock() {
+    let stdout = run_case("CASE_IO_FLOCK_PROCESSES", &[]);
+    assert!(stdout.contains("traces=2"), "{stdout}");
+}
+
+#[test]
+fn processes_contend_for_a_sysv_semaphore() {
+    let stdout = run_case("CASE_IO_SEMOP_PROCESSES", &[]);
+    assert!(stdout.contains("traces=2"), "{stdout}");
+}
+
+#[test]
+fn seccomp_routes_kernel_locks_from_libc_internals() {
+    // glibc's own lockf makes the fcntl syscall inside libc, past the
+    // rsched.h macros; the seccomp filter traps it.
+    let stdout = run_case("CASE_IO_RAW_LOCKF_PROCESSES", &[("RSCHED_SECCOMP", "1")]);
+    assert!(stdout.contains("traces=2"), "{stdout}");
+}
+
+#[test]
 fn tcp_loopback_poll_accept_connect() {
     let stdout = run_case("CASE_IO_TCP_THREADS", &[]);
     assert!(stdout.contains("traces=2"), "{stdout}");

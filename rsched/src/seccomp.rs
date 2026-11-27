@@ -256,6 +256,7 @@ unsafe fn install_filter() {
     ];
     trapped.extend(crate::io::MODELED_SYSCALLS.iter().map(|&nr| nr as u32));
     trapped.extend(crate::io::FD_GUARDED_SYSCALLS.iter().map(|&nr| nr as u32));
+    trapped.extend(crate::locks::LOCK_SYSCALLS.iter().map(|&nr| nr as u32));
     let ld = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
     let jeq = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
     let ret = (libc::BPF_RET | libc::BPF_K) as u16;

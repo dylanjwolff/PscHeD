@@ -10,7 +10,7 @@ use llvm_plugin::inkwell::llvm_sys::core::{
 };
 use llvm_plugin::inkwell::llvm_sys::{LLVMLinkage, LLVMVisibility};
 use llvm_plugin::inkwell::module::{Linkage, Module};
-use llvm_plugin::inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicTypeEnum};
+use llvm_plugin::inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use llvm_plugin::inkwell::values::{
     AsValueRef, BasicMetadataValueEnum, BasicValueEnum, CallSiteValue, FunctionValue,
     InstructionOpcode, InstructionValue, PointerValue,
@@ -783,6 +783,14 @@ const PTHREAD_REWRITES: &[(&str, &str)] = &[
     ("execve", "rsched_execve"),
     ("_exit", "rsched_process_exit_status"),
     ("syscall", "rsched_syscall"),
+    ("fcntl", "rsched_fcntl"),
+    ("fcntl64", "rsched_fcntl"),
+    ("flock", "rsched_flock"),
+    ("lockf", "rsched_lockf"),
+    ("lockf64", "rsched_lockf"),
+    ("semop", "rsched_semop"),
+    ("semtimedop", "rsched_semtimedop"),
+    ("semctl", "rsched_semctl"),
     ("close", "rsched_close"),
     ("close_range", "rsched_close_range"),
     ("closefrom", "rsched_closefrom"),
@@ -1057,7 +1065,26 @@ fn build_guarded_wrapper<'ctx>(
     activate_hooks: bool,
 ) {
     let context = module.get_context();
-    let function_type = real.get_type();
+    let real_type = real.get_type();
+    // A variadic function, such as musl's fcntl and semctl, gets a wrapper
+    // that takes its fixed parameters and one 64-bit integer. On x86_64 a
+    // variadic caller passes that argument in the same register, so the
+    // wrapper and rsched's model receive it unchanged, and the wrapper
+    // passes it on to the real function as its variadic argument.
+    let function_type = if real_type.is_var_arg() {
+        let mut params: Vec<BasicMetadataTypeEnum<'ctx>> = real_type
+            .get_param_types()
+            .into_iter()
+            .map(BasicMetadataTypeEnum::from)
+            .collect();
+        params.push(context.i64_type().into());
+        match real_type.get_return_type() {
+            Some(ret) => ret.fn_type(&params, false),
+            None => context.void_type().fn_type(&params, false),
+        }
+    } else {
+        real_type
+    };
     let wrapper = module.add_function(name, function_type, Some(real.get_linkage()));
     let rsched = module
         .get_function(rsched_name)
@@ -1771,6 +1798,12 @@ const MUSL_IO_REWRITES: &[IoRewrite] = &[
     ("accept4", "accept4", "rsched_accept4"),
     ("connect", "connect", "rsched_connect"),
     ("poll", "poll", "rsched_poll"),
+    // Kernel locks (src/locks.rs). musl's lockf calls the public fcntl.
+    ("fcntl", "fcntl", "rsched_fcntl"),
+    ("flock", "flock", "rsched_flock"),
+    ("semop", "semop", "rsched_semop"),
+    ("semtimedop", "semtimedop", "rsched_semtimedop"),
+    ("semctl", "semctl", "rsched_semctl"),
     ("close", "close", "rsched_close"),
     ("dup2", "dup2", "rsched_dup2"),
     ("__dup3", "dup3", "rsched_dup3"),

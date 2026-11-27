@@ -112,7 +112,7 @@ fn is_nonblocking(fd: c_int) -> bool {
     crate::sys::status_flags(fd).map_or(true, |flags| flags & libc::O_NONBLOCK != 0)
 }
 
-unsafe fn io_point(instr_addr: u64, fd: c_int, syscall: c_long) {
+pub(crate) unsafe fn io_point(instr_addr: u64, fd: c_int, syscall: c_long) {
     crate::rsched_glock();
     let caller = crate::my_pt();
     crate::st().set_event(
@@ -428,7 +428,9 @@ pub(crate) unsafe fn libc_result(r: c_long) -> c_long {
 }
 
 unsafe fn guarded(nr: c_long, args: [c_long; 6]) -> c_long {
-    libc_result(guarded_syscall(nr, &args).expect("rsched: syscall is not fd-guarded"))
+    let r = guarded_syscall(nr, &args).expect("rsched: syscall is not fd-guarded");
+    crate::locks::after_close(nr, r);
+    libc_result(r)
 }
 
 #[unsafe(no_mangle)]

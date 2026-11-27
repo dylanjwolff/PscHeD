@@ -557,6 +557,103 @@ static int run_once(void) {
     return bad || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
 }
 
+#elif defined(CASE_IO_FCNTL_LOCK_PROCESSES) || defined(CASE_IO_LOCKF_PROCESSES) ||           \
+    defined(CASE_IO_RAW_LOCKF_PROCESSES) || defined(CASE_IO_FLOCK_PROCESSES) ||                 \
+    defined(CASE_IO_SEMOP_PROCESSES)
+
+/* A parent and a forked child each take the same kernel lock, yield while
+   holding it, and release it, as Apache's processes serialize accept with
+   `Mutex fcntl`, `flock`, or `sysvsem`. Whoever loses the race blocks in
+   the kernel: modeled as a task waiting for the lock, it lets the holder
+   run and release it. The trace records who took the lock first ("P" or
+   "C"); a shared flag checks that both never hold it at once. */
+#include <sys/file.h>
+#include <sys/sem.h>
+#define EXPECTED_TRACES 2
+static volatile int *inside;
+static char lock_path[] = "/tmp/rsched-lock-XXXXXX";
+static int sem_id;
+
+#if defined(CASE_IO_FCNTL_LOCK_PROCESSES)
+static int lock_fd;
+static int open_lock(void) { return (lock_fd = open(lock_path, O_RDWR)) < 0; }
+static int set_lock(short type) {
+    struct flock fl = {.l_type = type, .l_whence = SEEK_SET};
+    return fcntl(lock_fd, F_SETLKW, &fl);
+}
+static int take(void) { return set_lock(F_WRLCK); }
+static int give(void) { return set_lock(F_UNLCK); }
+#elif defined(CASE_IO_LOCKF_PROCESSES) || defined(CASE_IO_RAW_LOCKF_PROCESSES)
+#if defined(CASE_IO_RAW_LOCKF_PROCESSES) && defined(RSCHED)
+/* glibc's own lockf, whose fcntl syscall only the seccomp filter sees. */
+#undef lockf
+#endif
+static int lock_fd;
+static int open_lock(void) { return (lock_fd = open(lock_path, O_RDWR)) < 0; }
+static int take(void) { return lockf(lock_fd, F_LOCK, 0); }
+static int give(void) { return lockf(lock_fd, F_ULOCK, 0); }
+#elif defined(CASE_IO_FLOCK_PROCESSES)
+/* flock locks belong to the open file, which fork shares, so each process
+   opens the file itself. */
+static int lock_fd;
+static int open_lock(void) { return (lock_fd = open(lock_path, O_RDWR)) < 0; }
+static int take(void) { return flock(lock_fd, LOCK_EX); }
+static int give(void) { return flock(lock_fd, LOCK_UN); }
+#else
+static int open_lock(void) { return 0; }
+static int sem_add(short n) {
+    struct sembuf op = {.sem_num = 0, .sem_op = n};
+    return semop(sem_id, &op, 1);
+}
+static int take(void) { return sem_add(-1); }
+static int give(void) { return sem_add(1); }
+#endif
+
+static int critical_section(char who) {
+    if (open_lock() || take())
+        return 1;
+    int bad = *inside;
+    *inside = 1;
+    mark(who);
+    sched_yield();
+    sched_yield();
+    *inside = 0;
+    return give() || bad;
+}
+
+static int run_once(void) {
+    inside = mmap(0, sizeof *inside, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+    if (inside == MAP_FAILED)
+        return fail("mmap");
+    strcpy(lock_path, "/tmp/rsched-lock-XXXXXX");
+    int tmp = mkstemp(lock_path);
+    if (tmp < 0)
+        return fail("mkstemp");
+    close(tmp);
+    sem_id = semget(IPC_PRIVATE, 1, 0600);
+    if (sem_id < 0 || semctl(sem_id, 0, SETVAL, 1) != 0)
+        return fail("semget");
+    pid_t child = fork();
+    if (child < 0)
+        return fail("fork");
+    if (child == 0) {
+        int bad = critical_section('C');
+#ifdef RSCHED
+        rsched_process_exit();
+#endif
+        _exit(bad);
+    }
+    int bad = critical_section('P');
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0)
+        if (errno != EINTR)
+            return fail("waitpid");
+    unlink(lock_path);
+    semctl(sem_id, 0, IPC_RMID);
+    munmap((void *)inside, sizeof *inside);
+    return bad || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
+}
+
 #else
 #error "define one CASE_IO_* variant"
 #endif
