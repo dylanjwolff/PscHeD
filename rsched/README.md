@@ -149,11 +149,17 @@ another task releases it.
 Deadlines pass in virtual time. A timed wait or sleep expires once the
 virtual clock reaches its deadline. Every scheduling point moves the clock
 forward, so a task that spins on a flag cannot starve a sleeper. When no task
-can run, rsched picks one timed wait, moves the clock to its deadline, and
-expires it. A timeout is never reported early, and which wait expires and
-when depends only on the schedule.
+can run, rsched expires the timed wait with the earliest deadline, choosing
+among waits that tie, and moves the clock to it. A timeout is never reported
+early, a later deadline never expires before an earlier one, and which wait
+expires and when depends only on the schedule.
 
-`kill` (and `killpg`) between scheduled processes is a scheduling point.
+`kill` (and `killpg`) between scheduled processes is a scheduling point, and
+so is `pthread_kill` to a thread of the caller's process. A signal sent to
+a thread that is not blocked stays pending until it next enters an
+interruptible wait, which then fails with EINTR, even if the thread could
+have handled it earlier: rsched delivers held signals only on return from
+calls that can be interrupted.
 rsched blocks signals in a thread while it parks it, so a signal runs only
 once the thread holds the turn and returns to the program. The sender wakes
 the target's tasks blocked on I/O or in a sleep; the woken task runs the
@@ -180,7 +186,13 @@ their CPU, and randomness from deterministic models, and run without address-spa
   realtime clock and 1000 s for the monotonic clocks, and advances
   by 1 µs at every scheduling point and every clock read, so a loop that
   spins on the clock still ends. `time` and `gettimeofday` read the same
-  virtual realtime clock. CPU-time clocks stay real.
+  virtual realtime clock.
+- CPU time is virtual too: every task is taken to run for all of the
+  elapsed virtual time. The CPU-time clocks, `times`, and `getrusage` report
+  that as user time; system time, children's times, and the other
+  `getrusage` counters, such as memory and context switches, are zero.
+  Sleeping on a CPU-time clock is not modeled and left to the kernel, so
+  an absolute deadline taken from the virtual CPU time can wait far longer.
 - File times follow virtual time. rsched keeps a table of the access,
   modification, and change times of files, keyed by device and inode, in
   memory shared by the process tree. A successful `write`, `pwrite`,
@@ -260,7 +272,18 @@ unlock, a semaphore operation that changes a value, one of those `semctl`
 commands, any `close`, or a process exit. rsched does not track which lock
 each release frees, so every release makes every lock waiter runnable. A
 waiter whose lock is still held blocks again without adding a scheduling
-point. A `semtimedop` timeout is a timed wait in virtual time, and signals
+point.
+
+To revisit: a woken waiter that fails its retry is not invisible to the
+scheduler. Its wake is a choice the scheduler can make (a branch under DFS
+that ends in the same state as not choosing it), and blocking again is a
+context switch. Since every `close` anywhere wakes every lock waiter, this
+adds redundant schedules. Options: wake on `close` only when the closing
+process holds kernel locks; check a semaphore waiter's operations against
+the values before waking it; or undo the scheduler's choice when the retry
+fails.
+
+A `semtimedop` timeout is a timed wait in virtual time, and signals
 interrupt lock waits like sleeps; `SA_RESTART` restarts file locks but not
 `semop`.
 

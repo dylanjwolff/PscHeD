@@ -301,6 +301,87 @@ pub unsafe extern "C" fn rsched_gettimeofday(tv: *mut libc::timeval, tz: *mut c_
     0
 }
 
+/// Whether `clock` measures CPU time: the calling process's or thread's,
+/// or, for the negative ids of `clock_getcpuclockid` and
+/// `pthread_getcpuclockid`, another one's.
+fn is_cpu_clock(clock: clockid_t) -> bool {
+    // Negative ids with low bits 3 are dynamic clocks of devices, such as PTP.
+    (clock < 0 && clock & 7 != 3)
+        || clock == libc::CLOCK_PROCESS_CPUTIME_ID
+        || clock == libc::CLOCK_THREAD_CPUTIME_ID
+}
+
+/// Virtual CPU time: every task runs for all of the elapsed virtual time,
+/// so CPU time is the elapsed time, which depends only on the schedule.
+/// Each read moves time by a tick, like a virtual clock read, so a loop
+/// that spins on CPU time still ends.
+fn cpu_time() -> timespec {
+    env().elapsed_ns.fetch_add(TICK_NS, Ordering::Relaxed);
+    to_timespec(elapsed() as i64)
+}
+
+/// Clock ticks per second of `times`, Linux's USER_HZ.
+const CLOCK_TICKS: i64 = 100;
+
+/// `times`, in virtual time: the user time of the process is its virtual
+/// CPU time, the other times are zero, and the result is the virtual
+/// monotonic clock in ticks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_times(buf: *mut libc::tms) -> libc::clock_t {
+    if !started() {
+        return crate::io::libc_result(crate::seccomp::raw_syscall6(
+            libc::SYS_times,
+            buf as c_long,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ));
+    }
+    let ticks = |ts: timespec| to_ns(&ts) / (NS / CLOCK_TICKS);
+    if !buf.is_null() {
+        *buf = libc::tms {
+            tms_utime: ticks(cpu_time()),
+            tms_stime: 0,
+            tms_cutime: 0,
+            tms_cstime: 0,
+        };
+    }
+    ticks(now(libc::CLOCK_MONOTONIC))
+}
+
+/// `getrusage`, in virtual time: the user time of the process or thread is
+/// its virtual CPU time, and everything else, including memory and context
+/// switch counts, is zero, as it is for children.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_getrusage(who: c_int, usage: *mut libc::rusage) -> c_int {
+    let r = crate::seccomp::raw_syscall6(
+        libc::SYS_getrusage,
+        who as c_long,
+        usage as c_long,
+        0,
+        0,
+        0,
+        0,
+    );
+    if r < 0 {
+        *libc::__errno_location() = -r as c_int;
+        return -1;
+    }
+    if started() {
+        *usage = std::mem::zeroed();
+        if who != libc::RUSAGE_CHILDREN {
+            let cpu = cpu_time();
+            (*usage).ru_utime = libc::timeval {
+                tv_sec: cpu.tv_sec,
+                tv_usec: cpu.tv_nsec / 1000,
+            };
+        }
+    }
+    0
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rsched_clock_gettime(clock: clockid_t, tp: *mut timespec) -> c_int {
     if !started() || !is_virtual(clock) {
@@ -316,6 +397,10 @@ pub unsafe extern "C" fn rsched_clock_gettime(clock: clockid_t, tp: *mut timespe
         if r < 0 {
             *libc::__errno_location() = -r as c_int;
             return -1;
+        }
+        // The kernel checked the clock id; the time itself is virtual.
+        if started() && is_cpu_clock(clock) {
+            *tp = cpu_time();
         }
         return 0;
     }

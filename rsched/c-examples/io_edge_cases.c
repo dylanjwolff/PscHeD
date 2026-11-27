@@ -235,6 +235,34 @@ int main(void) {
     return 0;
 }
 
+#elif defined(CASE_IO_EDGE_ATEXIT_REAPS_CHILD)
+
+/* The parent returns from main, which hands over the schedule, and then an
+   atexit handler registered before rsched started reaps the child with
+   the kernel's wait4. The child, which got the turn, must run on rather
+   than wait for the parent to die. */
+#include <stdlib.h>
+#include <sys/wait.h>
+#include <time.h>
+static pid_t child;
+
+static void reap(void) {
+    int status;
+    if (wait4(child, &status, 0, 0) == child && WIFEXITED(status))
+        printf("ok\n");
+}
+
+int main(void) {
+    atexit(reap);
+    child = fork();
+    if (child == 0) {
+        struct timespec ten_ms = {0, 10 * 1000 * 1000};
+        nanosleep(&ten_ms, 0);
+        _exit(0);
+    }
+    return 0;
+}
+
 #else
 #error "define one CASE_IO_EDGE_* variant"
 #endif

@@ -10,11 +10,13 @@
 #include <sys/epoll.h>
 #include <sys/file.h>
 #include <sys/random.h>
+#include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/sem.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/times.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -95,6 +97,8 @@ int  rsched_sched_getcpu(void);
 ssize_t rsched_getrandom(void *, size_t, unsigned int);
 time_t rsched_time(time_t *);
 int  rsched_gettimeofday(struct timeval *, void *);
+clock_t rsched_times(struct tms *);
+int  rsched_getrusage(int, struct rusage *);
 
 /* Stat calls report virtual file times: a successful write or truncate
    sets a file's mtime and ctime to the virtual time. */
@@ -115,6 +119,7 @@ int rsched_execv(const char *, char *const []);
 int rsched_execve(const char *, char *const [], char *const []);
 pid_t rsched_waitpid(pid_t, int *, int);
 int   rsched_kill(pid_t, int);
+int   rsched_pthread_kill(pthread_t, int);
 
 /* File and socket operations.  Each is a scheduling point; on a blocking
    descriptor, the calling task blocks until the operation can proceed. */
@@ -197,6 +202,8 @@ int rsched_dup3(int, int, int);
 /* Function-like where the name is also a struct or field name. */
 #define time(t)                 rsched_time(t)
 #define gettimeofday            rsched_gettimeofday
+#define times(b)                rsched_times(b)
+#define getrusage               rsched_getrusage
 #define stat(p, b)              rsched_stat(p, b)
 #define lstat                   rsched_lstat
 #define fstat                   rsched_fstat
@@ -213,6 +220,7 @@ int rsched_dup3(int, int, int);
 #define execve                  rsched_execve
 #define waitpid                 rsched_waitpid
 #define kill                    rsched_kill
+#define pthread_kill            rsched_pthread_kill
 #define read                    rsched_read
 #define write                   rsched_write
 #define readv                   rsched_readv

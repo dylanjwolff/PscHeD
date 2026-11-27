@@ -1051,6 +1051,16 @@ unsafe fn virt_syscall(number: libc::c_long, args: &[libc::c_long; 6]) -> Option
             args[2] as *const _,
             args[3] as *mut _,
         ))),
+        libc::SYS_times => Some(match virt::rsched_times(args[0] as *mut _) {
+            -1 => -libc::c_long::from(*libc::__errno_location()),
+            ticks => ticks,
+        }),
+        libc::SYS_getrusage => Some(
+            match virt::rsched_getrusage(args[0] as libc::c_int, args[1] as *mut _) {
+                0 => 0,
+                _ => -libc::c_long::from(*libc::__errno_location()),
+            },
+        ),
         libc::SYS_clock_gettime => {
             let r = virt::rsched_clock_gettime(args[0] as libc::clockid_t, args[1] as *mut _);
             Some(if r == 0 {
@@ -1190,6 +1200,7 @@ pub unsafe extern "C" fn rsched_waitpid(
     options: libc::c_int,
 ) -> libc::pid_t {
     ensure_init();
+    task_provider::reap_handed_off(pid);
     if options & libc::WNOHANG != 0 {
         return with_internal_depth(|| libc::waitpid(pid, status, options));
     }
@@ -1642,6 +1653,9 @@ pub(crate) struct StartArg {
     /// Signaled (with GMTX held) once the new thread has registered itself.
     pub(crate) ready_cond: CondT,
     pub(crate) ready: bool,
+    /// The creator's program signal mask, if its signals were held (see
+    /// `signals::adopt`).
+    pub(crate) held: Option<u64>,
 }
 unsafe impl Send for StartArg {}
 
@@ -1726,6 +1740,7 @@ pub(crate) extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void
         let sa = &mut *(raw as *mut StartArg);
         let routine = sa.routine;
         let arg = sa.arg;
+        signals::adopt(sa.held);
 
         let self_pt = libc::pthread_self();
         #[cfg(not(feature = "instrumented-libc"))]
@@ -1820,6 +1835,7 @@ pub unsafe extern "C" fn rsched_pthread_create(
         arg,
         ready_cond: libc::PTHREAD_COND_INITIALIZER,
         ready: false,
+        held: None,
     }));
 
     rsched_glock();
@@ -1830,6 +1846,9 @@ pub unsafe extern "C" fn rsched_pthread_create(
     // thread.  Doing this before the real create keeps registration order
     // deterministic instead of letting the old and new children race to GMTX.
     st().drain_pending_child();
+    // Read after draining, which can park this thread and hold its signals:
+    // the new thread starts with the mask the creator has now.
+    (*sa).held = signals::held_mask();
 
     let r = st().task_provider.create(thread, attr, sa);
 

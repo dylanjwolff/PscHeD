@@ -654,6 +654,146 @@ static int run_once(void) {
     return bad || !WIFEXITED(status) || WEXITSTATUS(status) != 0;
 }
 
+#elif defined(CASE_IO_EXITED_CHILD_IS_REAPABLE)
+
+/* A forked child touches a large mapping, so the kernel takes a while to
+   tear it down, sets a shared flag, and exits. There is no scheduling point
+   between the flag and the exit, so once the parent sees the flag, the
+   child has handed over the schedule for good, and waitpid(WNOHANG) must
+   find it exited, as Apache's prefork master expects when it reaps
+   children it signalled ("R"). Reporting it still running ("L") would
+   make the result depend on how fast the kernel tears the child down. */
+#define EXPECTED_TRACES 1
+#define REAP_ROUNDS 8
+#define REAP_MAPPING (64 << 20)
+
+static int run_once(void) {
+    volatile int *exited = mmap(0, sizeof *exited, PROT_READ | PROT_WRITE,
+                                MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+    if (exited == MAP_FAILED)
+        return fail("mmap");
+    int late = 0;
+    for (int round = 0; round < REAP_ROUNDS; round++) {
+        *exited = 0;
+        pid_t child = fork();
+        if (child < 0)
+            return fail("fork");
+        if (child == 0) {
+            char *big = mmap(0, REAP_MAPPING, PROT_READ | PROT_WRITE,
+                             MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+            if (big != MAP_FAILED)
+                memset(big, 1, REAP_MAPPING);
+            *exited = 1;
+#ifdef RSCHED
+            rsched_process_exit();
+#endif
+            _exit(0);
+        }
+        while (!*exited)
+            sched_yield();
+        int status = 0;
+        pid_t r = waitpid(child, &status, WNOHANG);
+        if (r == 0) {
+            late = 1;
+            while (waitpid(child, &status, 0) < 0 && errno == EINTR)
+                ;
+        } else if (r != child) {
+            return fail("waitpid");
+        }
+    }
+    mark(late ? 'L' : 'R');
+    munmap((void *)exited, sizeof *exited);
+    return 0;
+}
+
+#elif defined(CASE_IO_EARLIEST_DEADLINE_FIRST)
+
+/* A worker polls a pipe with a one-second timeout while the main thread
+   sleeps 10 ms and then writes. Once both block, no task can run and one
+   timed wait must expire: the sleep's deadline comes first, so the main
+   thread always writes before the poll times out ("R"). Expiring the poll
+   first ("T") would be a timeout real time never produces, as when ab's
+   30-second timeout fired before Apache's one-second maintenance tick. */
+#define EXPECTED_TRACES 1
+static int edf_pipe[2];
+
+static void *edf_poller(void *arg) {
+    (void)arg;
+    struct pollfd pfd = {.fd = edf_pipe[0], .events = POLLIN};
+    int r = poll(&pfd, 1, 1000);
+    mark(r == 1 ? 'R' : 'T');
+    return (void *)(long)(r < 0);
+}
+
+static int run_once(void) {
+    if (pipe(edf_pipe) != 0)
+        return fail("pipe");
+    pthread_t worker;
+    if (pthread_create(&worker, 0, edf_poller, 0) != 0)
+        return fail("pthread_create");
+    struct timespec ten_ms = {0, 10 * 1000 * 1000};
+    nanosleep(&ten_ms, 0);
+    int bad = write(edf_pipe[1], "x", 1) != 1;
+    void *worker_result;
+    pthread_join(worker, &worker_result);
+    close(edf_pipe[0]);
+    close(edf_pipe[1]);
+    return bad || worker_result != 0;
+}
+
+#elif defined(CASE_IO_PTHREAD_KILL_INTERRUPTS_READ)
+
+/* A worker reads a pipe nobody writes until the main thread sends it
+   SIGUSR1 with pthread_kill, as Apache's worker and event MPMs wake their
+   listener thread at shutdown. The handler has no SA_RESTART, so the read
+   fails with EINTR ("S") and the worker returns. Left blocked, the worker
+   would wait for a write that never comes while main waits to join it. An
+   idle thread created just before the worker makes the worker inherit the
+   mask main has after rsched parked it to start the idle thread. */
+#define EXPECTED_TRACES 1
+static int kill_pipe[2];
+static volatile sig_atomic_t got_usr1;
+
+static void on_usr1(int sig) {
+    (void)sig;
+    got_usr1 = 1;
+}
+
+static void *kill_idle(void *arg) { return arg; }
+
+static void *kill_reader(void *arg) {
+    (void)arg;
+    char c;
+    ssize_t r = read(kill_pipe[0], &c, 1);
+    int ok = r < 0 && errno == EINTR && got_usr1;
+    if (ok)
+        mark('S');
+    return (void *)(long)!ok;
+}
+
+static int run_once(void) {
+    if (pipe(kill_pipe) != 0)
+        return fail("pipe");
+    got_usr1 = 0;
+    struct sigaction sa = {.sa_handler = on_usr1};
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, 0) != 0)
+        return fail("sigaction");
+    pthread_t idle, worker;
+    if (pthread_create(&idle, 0, kill_idle, 0) != 0 ||
+        pthread_create(&worker, 0, kill_reader, 0) != 0)
+        return fail("pthread_create");
+    sched_yield();
+    int bad = pthread_kill(worker, SIGUSR1) != 0;
+    void *worker_result;
+    pthread_join(worker, &worker_result);
+    pthread_join(idle, 0);
+    close(kill_pipe[0]);
+    close(kill_pipe[1]);
+    signal(SIGUSR1, SIG_DFL);
+    return bad || worker_result != 0;
+}
+
 #else
 #error "define one CASE_IO_* variant"
 #endif
