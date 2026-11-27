@@ -741,6 +741,59 @@ static int run_once(void) {
     return bad || worker_result != 0;
 }
 
+#elif defined(CASE_IO_PTHREAD_KILL_INTERRUPTS_READ)
+
+/* A worker reads a pipe nobody writes until the main thread sends it
+   SIGUSR1 with pthread_kill, as Apache's worker and event MPMs wake their
+   listener thread at shutdown. The handler has no SA_RESTART, so the read
+   fails with EINTR ("S") and the worker returns. Left blocked, the worker
+   would wait for a write that never comes while main waits to join it. An
+   idle thread created just before the worker makes the worker inherit the
+   mask main has after rsched parked it to start the idle thread. */
+#define EXPECTED_TRACES 1
+static int kill_pipe[2];
+static volatile sig_atomic_t got_usr1;
+
+static void on_usr1(int sig) {
+    (void)sig;
+    got_usr1 = 1;
+}
+
+static void *kill_idle(void *arg) { return arg; }
+
+static void *kill_reader(void *arg) {
+    (void)arg;
+    char c;
+    ssize_t r = read(kill_pipe[0], &c, 1);
+    int ok = r < 0 && errno == EINTR && got_usr1;
+    if (ok)
+        mark('S');
+    return (void *)(long)!ok;
+}
+
+static int run_once(void) {
+    if (pipe(kill_pipe) != 0)
+        return fail("pipe");
+    got_usr1 = 0;
+    struct sigaction sa = {.sa_handler = on_usr1};
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, 0) != 0)
+        return fail("sigaction");
+    pthread_t idle, worker;
+    if (pthread_create(&idle, 0, kill_idle, 0) != 0 ||
+        pthread_create(&worker, 0, kill_reader, 0) != 0)
+        return fail("pthread_create");
+    sched_yield();
+    int bad = pthread_kill(worker, SIGUSR1) != 0;
+    void *worker_result;
+    pthread_join(worker, &worker_result);
+    pthread_join(idle, 0);
+    close(kill_pipe[0]);
+    close(kill_pipe[1]);
+    signal(SIGUSR1, SIG_DFL);
+    return bad || worker_result != 0;
+}
+
 #else
 #error "define one CASE_IO_* variant"
 #endif

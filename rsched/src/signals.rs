@@ -17,6 +17,9 @@
 //! it. SIGKILL cannot be held: the sender waits for the target to die and
 //! retires it.
 //!
+//! `pthread_kill` works the same way for one thread of the caller's own
+//! process ([`rsched_pthread_kill`]).
+//!
 //! Not modeled: a signal does not interrupt mutex, semaphore, or condition
 //! variable waits, so a process blocked only in those handles it once it
 //! gets the lock; stop signals do not stop a process; and signals the
@@ -136,6 +139,22 @@ pub(crate) fn inherit(held: Option<u64>) {
     }
 }
 
+/// In a new thread: takes over its creator's held state. The thread starts
+/// with its creator's signal mask, which is rsched's blocked mask when the
+/// creator's signals were held; its program mask is the creator's. Without
+/// this, the thread's first [`hold`] would save the blocked mask as the
+/// program's, and no signal would ever run in it. Also forgets a held state
+/// left by an exited thread with the same id.
+pub(crate) fn adopt(held: Option<u64>) {
+    let Some(idx) = entry(held.is_some()) else {
+        return;
+    };
+    if let Some(mask) = held {
+        HELD_MASKS[idx].store(mask, Ordering::Relaxed);
+    }
+    HELD[idx].store(held.is_some(), Ordering::Relaxed);
+}
+
 /// The program's mask, if [`hold`] blocked signals in this thread; it no
 /// longer counts as held.
 fn take_held() -> Option<u64> {
@@ -148,6 +167,13 @@ fn take_held() -> Option<u64> {
 /// Whether a signal that the program's mask lets through is pending while
 /// rsched holds signals in this thread, so an interruptible wait must not
 /// block.
+/// Whether `task`, the caller, must not block in an interruptible wait
+/// because a signal is pending for it (see [`pending`]) or, under coro,
+/// was sent to it while it was not blocked (see [`rsched_pthread_kill`]).
+pub(crate) unsafe fn pending_for(task: crate::task_provider::TaskHandle) -> bool {
+    pending() || (cfg!(feature = "coro") && task.is_interrupted())
+}
+
 pub(crate) unsafe fn pending() -> bool {
     let Some(idx) = entry(false) else {
         return false;
@@ -241,6 +267,10 @@ pub(crate) unsafe fn deliver(restartable: bool) -> bool {
     // Handlers run here, as if called from the program, so that the
     // functions they call reach rsched's models.
     crate::with_outer_depth(|| sigprocmask(libc::SIG_SETMASK, &mask, core::ptr::null_mut()));
+    if cfg!(feature = "coro") && handled {
+        let restart_bit = if restarts { CORO_HANDLED_RESTARTS } else { 0 };
+        CORO_HANDLED.store(CORO_HANDLED_RAN | restart_bit, Ordering::Relaxed);
+    }
     handled && !(restartable && restarts)
 }
 
@@ -252,7 +282,15 @@ pub(crate) unsafe fn interrupts(restartable: bool) -> bool {
     let caller = crate::my_pt();
     let interrupted = crate::st().threads.contains(&caller) && crate::st().task(caller).take_interrupted();
     crate::rsched_gunlock();
-    interrupted && deliver(restartable)
+    if !interrupted {
+        return false;
+    }
+    let ran_here = deliver(restartable);
+    // Under coro, the handler may have run in another task (see
+    // CORO_HANDLED).
+    let record = CORO_HANDLED.swap(0, Ordering::Relaxed);
+    ran_here
+        || (record & CORO_HANDLED_RAN != 0 && !(restartable && record & CORO_HANDLED_RESTARTS != 0))
 }
 
 /// Waits in the kernel until process `pid` has died.
@@ -278,6 +316,69 @@ pub(crate) unsafe fn wait_dead(pid: libc::pid_t) {
     ) < 0
     {}
     raw_syscall6(libc::SYS_close, fd, 0, 0, 0, 0, 0);
+}
+
+/// Under coro, every task of a process shares one kernel thread, so a
+/// signal sent to one task's thread may run its handler in whichever task
+/// returns to the program first. That task records what ran here, and the
+/// interrupted task takes the record if no handler ran in it.
+static CORO_HANDLED: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+const CORO_HANDLED_RAN: u8 = 1;
+
+/// Forgets handlers that ran before a task was interrupted, so they do not
+/// make its wait fail.
+pub(crate) fn forget_coro_handled() {
+    CORO_HANDLED.store(0, Ordering::Relaxed);
+}
+const CORO_HANDLED_RESTARTS: u8 = 2;
+
+/// `pthread_kill`, as a scheduling point: sends `sig` to `thread` and, when
+/// the thread is a task blocked in an interruptible wait, makes it runnable
+/// so it handles the signal there, as for [`rsched_kill`]. Under coro the
+/// signal goes to the process's one kernel thread, since a task's tid is
+/// not a kernel thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rsched_pthread_kill(thread: libc::pthread_t, sig: c_int) -> c_int {
+    crate::ensure_init();
+    hold();
+    crate::rsched_glock();
+    crate::sync::kill_point(crate::return_address());
+    let target = thread as crate::PthreadT;
+    let scheduled = crate::st().threads.contains(&target);
+    let r = if cfg!(feature = "coro") {
+        // Every thread is a task, and its pthread_t a task key that glibc's
+        // pthread_kill cannot use. One that is no longer scheduled has
+        // exited. Signals 32 and 33 are glibc's own, as glibc refuses too.
+        if !scheduled {
+            libc::ESRCH
+        } else if !(0..=64).contains(&sig) || sig == 32 || sig == 33 {
+            libc::EINVAL
+        } else {
+            // Only handlers that run from now on count for the target.
+            CORO_HANDLED.store(0, Ordering::Relaxed);
+            let pid = raw_syscall6(libc::SYS_getpid, 0, 0, 0, 0, 0, 0);
+            let tid = raw_syscall6(libc::SYS_gettid, 0, 0, 0, 0, 0, 0);
+            -(raw_syscall6(libc::SYS_tgkill, pid, tid, sig.into(), 0, 0, 0) as c_int)
+        }
+    } else {
+        crate::with_internal_depth(|| libc::pthread_kill(thread, sig))
+    };
+    if r == 0 && sig != 0 && scheduled {
+        let task = crate::st().task(target);
+        // Under coro the handler may run in another task before the target
+        // blocks, so nothing is pending when it does: mark it interrupted
+        // now, and its next interruptible wait fails at once. This matches
+        // native, where the signal stays pending in the target until a
+        // wait, since rsched delivers held signals only on return from
+        // calls that can be interrupted (see the README).
+        if !task.interrupt() && cfg!(feature = "coro") {
+            task.set_interrupted();
+        }
+    }
+    crate::rsched_gunlock();
+    // Back to the program: a signal the thread sent itself runs now.
+    deliver(true);
+    r
 }
 
 /// `kill`, as a scheduling point: sends `sig` and wakes the scheduled

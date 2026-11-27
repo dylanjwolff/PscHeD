@@ -115,6 +115,7 @@ int rsched_execv(const char *, char *const []);
 int rsched_execve(const char *, char *const [], char *const []);
 pid_t rsched_waitpid(pid_t, int *, int);
 int   rsched_kill(pid_t, int);
+int   rsched_pthread_kill(pthread_t, int);
 
 /* File and socket operations.  Each is a scheduling point; on a blocking
    descriptor, the calling task blocks until the operation can proceed. */
@@ -213,6 +214,7 @@ int rsched_dup3(int, int, int);
 #define execve                  rsched_execve
 #define waitpid                 rsched_waitpid
 #define kill                    rsched_kill
+#define pthread_kill            rsched_pthread_kill
 #define read                    rsched_read
 #define write                   rsched_write
 #define readv                   rsched_readv

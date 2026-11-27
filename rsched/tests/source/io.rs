@@ -175,6 +175,12 @@ fn a_child_that_handed_over_the_schedule_is_reapable() {
 }
 
 #[test]
+fn pthread_kill_interrupts_a_blocked_read_in_its_target() {
+    let stdout = run_case("CASE_IO_PTHREAD_KILL_INTERRUPTS_READ", &[]);
+    assert!(stdout.contains("traces=1: S"), "{stdout}");
+}
+
+#[test]
 fn the_earliest_deadline_expires_first() {
     let stdout = run_case("CASE_IO_EARLIEST_DEADLINE_FIRST", &[]);
     assert!(stdout.contains("traces=1: R"), "{stdout}");

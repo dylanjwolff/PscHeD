@@ -748,6 +748,7 @@ const PTHREAD_REWRITES: &[(&str, &str)] = &[
     ),
     ("pthread_rwlock_unlock", "rsched_pthread_rwlock_unlock"),
     ("pthread_once", "rsched_pthread_once"),
+    ("pthread_kill", "rsched_pthread_kill"),
     ("nanosleep", "rsched_nanosleep"),
     ("clock_nanosleep", "rsched_clock_nanosleep"),
     ("usleep", "rsched_usleep"),
@@ -1361,6 +1362,13 @@ const MUSL_REWRITES: &[LibcRewrite] = &[
         public: "pthread_once",
         real: "__rsched_real_pthread_once",
         rsched: "rsched_pthread_once",
+        diverges: false,
+    },
+    LibcRewrite {
+        implementation: "pthread_kill",
+        public: "pthread_kill",
+        real: "__rsched_real_pthread_kill",
+        rsched: "rsched_pthread_kill",
         diverges: false,
     },
     LibcRewrite {

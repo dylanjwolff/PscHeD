@@ -1643,6 +1643,9 @@ pub(crate) struct StartArg {
     /// Signaled (with GMTX held) once the new thread has registered itself.
     pub(crate) ready_cond: CondT,
     pub(crate) ready: bool,
+    /// The creator's program signal mask, if its signals were held (see
+    /// `signals::adopt`).
+    pub(crate) held: Option<u64>,
 }
 unsafe impl Send for StartArg {}
 
@@ -1727,6 +1730,7 @@ pub(crate) extern "C" fn trampoline(raw: *mut libc::c_void) -> *mut libc::c_void
         let sa = &mut *(raw as *mut StartArg);
         let routine = sa.routine;
         let arg = sa.arg;
+        signals::adopt(sa.held);
 
         let self_pt = libc::pthread_self();
         #[cfg(not(feature = "instrumented-libc"))]
@@ -1821,6 +1825,7 @@ pub unsafe extern "C" fn rsched_pthread_create(
         arg,
         ready_cond: libc::PTHREAD_COND_INITIALIZER,
         ready: false,
+        held: None,
     }));
 
     rsched_glock();
@@ -1831,6 +1836,9 @@ pub unsafe extern "C" fn rsched_pthread_create(
     // thread.  Doing this before the real create keeps registration order
     // deterministic instead of letting the old and new children race to GMTX.
     st().drain_pending_child();
+    // Read after draining, which can park this thread and hold its signals:
+    // the new thread starts with the mask the creator has now.
+    (*sa).held = signals::held_mask();
 
     let r = st().task_provider.create(thread, attr, sa);
 

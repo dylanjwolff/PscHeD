@@ -154,7 +154,12 @@ among waits that tie, and moves the clock to it. A timeout is never reported
 early, a later deadline never expires before an earlier one, and which wait
 expires and when depends only on the schedule.
 
-`kill` (and `killpg`) between scheduled processes is a scheduling point.
+`kill` (and `killpg`) between scheduled processes is a scheduling point, and
+so is `pthread_kill` to a thread of the caller's process. A signal sent to
+a thread that is not blocked stays pending until it next enters an
+interruptible wait, which then fails with EINTR, even if the thread could
+have handled it earlier: rsched delivers held signals only on return from
+calls that can be interrupted.
 rsched blocks signals in a thread while it parks it, so a signal runs only
 once the thread holds the turn and returns to the program. The sender wakes
 the target's tasks blocked on I/O or in a sleep; the woken task runs the

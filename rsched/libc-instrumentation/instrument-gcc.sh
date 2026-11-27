@@ -294,6 +294,7 @@ add_rewrite "_exit" "_exit" "__rsched_real_process_exit" "rsched_process_exit_st
 add_rewrite "__waitpid" "waitpid" "__rsched_real_waitpid" "rsched_waitpid" "__GI___waitpid"
 # killpg calls __kill, so both names reach rsched (see src/signals.rs).
 add_rewrite "__kill" "kill" "__rsched_real_kill" "rsched_kill" ""
+add_rewrite "__pthread_kill" "pthread_kill" "__rsched_real_pthread_kill" "rsched_pthread_kill" ""
 add_rewrite "__libc_fork" "fork" "__rsched_real_fork" "rsched_fork" "__GI___fork"
 add_io_rewrite "__libc_read" "read" "rsched_read"
 add_io_rewrite "__libc_write" "write" "rsched_write"

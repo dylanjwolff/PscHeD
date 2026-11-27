@@ -119,9 +119,32 @@ impl TaskHandle {
         self.with_task(|task| task.sleeping = u8::from(sleeping));
     }
 
+    /// Makes the task runnable and marks it interrupted when it is blocked
+    /// in an interruptible wait: I/O, a sleep, or a kernel lock, which
+    /// waits like a sleep. Returns whether it was.
+    pub(crate) unsafe fn interrupt(self) -> bool {
+        self.with_task(|task| {
+            let waits = task.active != 0
+                && task.is_blocking != 0
+                && (task.io_wait != 0 || task.sleeping != 0);
+            if waits {
+                task.is_blocking = 0;
+                task.interrupted = 1;
+                // Under coro, only handlers that run from now on count.
+                crate::signals::forget_coro_handled();
+            }
+            waits
+        })
+    }
+
     /// Marks the task as interrupted by a signal before it could block.
     pub(crate) unsafe fn set_interrupted(self) {
         self.with_task(|task| task.interrupted = 1);
+    }
+
+    /// Whether the task is marked interrupted, without clearing it.
+    pub(crate) unsafe fn is_interrupted(self) -> bool {
+        self.with_task(|task| task.interrupted != 0)
     }
 
     /// Whether a signal woke the task from an interruptible wait; clears it.
@@ -163,14 +186,7 @@ pub(crate) unsafe fn kill_targets(pid: libc::pid_t) -> Vec<(i32, libc::pid_t)> {
 pub(crate) unsafe fn interrupt_process(slot: i32) {
     let ps = PROCESS_SHARED.load(Ordering::Acquire);
     for id in 0..(*ps).task_count.min(MAX_TASKS) {
-        let task = &mut (*ps).tasks[id];
-        if task.active != 0
-            && task.domain == slot
-            && task.is_blocking != 0
-            && (task.io_wait != 0 || task.sleeping != 0)
-        {
-            task.is_blocking = 0;
-            task.interrupted = 1;
+        if (*ps).tasks[id].domain == slot && TaskHandle::new(id).interrupt() {
             process_log(format_args!("interrupted task {id} in slot {slot}"));
         }
     }
@@ -1797,7 +1813,7 @@ pub(crate) unsafe fn io_wait(task: TaskHandle, waits: &Epoll, switch: impl FnOnc
         return false;
     }
     // A signal sent before the task got here interrupts the wait at once.
-    if crate::signals::pending() {
+    if crate::signals::pending_for(task) {
         task.set_interrupted();
         let _ = io_epoll().delete(waits.as_raw_fd());
         return true;

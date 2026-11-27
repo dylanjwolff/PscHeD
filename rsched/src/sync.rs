@@ -95,7 +95,7 @@ impl State {
         self.t(caller).timed_out = false;
         let sleeping = matches!(on, WaitOn::Sleep);
         // A signal sent before the task got here interrupts a sleep at once.
-        if sleeping && crate::signals::pending() {
+        if sleeping && crate::signals::pending_for(self.task(caller)) {
             self.task(caller).set_interrupted();
             return false;
         }
